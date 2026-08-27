@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -125,6 +126,335 @@ class _DashboardState extends State<Dashboard> {
   bool _aisSubscribed = false;
   final _aisTargets = <String, AisTarget>{};
 
+  // Live Signal K zone alarms — keyed by the path under "notifications."
+  // (e.g. "environment.wind.speedApparent"), only entries currently in an
+  // alert/warn/alarm/emergency state. See AlarmEngine below for how this
+  // combines with custom alarms into what's actually shown/sounded.
+  final _notifications = <String, ({String state, String? message})>{};
+  static const _activeAlertStates = {'alert', 'warn', 'alarm', 'emergency'};
+  AudioPlayer? _alarmPlayer;
+  bool _alarmSoundPlaying = false;
+  final _mutedAlarms = <String>{}; // acknowledged-until-it-clears, no auto-unmute
+
+  void _routeNotification(String path, dynamic value) {
+    if (value is! Map) {
+      _notifications.remove(path);
+      return;
+    }
+    final state = value['state'] as String?;
+    final message = value['message'] as String?;
+    if (state == null || !_activeAlertStates.contains(state)) {
+      _notifications.remove(path);
+      _mutedAlarms.remove(path);
+      return;
+    }
+    _notifications[path] = (state: state, message: message);
+  }
+
+  // ─── Alarm engine ──────────────────────────────────────────────────────────
+  // Combines Signal K zone notifications (if enabled) with client-side
+  // custom rules into one list the UI (card highlight, header bell, sound)
+  // reads from — neither source knows about the other beyond this point.
+  List<({String key, String label, bool sound, bool muted})> get _activeAlarms {
+    final out = <({String key, String label, bool sound, bool muted})>[];
+    if (settings.alarmsUseSkZones) {
+      for (final entry in _notifications.entries) {
+        final cfg = settings.skZoneAlarms[entry.key];
+        if (cfg != null && !cfg.enabled) continue;
+        final key = 'sk:${entry.key}';
+        out.add((
+          key: key,
+          label: entry.value.message ?? entry.key,
+          sound: cfg?.sound ?? true,
+          muted: _mutedAlarms.contains(key),
+        ));
+      }
+    }
+    for (final rule in settings.customAlarms) {
+      if (!rule.enabled || !_customAlarmTriggered(rule)) continue;
+      final key = 'custom:${rule.id}';
+      out.add((
+        key: key,
+        label: rule.label,
+        sound: rule.sound,
+        muted: _mutedAlarms.contains(key),
+      ));
+    }
+    return out;
+  }
+
+  bool _customAlarmTriggered(CustomAlarmRule rule) {
+    switch (rule.type) {
+      case 'depthBelow':
+        final d = signalK.depthM;
+        return d != null && d < rule.threshold;
+      case 'windAbove':
+        final w = signalK.awsKn;
+        return w != null && w > rule.threshold;
+      default:
+        return false;
+    }
+  }
+
+  bool get _alarmSoundShouldPlay =>
+      _activeAlarms.any((a) => a.sound && !a.muted);
+
+  Future<void> _syncAlarmSound() async {
+    final shouldPlay = _alarmSoundShouldPlay;
+    if (shouldPlay && !_alarmSoundPlaying) {
+      _alarmSoundPlaying = true;
+      _alarmPlayer ??= AudioPlayer();
+      await _alarmPlayer!.setReleaseMode(ReleaseMode.loop);
+      await _alarmPlayer!.play(AssetSource('sound/alarm.wav'));
+    } else if (!shouldPlay && _alarmSoundPlaying) {
+      _alarmSoundPlaying = false;
+      await _alarmPlayer?.stop();
+    }
+  }
+
+  void _muteAlarm(String key) {
+    setState(() => _mutedAlarms.add(key));
+    unawaited(_syncAlarmSound());
+  }
+
+  // Crude keyword mapping from an alarm's underlying path (or custom-rule
+  // type) to the header tab it belongs to — good enough to point the user
+  // at the right screen without a hardcoded table for every possible SK path.
+  String? _pageForAlarmKey(String key) {
+    if (key.startsWith('custom:')) {
+      final id = key.substring('custom:'.length);
+      for (final rule in settings.customAlarms) {
+        if (rule.id != id) continue;
+        return switch (rule.type) {
+          'depthBelow' => 'NAV',
+          'windAbove' => 'VNT',
+          _ => null,
+        };
+      }
+      return null;
+    }
+    final p = key.substring('sk:'.length).toLowerCase();
+    if (p.contains('anchor')) return 'ANC';
+    if (p.contains('wind')) return 'VNT';
+    if (p.contains('depth')) return 'NAV';
+    if (p.contains('electrical') || p.contains('batter')) return 'PWR';
+    if (p.contains('tank')) return 'TNK';
+    if (p.contains('outside') ||
+        p.contains('interior') ||
+        p.contains('pressure') ||
+        p.contains('humidity')) {
+      return 'MET';
+    }
+    return null;
+  }
+
+  // Per-card highlight — only wired up for depth so far (the concrete
+  // example asked for); extend this switch for other cards as needed.
+  bool _isCardAlarming(String cardId) {
+    for (final a in _activeAlarms) {
+      if (a.key.startsWith('custom:')) {
+        final id = a.key.substring('custom:'.length);
+        for (final rule in settings.customAlarms) {
+          if (rule.id == id && rule.type == 'depthBelow' && cardId == 'depth') {
+            return true;
+          }
+        }
+      } else if (cardId == 'depth' &&
+          a.key.substring('sk:'.length).toLowerCase().contains('depth')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Set<String> get _alarmPageIds => {
+    for (final a in _activeAlarms) ?_pageForAlarmKey(a.key),
+  };
+
+  Future<CustomAlarmRule?> _showAddCustomAlarmDialog(BuildContext context) {
+    var type = customAlarmTypes.first;
+    final thresholdController = TextEditingController(text: '5');
+    return showDialog<CustomAlarmRule>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => Dialog(
+          backgroundColor: cBg,
+          insetPadding: const EdgeInsets.all(24),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Nueva alarma personalizada',
+                    style: TextStyle(
+                      color: cText,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButton<String>(
+                    value: type,
+                    isExpanded: true,
+                    dropdownColor: cPanel,
+                    style: const TextStyle(color: cText),
+                    items: [
+                      for (final t in customAlarmTypes)
+                        DropdownMenuItem(
+                          value: t,
+                          child: Text(customAlarmTypeLabel(t)),
+                        ),
+                    ],
+                    onChanged: (v) => setSt(() => type = v ?? type),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: thresholdController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'Umbral (${customAlarmTypeUnit(type)})',
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('Cancelar'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: () {
+                          final threshold = double.tryParse(
+                            thresholdController.text.trim().replaceAll(',', '.'),
+                          );
+                          if (threshold == null) return;
+                          Navigator.of(ctx).pop(
+                            CustomAlarmRule(
+                              id: DateTime.now().millisecondsSinceEpoch.toString(),
+                              type: type,
+                              threshold: threshold,
+                            ),
+                          );
+                        },
+                        child: const Text('Añadir'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAlarmsList(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) {
+          final alarms = _activeAlarms;
+          return Dialog(
+            backgroundColor: cBg,
+            insetPadding: const EdgeInsets.all(24),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420, maxHeight: 420),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Alarmas activas',
+                            style: TextStyle(
+                              color: cText,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: cMuted),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ],
+                    ),
+                    if (alarms.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                        child: Text(
+                          'Sin alarmas activas.',
+                          style: TextStyle(color: cMuted),
+                        ),
+                      ),
+                    Flexible(
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final a in alarms)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.warning_amber_rounded,
+                                    color: cRed,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      a.label,
+                                      style: const TextStyle(
+                                        color: cText,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                  ),
+                                  if (a.sound && !a.muted)
+                                    TextButton(
+                                      onPressed: () {
+                                        _muteAlarm(a.key);
+                                        setSt(() {});
+                                      },
+                                      child: const Text('Silenciar'),
+                                    ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   // B&G-style circular dampers for wind instruments
   final _twsDamp = _WindCircularDamper(tau: 5.0);
   final _twaDamp = _WindCircularDamper(tau: 5.0);
@@ -136,6 +466,7 @@ class _DashboardState extends State<Dashboard> {
   // 30-min rolling history for wind trend + gusts (raw, undamped values)
   final _twsHistory = _WindHistory();
   final _awsHistory = _WindHistory();
+  final _depthTrend = _DepthTrendTracker();
 
   @override
   void initState() {
@@ -263,6 +594,30 @@ class _DashboardState extends State<Dashboard> {
         prefs.getBool('phoneAttitudeInvertRoll') ??
         settings.phoneAttitudeInvertRoll;
     settings.navGridColumns = prefs.getInt('navGridColumns') ?? settings.navGridColumns;
+    settings.alarmsUseSkZones =
+        prefs.getBool('alarmsUseSkZones') ?? settings.alarmsUseSkZones;
+    final skZoneJson = prefs.getString('skZoneAlarmsJson');
+    if (skZoneJson != null) {
+      try {
+        final map = jsonDecode(skZoneJson) as Map<String, dynamic>;
+        settings.skZoneAlarms = map.map(
+          (k, v) => MapEntry(k, SkZoneAlarmSetting.fromJson(v as Map<String, dynamic>)),
+        );
+      } catch (_) {
+        /* keep defaults if corrupted */
+      }
+    }
+    final customAlarmsJson = prefs.getString('customAlarmsJson');
+    if (customAlarmsJson != null) {
+      try {
+        final list = jsonDecode(customAlarmsJson) as List;
+        settings.customAlarms = list
+            .map((e) => CustomAlarmRule.fromJson(e as Map<String, dynamic>))
+            .toList();
+      } catch (_) {
+        /* keep defaults if corrupted */
+      }
+    }
     final navJson = prefs.getString('navCardIdsJson');
     if (navJson != null) {
       try {
@@ -305,6 +660,15 @@ class _DashboardState extends State<Dashboard> {
     );
     await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
     await prefs.setInt('navGridColumns', settings.navGridColumns);
+    await prefs.setBool('alarmsUseSkZones', settings.alarmsUseSkZones);
+    await prefs.setString(
+      'skZoneAlarmsJson',
+      jsonEncode(settings.skZoneAlarms.map((k, v) => MapEntry(k, v.toJson()))),
+    );
+    await prefs.setString(
+      'customAlarmsJson',
+      jsonEncode(settings.customAlarms.map((r) => r.toJson()).toList()),
+    );
     await prefs.setBool('demoMode', settings.demoMode);
     await prefs.setBool('usePhoneHeel', settings.usePhoneHeel);
     await prefs.setBool(
@@ -404,7 +768,11 @@ class _DashboardState extends State<Dashboard> {
       h[c.fridge2Path!] = (v) => signalK.fridge2TempK = _num(v);
     }
     if (c.depthPath != null && c.depthPath!.isNotEmpty) {
-      h[c.depthPath!] = (v) => signalK.depthM = _num(v);
+      h[c.depthPath!] = (v) {
+        final n = _num(v);
+        signalK.depthM = n;
+        _depthTrend.add(n);
+      };
     }
     for (final t in c.tanks.where((t) => t.enabled)) {
       h[t.skPath] = (v) => signalK.tanks[t.tankKey] = _pct(v);
@@ -473,6 +841,7 @@ class _DashboardState extends State<Dashboard> {
       'electrical.batteries.bowthruster.voltage',
       'electrical.batteries.bowthruster.temperature',
       'electrical.venus.dcPower',
+      'notifications.*',
       ..._dynamicHandlers.keys,
     ];
     channel?.sink.add(
@@ -530,6 +899,7 @@ class _DashboardState extends State<Dashboard> {
         }
       });
     }
+    if (changed) unawaited(_syncAlarmSound());
   }
 
   void _routeAisValue(String context, String path, dynamic value) {
@@ -626,6 +996,10 @@ class _DashboardState extends State<Dashboard> {
     final dynamicHandler = _dynamicHandlers[path];
     if (dynamicHandler != null) {
       dynamicHandler(value);
+      return true;
+    }
+    if (path.startsWith('notifications.')) {
+      _routeNotification(path.substring('notifications.'.length), value);
       return true;
     }
     final n = _num(value);
@@ -818,6 +1192,7 @@ class _DashboardState extends State<Dashboard> {
           : (signalK.sogKn! - 0.2 + jitter(0.1)).clamp(0, 11);
       signalK.heelDeg = osc(31, 9, 1.1) + jitter(0.4);
       signalK.depthM = (14 + osc(70, 6, 2) + jitter(0.3)).clamp(2, 60);
+      _depthTrend.add(signalK.depthM);
 
       // Wind
       signalK.awsKn = (13 + osc(40, 3.5, 0) + jitter(0.4)).clamp(0, 30);
@@ -864,6 +1239,7 @@ class _DashboardState extends State<Dashboard> {
 
       _tickDemoAis(t);
     });
+    unawaited(_syncAlarmSound());
   }
 
   void _tickDemoAis(double t) {
@@ -1352,6 +1728,7 @@ class _DashboardState extends State<Dashboard> {
     _influxHostController?.dispose();
     _influxOrgController?.dispose();
     _influxTokenController?.dispose();
+    _alarmPlayer?.dispose();
     super.dispose();
   }
 
@@ -1474,6 +1851,9 @@ class _DashboardState extends State<Dashboard> {
                             selected: page,
                             status: signalK.status,
                             ok: signalK.connected,
+                            alarmPageIds: _alarmPageIds,
+                            alarmCount: _activeAlarms.length,
+                            onBellTap: () => _showAlarmsList(context),
                             onSelect: (i) {
                               _onPageChange(i);
                               _pageController.animateToPage(
@@ -1624,6 +2004,7 @@ class _DashboardState extends State<Dashboard> {
         color: data.color,
         zoom: _showZoom,
         graphMetrics: data.graphMetrics,
+        trend: data.trend,
         onTap: data.id == 'heel'
             ? () => _showAttitudeGauges(context)
             : data.id == 'gps'
@@ -1687,7 +2068,8 @@ class _DashboardState extends State<Dashboard> {
           title: 'Profundidad',
           value: fmt(depth, 1, ''),
           unit: 'm',
-          color: depthColor(depth),
+          color: _isCardAlarming('depth') ? cRed : depthColor(depth),
+          trend: depth == null ? null : _depthTrend.direction,
         );
       case 'heel':
         return NavCardData(
@@ -3029,7 +3411,7 @@ class _DashboardState extends State<Dashboard> {
     }
 
     return DefaultTabController(
-      length: 5,
+      length: 6,
       child: Column(
         children: [
           const Material(
@@ -3045,6 +3427,7 @@ class _DashboardState extends State<Dashboard> {
                 Tab(text: 'SENSORES'),
                 Tab(text: 'HISTÓRICO'),
                 Tab(text: 'PANTALLA'),
+                Tab(text: 'ALARMAS'),
                 Tab(text: 'DIAGNÓSTICO'),
               ],
             ),
@@ -3497,6 +3880,102 @@ class _DashboardState extends State<Dashboard> {
                             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
                         ),
+                      ],
+                    ),
+                  ),
+                  // ── Tab: Alarmas ────────────────────────────────────────────────────
+                  SingleChildScrollView(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('FUENTE', style: lbl),
+                        gap,
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          value: settings.alarmsUseSkZones,
+                          onChanged: (v) {
+                            setSt(() => settings.alarmsUseSkZones = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                            unawaited(_syncAlarmSound());
+                          },
+                          title: const Text(
+                            'Usar zonas de Signal K',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          subtitle: const Text(
+                            'Zonas configuradas en el propio servidor (notifications.*)',
+                            style: TextStyle(fontSize: 11, color: cMuted),
+                          ),
+                        ),
+                        if (settings.alarmsUseSkZones) ...[
+                          const SizedBox(height: 10),
+                          const Text('ALARMAS DETECTADAS EN ZONA', style: lbl),
+                          gap,
+                          if (_notifications.isEmpty)
+                            const Text(
+                              'Ninguna alarma detectada todavía.',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            )
+                          else
+                            for (final path in _notifications.keys)
+                              _SkZoneAlarmRow(
+                                path: path,
+                                state: _notifications[path]!.state,
+                                setting: settings.skZoneAlarms[path],
+                                onChanged: (next) {
+                                  setSt(() => settings.skZoneAlarms[path] = next);
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                  unawaited(_syncAlarmSound());
+                                },
+                              ),
+                        ],
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            const Text('ALARMAS PERSONALIZADAS', style: lbl),
+                            const Spacer(),
+                            IconButton(
+                              icon: const Icon(Icons.add_circle_outline, color: cCyan),
+                              onPressed: () async {
+                                final rule = await _showAddCustomAlarmDialog(context);
+                                if (rule == null) return;
+                                setSt(() => settings.customAlarms.add(rule));
+                                setState(() {});
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                          ],
+                        ),
+                        if (settings.customAlarms.isEmpty)
+                          const Text(
+                            'Ninguna. Toca + para añadir una.',
+                            style: TextStyle(color: cMuted, fontSize: 12),
+                          )
+                        else
+                          for (final rule in settings.customAlarms)
+                            _CustomAlarmRow(
+                              rule: rule,
+                              onChanged: () {
+                                setSt(() {});
+                                setState(() {});
+                                unawaited(_saveSettings());
+                                unawaited(_syncAlarmSound());
+                              },
+                              onDelete: () {
+                                setSt(
+                                  () => settings.customAlarms.removeWhere(
+                                    (r) => r.id == rule.id,
+                                  ),
+                                );
+                                setState(() {});
+                                unawaited(_saveSettings());
+                                unawaited(_syncAlarmSound());
+                              },
+                            ),
                       ],
                     ),
                   ),
@@ -5026,23 +5505,32 @@ class _Header extends StatelessWidget {
     required this.status,
     required this.ok,
     required this.onSelect,
+    this.alarmPageIds = const {},
+    this.alarmCount = 0,
+    this.onBellTap,
   });
   final List<(String, IconData, Widget)> pages;
   final int selected;
   final String status;
   final bool ok;
   final ValueChanged<int> onSelect;
+  final Set<String> alarmPageIds;
+  final int alarmCount;
+  final VoidCallback? onBellTap;
 
   Widget _tab(int i) {
     final active = selected == i;
-    final color = active ? cCyan : cMuted;
+    final alarming = alarmPageIds.contains(pages[i].$1);
+    final color = alarming ? cRed : (active ? cCyan : cMuted);
     return GestureDetector(
       onTap: () => onSelect(i),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: active
-            ? const BoxDecoration(
-                border: Border(bottom: BorderSide(color: cCyan, width: 3)),
+            ? BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: alarming ? cRed : cCyan, width: 3),
+                ),
               )
             : null,
         child: Column(
@@ -5055,7 +5543,9 @@ class _Header extends StatelessWidget {
               style: TextStyle(
                 color: color,
                 fontSize: 11,
-                fontWeight: active ? FontWeight.w800 : FontWeight.w500,
+                fontWeight: active || alarming
+                    ? FontWeight.w800
+                    : FontWeight.w500,
                 letterSpacing: 0.5,
               ),
             ),
@@ -5080,6 +5570,42 @@ class _Header extends StatelessWidget {
           ),
           if (kIsWeb) const _FullscreenButton(),
           if (kIsWeb) const SizedBox(width: 8),
+          if (alarmCount > 0) ...[
+            GestureDetector(
+              onTap: onBellTap,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.notifications_active, color: cRed),
+                  Positioned(
+                    right: -4,
+                    top: -4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      decoration: const BoxDecoration(
+                        color: cRed,
+                        shape: BoxShape.circle,
+                      ),
+                      constraints: const BoxConstraints(
+                        minWidth: 16,
+                        minHeight: 16,
+                      ),
+                      child: Text(
+                        '$alarmCount',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+          ],
           Icon(ok ? Icons.link : Icons.link_off, color: ok ? cGreen : cOrange),
           const SizedBox(width: 8),
           Text(
@@ -5882,6 +6408,7 @@ class MetricCard extends StatelessWidget {
     this.onDoubleTap,
     this.onSecondaryTap,
     this.graphMetrics,
+    this.trend,
   });
 
   final String title;
@@ -5889,6 +6416,7 @@ class MetricCard extends StatelessWidget {
   final String? unit;
   final String? subtitle;
   final Color color;
+  final int? trend; // -1 down, 0 flat, 1 up
   final void Function(
     String title,
     String value,
@@ -5951,6 +6479,14 @@ class MetricCard extends StatelessWidget {
                     Icons.show_chart,
                     size: 13,
                     color: color.withValues(alpha: 0.5),
+                  ),
+                ],
+                if (trend != null && trend != 0) ...[
+                  const SizedBox(width: 4),
+                  Icon(
+                    trend! > 0 ? Icons.arrow_upward : Icons.arrow_downward,
+                    size: 15,
+                    color: color,
                   ),
                 ],
               ],
@@ -7604,6 +8140,115 @@ class WeatherIcon extends StatelessWidget {
   }
 }
 
+// ─── Alarms (CFG tab) ──────────────────────────────────────────────────────
+class _SkZoneAlarmRow extends StatelessWidget {
+  const _SkZoneAlarmRow({
+    required this.path,
+    required this.state,
+    required this.setting,
+    required this.onChanged,
+  });
+  final String path;
+  final String state;
+  final SkZoneAlarmSetting? setting;
+  final ValueChanged<SkZoneAlarmSetting> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = setting?.enabled ?? true;
+    final sound = setting?.sound ?? true;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  path,
+                  style: const TextStyle(color: cText, fontSize: 12),
+                ),
+                Text(
+                  state,
+                  style: const TextStyle(color: cRed, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              sound ? Icons.volume_up : Icons.volume_off,
+              color: enabled ? cCyan : cMuted,
+              size: 18,
+            ),
+            onPressed: !enabled
+                ? null
+                : () => onChanged(
+                    SkZoneAlarmSetting(enabled: enabled, sound: !sound),
+                  ),
+          ),
+          Switch(
+            value: enabled,
+            onChanged: (v) =>
+                onChanged(SkZoneAlarmSetting(enabled: v, sound: sound)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CustomAlarmRow extends StatelessWidget {
+  const _CustomAlarmRow({
+    required this.rule,
+    required this.onChanged,
+    required this.onDelete,
+  });
+  final CustomAlarmRule rule;
+  final VoidCallback onChanged;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            rule.label,
+            style: const TextStyle(color: cText, fontSize: 12),
+          ),
+        ),
+        IconButton(
+          icon: Icon(
+            rule.sound ? Icons.volume_up : Icons.volume_off,
+            color: rule.enabled ? cCyan : cMuted,
+            size: 18,
+          ),
+          onPressed: !rule.enabled
+              ? null
+              : () {
+                  rule.sound = !rule.sound;
+                  onChanged();
+                },
+        ),
+        Switch(
+          value: rule.enabled,
+          onChanged: (v) {
+            rule.enabled = v;
+            onChanged();
+          },
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: cMuted, size: 18),
+          onPressed: onDelete,
+        ),
+      ],
+    ),
+  );
+}
+
 class CardShell extends StatelessWidget {
   const CardShell({
     super.key,
@@ -8055,6 +8700,32 @@ class _AnchorWebViewState extends State<_AnchorWebView>
 
 // ─── Circular exponential damper (B&G-style smoothing) ───────────────────────
 // ─── Wind history buffer (trend + gusts over a rolling window) ───────────────
+/// Confirmed-trend detector for depth (and similar slow-moving values):
+/// a Schmitt-trigger-style hysteresis on top of a light exponential
+/// moving average, so seabed/wave noise doesn't flip the arrow back and
+/// forth — the direction only updates once the smoothed value has moved
+/// by [_thresholdM] from the last confirmed point, and re-anchors there.
+class _DepthTrendTracker {
+  double? _smoothed;
+  double? _confirmedAt;
+  int direction = 0; // -1 bajando, 0 sin tendencia clara, 1 subiendo
+  static const _thresholdM = 0.3;
+  static const _alpha = 0.15;
+
+  void add(double? depth) {
+    if (depth == null) return;
+    _smoothed = _smoothed == null
+        ? depth
+        : _smoothed! + (depth - _smoothed!) * _alpha;
+    _confirmedAt ??= _smoothed;
+    final delta = _smoothed! - _confirmedAt!;
+    if (delta.abs() >= _thresholdM) {
+      direction = delta > 0 ? 1 : -1;
+      _confirmedAt = _smoothed;
+    }
+  }
+}
+
 class _WindHistory {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(minutes: 30);

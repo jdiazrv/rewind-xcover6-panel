@@ -2,6 +2,20 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.11] - 2026-08-27
+
+### Añadido
+- **Sistema de alarmas** (CFG → ALARMAS):
+  - Zonas de Signal K (`notifications.*`): lista en vivo de las alarmas que reporta el servidor, con interruptor de activación y de aviso sonoro por cada una.
+  - Alarmas personalizadas: profundidad menor de X, viento aparente mayor de Y (con decimales), cada una con su propio aviso sonoro.
+  - Aviso sonoro (bucle) mientras haya alguna alarma activa con sonido habilitado, con opción de silenciar individualmente desde la lista de alarmas activas.
+  - Pestaña de cabecera en rojo si esa pantalla tiene una alarma activa; icono de campana con contador visible desde cualquier pantalla; tarjeta de Profundidad en NAV se resalta en rojo si tiene una alarma activa.
+  - La alarma de fondeo (plugin `hoekens-anchor-alarm`) queda cubierta automáticamente en cuanto se activan las zonas de Signal K, sin configuración aparte.
+- **Profundidad con flecha de tendencia**: sube/baja solo cuando el cambio está confirmado (con histéresis), no por oscilaciones puntuales.
+
+### Cambiado
+- Bordes de las tarjetas más marcados.
+
 ## [1.4.10] - 2026-08-27
 
 ### Cambiado

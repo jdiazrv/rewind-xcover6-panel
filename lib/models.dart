@@ -150,6 +150,7 @@ class NavCardData {
     this.unit,
     this.subtitle,
     this.graphMetrics,
+    this.trend,
   });
 
   final String id;
@@ -159,6 +160,70 @@ class NavCardData {
   final String? unit;
   final String? subtitle;
   final List<MetricDef>? graphMetrics;
+  final int? trend; // -1 down, 0 flat, 1 up — confirmed trend, not noise
+}
+
+// ─── Alarms ─────────────────────────────────────────────────────────────────
+class SkZoneAlarmSetting {
+  SkZoneAlarmSetting({this.enabled = true, this.sound = true});
+  bool enabled;
+  bool sound;
+
+  Map<String, dynamic> toJson() => {'enabled': enabled, 'sound': sound};
+  factory SkZoneAlarmSetting.fromJson(Map<String, dynamic> j) =>
+      SkZoneAlarmSetting(
+        enabled: j['enabled'] as bool? ?? true,
+        sound: j['sound'] as bool? ?? true,
+      );
+}
+
+// Custom (client-side) alarm types — evaluated against live SignalKModel
+// values, independent of any Signal K server-side zone configuration.
+const customAlarmTypes = ['depthBelow', 'windAbove'];
+
+String customAlarmTypeLabel(String type) => switch (type) {
+  'depthBelow' => 'Profundidad menor de',
+  'windAbove' => 'Viento (aparente) mayor de',
+  _ => type,
+};
+
+String customAlarmTypeUnit(String type) => switch (type) {
+  'depthBelow' => 'm',
+  'windAbove' => 'kt',
+  _ => '',
+};
+
+class CustomAlarmRule {
+  CustomAlarmRule({
+    required this.id,
+    required this.type,
+    required this.threshold,
+    this.enabled = true,
+    this.sound = true,
+  });
+  final String id;
+  String type;
+  double threshold;
+  bool enabled;
+  bool sound;
+
+  String get label =>
+      '${customAlarmTypeLabel(type)} $threshold ${customAlarmTypeUnit(type)}';
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'type': type,
+    'threshold': threshold,
+    'enabled': enabled,
+    'sound': sound,
+  };
+  factory CustomAlarmRule.fromJson(Map<String, dynamic> j) => CustomAlarmRule(
+    id: j['id'] as String,
+    type: j['type'] as String,
+    threshold: (j['threshold'] as num).toDouble(),
+    enabled: j['enabled'] as bool? ?? true,
+    sound: j['sound'] as bool? ?? true,
+  );
 }
 
 // ─── Data models ──────────────────────────────────────────────────────────────
@@ -563,6 +628,14 @@ class SettingsModel {
   SensorConfig sensorConfig = SensorConfig();
   List<String> navCardIds = List<String>.of(defaultNavCardIds);
   int navGridColumns = 3; // 3 -> 3x2 (6 cards), 4 -> 4x2 (8 cards)
+  // Alarms — see AlarmEngine in main.dart for how these drive live state.
+  bool alarmsUseSkZones = false;
+  // Keyed by the Signal K notification path (e.g.
+  // "notifications.environment.wind.speedApparent") — only paths this app
+  // has actually seen a notification for get an entry; unseen ones default
+  // to enabled+sound so a brand new zone alarm is on by default.
+  Map<String, SkZoneAlarmSetting> skZoneAlarms = {};
+  List<CustomAlarmRule> customAlarms = [];
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted
