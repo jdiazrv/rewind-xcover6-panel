@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.2] - 2026-08-27
+
+### Añadido
+- **NAV personalizable**: mantén pulsada (o doble toque / clic derecho) una tarjeta de la página NAV para cambiarla por otra métrica (SOG, STW, rumbo, COG, profundidad, escora, posición, GPS, CPA, TCPA, hora, VMG). La selección se guarda y persiste entre sesiones.
+
 ## [1.4.1] - 2026-08-27
 
 ### Arreglado

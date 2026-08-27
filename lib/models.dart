@@ -125,6 +125,42 @@ const mSog = MetricDef(
   color: cGreen,
 );
 
+const defaultNavCardIds = ['sog', 'stw', 'heading', 'cog', 'depth', 'heel'];
+const allNavCardIds = [
+  'sog',
+  'stw',
+  'heading',
+  'cog',
+  'depth',
+  'heel',
+  'position',
+  'gps',
+  'cpa',
+  'tcpa',
+  'time',
+  'vmg',
+];
+
+class NavCardData {
+  const NavCardData({
+    required this.id,
+    required this.title,
+    required this.value,
+    required this.color,
+    this.unit,
+    this.subtitle,
+    this.graphMetrics,
+  });
+
+  final String id;
+  final String title;
+  final String value;
+  final Color color;
+  final String? unit;
+  final String? subtitle;
+  final List<MetricDef>? graphMetrics;
+}
+
 // ─── Data models ──────────────────────────────────────────────────────────────
 class SignalKModel {
   bool connected = false;
@@ -508,6 +544,7 @@ class SettingsModel {
   String influxBucket = influxBucketDefault;
   String influxArchiveBucket = influxBucketDefault; // bucket for 7d / 1mes
   SensorConfig sensorConfig = SensorConfig();
+  List<String> navCardIds = List<String>.of(defaultNavCardIds);
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted

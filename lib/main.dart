@@ -228,6 +228,15 @@ class _DashboardState extends State<Dashboard> {
     settings.phoneAttitudeInvertRoll =
         prefs.getBool('phoneAttitudeInvertRoll') ??
         settings.phoneAttitudeInvertRoll;
+    final navJson = prefs.getString('navCardIdsJson');
+    if (navJson != null) {
+      try {
+        final ids = (jsonDecode(navJson) as List).whereType<String>().toList();
+        settings.navCardIds = _validNavSelection(ids);
+      } catch (_) {
+        /* keep defaults if corrupted */
+      }
+    }
     final sensorJson = prefs.getString('sensorConfigJson');
     if (sensorJson != null) {
       try {
@@ -259,6 +268,7 @@ class _DashboardState extends State<Dashboard> {
       'sensorConfigJson',
       jsonEncode(settings.sensorConfig.toJson()),
     );
+    await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
     await prefs.setBool('demoMode', settings.demoMode);
     await prefs.setBool('usePhoneHeel', settings.usePhoneHeel);
     await prefs.setBool(
@@ -1452,64 +1462,401 @@ class _DashboardState extends State<Dashboard> {
 
   // ─── NAV page ───────────────────────────────────────────────────────────────
   Widget _navPage() {
-    final sog = _fresh(signalK.sogKn),
-        stw = _fresh(signalK.stwKn),
-        aws = _freshWind(_dAws),
-        awa = _freshWind(_dAwa);
-    final heading = _fresh(signalK.headingTrueDeg),
-        depth = _fresh(signalK.depthM),
-        heel = _fresh(signalK.heelDeg);
-    return _grid3x2(
-      children: [
-        MetricCard(
+    final selectedIds = _validNavSelection(settings.navCardIds);
+    if (!listEquals(selectedIds, settings.navCardIds)) {
+      settings.navCardIds = selectedIds;
+    }
+    final selected = selectedIds.map(_navCardData).toList();
+    final remaining = allNavCardIds
+        .where((id) => !selectedIds.contains(id))
+        .map(_navCardData)
+        .toList();
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final pageHeight = math.max(320.0, constraints.maxHeight);
+        return Scrollbar(
+          thumbVisibility: true,
+          child: ListView(
+            key: const PageStorageKey<String>('nav-scroll'),
+            primary: false,
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            children: [
+              SizedBox(
+                height: pageHeight,
+                child: _grid3x2(
+                  children: [
+                    for (var i = 0; i < selected.length; i++)
+                      _navMetricCard(selected[i], i),
+                  ],
+                ),
+              ),
+              if (remaining.isNotEmpty)
+                SizedBox(
+                  height: pageHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    child: GridView.builder(
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: remaining.length,
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 8,
+                            mainAxisSpacing: 8,
+                            childAspectRatio: 1.45,
+                          ),
+                      itemBuilder: (context, i) => _navMetricCard(
+                        remaining[i],
+                        selectedIds.length + i,
+                        selectable: false,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _navMetricCard(NavCardData data, int slot, {bool selectable = true}) =>
+      MetricCard(
+        title: data.title,
+        value: data.value,
+        unit: data.unit,
+        subtitle: data.subtitle,
+        color: data.color,
+        zoom: _showZoom,
+        graphMetrics: data.graphMetrics,
+        onTap: data.id == 'heel' ? () => _showAttitudeGauges(context) : null,
+        onLongPress: selectable ? () => _showNavCardPicker(slot) : null,
+        onDoubleTap: selectable ? () => _showNavCardPicker(slot) : null,
+        onSecondaryTap: selectable ? () => _showNavCardPicker(slot) : null,
+      );
+
+  NavCardData _navCardData(String id) {
+    final sog = _fresh(signalK.sogKn);
+    final stw = _fresh(signalK.stwKn);
+    final heading = _fresh(signalK.headingTrueDeg);
+    final cog = _fresh(signalK.cogTrueDeg);
+    final depth = _fresh(signalK.depthM);
+    final heel = _fresh(signalK.heelDeg);
+    final positionFresh =
+        _navFresh && signalK.latitude != null && signalK.longitude != null;
+    final closest = _closestApproachTarget();
+
+    switch (id) {
+      case 'sog':
+        return NavCardData(
+          id: id,
           title: 'SOG',
           value: fmt(sog, 1, ''),
           unit: 'kt',
           color: cGreen,
-          zoom: _showZoom,
-        ),
-        MetricCard(
+          graphMetrics: const [mSog],
+        );
+      case 'stw':
+        return NavCardData(
+          id: id,
           title: 'STW',
           value: fmt(stw, 1, ''),
           unit: 'kt',
           color: cGreen,
-          zoom: _showZoom,
-        ),
-        MetricCard(
-          title: 'AWS',
-          value: fmt(aws, 0, ''),
-          unit: 'kt',
-          subtitle: awa != null
-              ? 'AWA  ${normalizeRelativeAngle(awa) < 0 ? '◄' : '►'}${angleAbs(awa)}°'
-              : null,
-          color: windColor(aws),
-          zoom: _showZoom,
-        ),
-        MetricCard(
+        );
+      case 'heading':
+        return NavCardData(
+          id: id,
           title: 'Rumbo',
           value: directionDeg(heading),
           unit: '°',
           color: cText,
-          zoom: _showZoom,
-        ),
-        MetricCard(
+        );
+      case 'cog':
+        return NavCardData(
+          id: id,
+          title: 'COG',
+          value: directionDeg(cog),
+          unit: '°',
+          color: cCyan,
+        );
+      case 'depth':
+        return NavCardData(
+          id: id,
           title: 'Profundidad',
           value: fmt(depth, 1, ''),
           unit: 'm',
           color: depthColor(depth),
-          zoom: _showZoom,
-        ),
-        MetricCard(
+        );
+      case 'heel':
+        return NavCardData(
+          id: id,
           title: 'Escora',
           value: heel != null ? '${heel.abs().round()}' : '--',
           unit: heel != null ? '° ${heel >= 0 ? 'E' : 'B'}' : '°',
           color: heelColor(heel),
-          zoom: _showZoom,
-          onTap: () => _showAttitudeGauges(context),
+          graphMetrics: const [mHeel],
+        );
+      case 'position':
+        return NavCardData(
+          id: id,
+          title: 'Posición',
+          value: positionFresh
+              ? posLines(signalK.latitude, signalK.longitude)
+              : '--',
+          subtitle: positionFresh ? 'Lat / Lon' : null,
+          color: positionFresh ? cCyan : cMuted,
+        );
+      case 'gps':
+        return NavCardData(
+          id: id,
+          title: 'GPS',
+          value: positionFresh ? 'OK' : '--',
+          subtitle: _lastUpdateText(signalK.navUpdate ?? signalK.lastUpdate),
+          color: positionFresh ? cGreen : cMuted,
+        );
+      case 'cpa':
+        return NavCardData(
+          id: id,
+          title: 'CPA',
+          value: closest == null || closest.cpaNm == null
+              ? '--'
+              : closest.cpaNm!.toStringAsFixed(1),
+          unit: 'NM',
+          subtitle: closest == null
+              ? 'Sin AIS'
+              : _aisTargetName(closest.target),
+          color: closest == null ? cMuted : cOrange,
+        );
+      case 'tcpa':
+        return NavCardData(
+          id: id,
+          title: 'TCPA',
+          value: closest == null || closest.tcpaMin == null
+              ? '--'
+              : closest.tcpaMin!.round().toString(),
+          unit: 'min',
+          subtitle: closest == null
+              ? 'Sin AIS'
+              : _aisTargetName(closest.target),
+          color: closest == null ? cMuted : cOrange,
+        );
+      case 'time':
+        final now = DateTime.now();
+        return NavCardData(
+          id: id,
+          title: 'Hora',
+          value: hhmm(now),
+          subtitle: ddmmyyyy(now),
+          color: cText,
+        );
+      case 'vmg':
+        return NavCardData(
+          id: id,
+          title: 'VMG',
+          value: '--',
+          unit: 'kt',
+          subtitle: 'Sin waypoint',
+          color: cMuted,
+        );
+      default:
+        return _navCardData(defaultNavCardIds.first);
+    }
+  }
+
+  List<String> _validNavSelection(List<String> ids) {
+    final out = <String>[];
+    for (final id in ids) {
+      if (allNavCardIds.contains(id) && !out.contains(id)) out.add(id);
+      if (out.length == 6) break;
+    }
+    for (final id in defaultNavCardIds) {
+      if (out.length == 6) break;
+      if (!out.contains(id)) out.add(id);
+    }
+    return out;
+  }
+
+  void _showNavCardPicker(int slot) {
+    final selectedIds = _validNavSelection(settings.navCardIds);
+    final choices = allNavCardIds
+        .where((id) => !selectedIds.contains(id))
+        .map(_navCardData)
+        .toList();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog.fullscreen(
+        backgroundColor: cBg,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Cambiar carta NAV',
+                        style: TextStyle(
+                          color: cText,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: cMuted),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: GridView.builder(
+                    itemCount: choices.length,
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                          childAspectRatio: 1.45,
+                        ),
+                    itemBuilder: (context, i) {
+                      final data = choices[i];
+                      return MetricCard(
+                        title: data.title,
+                        value: data.value,
+                        unit: data.unit,
+                        subtitle: data.subtitle,
+                        color: data.color,
+                        onTap: () async {
+                          final next = List<String>.of(selectedIds);
+                          next[slot] = data.id;
+                          setState(() => settings.navCardIds = next);
+                          await _saveSettings();
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
-      ],
+      ),
     );
   }
+
+  ({AisTarget target, double? cpaNm, double? tcpaMin})?
+  _closestApproachTarget() {
+    final ownLat = signalK.latitude;
+    final ownLon = signalK.longitude;
+    final ownCog = _fresh(signalK.cogTrueDeg) ?? _fresh(signalK.headingTrueDeg);
+    final ownSog = _fresh(signalK.sogKn) ?? 0;
+    ({AisTarget target, double? cpaNm, double? tcpaMin})? best;
+
+    for (final target in _aisTargets.values) {
+      final last = target.lastUpdate;
+      if (last != null && DateTime.now().difference(last).inMinutes > 10) {
+        continue;
+      }
+      double? cpaNm = target.pluginCpaNm;
+      double? tcpaMin = target.pluginTcpaMin;
+
+      if ((cpaNm == null || tcpaMin == null) &&
+          ownLat != null &&
+          ownLon != null &&
+          ownCog != null &&
+          target.lat != null &&
+          target.lon != null &&
+          target.cogDeg != null &&
+          target.sogKn != null) {
+        final rel = _bearingDistanceNm(
+          ownLat,
+          ownLon,
+          target.lat!,
+          target.lon!,
+        );
+        final brg = rel.bearingDeg * math.pi / 180;
+        final rN = rel.distNm * math.cos(brg);
+        final rE = rel.distNm * math.sin(brg);
+        final ownCogRad = ownCog * math.pi / 180;
+        final tgtCogRad = target.cogDeg! * math.pi / 180;
+        final vN =
+            target.sogKn! * math.cos(tgtCogRad) - ownSog * math.cos(ownCogRad);
+        final vE =
+            target.sogKn! * math.sin(tgtCogRad) - ownSog * math.sin(ownCogRad);
+        final cpa = _cpa(rN, rE, vN, vE);
+        cpaNm ??= cpa?.cpaNm;
+        tcpaMin ??= cpa?.tcpaMin;
+      }
+
+      if (cpaNm == null && tcpaMin == null) continue;
+      final candidate = (target: target, cpaNm: cpaNm, tcpaMin: tcpaMin);
+      if (best == null) {
+        best = candidate;
+        continue;
+      }
+      final cpaCmp = (candidate.cpaNm ?? double.infinity).compareTo(
+        best.cpaNm ?? double.infinity,
+      );
+      if (cpaCmp < 0 ||
+          (cpaCmp == 0 &&
+              (candidate.tcpaMin ?? double.infinity) <
+                  (best.tcpaMin ?? double.infinity))) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  ({double bearingDeg, double distNm}) _bearingDistanceNm(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
+    const r = 3440.065; // nautical miles
+    final lat1r = lat1 * math.pi / 180;
+    final lat2r = lat2 * math.pi / 180;
+    final dLat = (lat2 - lat1) * math.pi / 180;
+    final dLon = (lon2 - lon1) * math.pi / 180;
+    final a =
+        math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1r) *
+            math.cos(lat2r) *
+            math.sin(dLon / 2) *
+            math.sin(dLon / 2);
+    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    final y = math.sin(dLon) * math.cos(lat2r);
+    final x =
+        math.cos(lat1r) * math.sin(lat2r) -
+        math.sin(lat1r) * math.cos(lat2r) * math.cos(dLon);
+    final brg = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+    return (bearingDeg: brg, distNm: r * c);
+  }
+
+  ({double cpaNm, double tcpaMin})? _cpa(
+    double rN,
+    double rE,
+    double vN,
+    double vE,
+  ) {
+    final vv = vN * vN + vE * vE;
+    if (vv < 1e-6) return null;
+    final t = -(rN * vN + rE * vE) / vv;
+    if (t < 0) return null;
+    final cN = rN + vN * t;
+    final cE = rE + vE * t;
+    return (cpaNm: math.sqrt(cN * cN + cE * cE), tcpaMin: t * 60);
+  }
+
+  String _aisTargetName(AisTarget target) =>
+      target.name ?? target.mmsi ?? target.context.split('.').last;
 
   void _showAttitudeGauges(BuildContext context) {
     showDialog<void>(
@@ -4197,7 +4544,9 @@ class _CollapsedHeaderBar extends StatelessWidget {
         alignment: Alignment.topCenter,
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.45),
-          borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+          borderRadius: const BorderRadius.vertical(
+            bottom: Radius.circular(12),
+          ),
         ),
         child: Container(
           width: 48,
@@ -4973,7 +5322,9 @@ class _DualArcPainter extends CustomPainter {
         p,
         tickEnd,
         Paint()
-          ..color = (isMajor ? cText : cMuted).withValues(alpha: isMajor ? 0.85 : 0.5)
+          ..color = (isMajor ? cText : cMuted).withValues(
+            alpha: isMajor ? 0.85 : 0.5,
+          )
           ..strokeWidth = isMajor ? 1.6 : 1.0,
       );
       if (isMajor) {
@@ -5071,6 +5422,9 @@ class MetricCard extends StatelessWidget {
     this.subtitle,
     this.zoom,
     this.onTap,
+    this.onLongPress,
+    this.onDoubleTap,
+    this.onSecondaryTap,
     this.graphMetrics,
   });
 
@@ -5088,6 +5442,9 @@ class MetricCard extends StatelessWidget {
   })?
   zoom;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final VoidCallback? onDoubleTap;
+  final VoidCallback? onSecondaryTap;
   final List<MetricDef>? graphMetrics;
 
   @override
@@ -5102,6 +5459,9 @@ class MetricCard extends StatelessWidget {
             subtitle: subtitle,
             graphMetrics: graphMetrics,
           ),
+      onLongPress: onLongPress,
+      onDoubleTap: onDoubleTap,
+      onSecondaryTap: onSecondaryTap,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
         child: Column(
@@ -6788,15 +7148,31 @@ class WeatherIcon extends StatelessWidget {
 }
 
 class CardShell extends StatelessWidget {
-  const CardShell({super.key, required this.child, this.onTap});
+  const CardShell({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.onLongPress,
+    this.onDoubleTap,
+    this.onSecondaryTap,
+  });
   final Widget child;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final VoidCallback? onDoubleTap;
+  final VoidCallback? onSecondaryTap;
 
   @override
   Widget build(BuildContext context) => Card(
     color: cPanel,
     clipBehavior: Clip.antiAlias,
-    child: InkWell(onTap: onTap, child: child),
+    child: InkWell(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      onDoubleTap: onDoubleTap,
+      onSecondaryTap: onSecondaryTap,
+      child: child,
+    ),
   );
 }
 
@@ -6864,12 +7240,28 @@ String? tempUnit(double? kelvin) => kelvin == null ? null : '°C';
 String pos(double? lat, double? lon) => lat == null || lon == null
     ? '--'
     : '${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}';
+String posLines(double? lat, double? lon) => lat == null || lon == null
+    ? '--'
+    : '${lat.toStringAsFixed(4)}\n${lon.toStringAsFixed(4)}';
 String angle(double? value) => value == null ? '--' : value.round().toString();
 String angleAbs(double? value) => value == null
     ? '--'
     : normalizeRelativeAngle(value).abs().round().toString();
 String directionDeg(double? value) =>
     value == null ? '--' : normalize360(value).round().toString();
+String hhmm(DateTime value) =>
+    '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+String ddmmyyyy(DateTime value) =>
+    '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')}/${value.year}';
+String _lastUpdateText(DateTime? value) {
+  if (value == null) return 'Sin datos';
+  final seconds = DateTime.now().difference(value).inSeconds;
+  if (seconds < 60) return 'Hace ${math.max(0, seconds)} s';
+  final minutes = seconds ~/ 60;
+  if (minutes < 60) return 'Hace $minutes min';
+  return hhmm(value);
+}
+
 String dir(double? value) {
   if (value == null) return '--';
   const dirs = [
