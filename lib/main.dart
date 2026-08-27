@@ -8,7 +8,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:webview_flutter/webview_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -21,6 +20,9 @@ import 'fullscreen/fullscreen_stub.dart'
 import 'lan_scan/lan_scan_stub.dart'
     if (dart.library.io) 'lan_scan/lan_scan_io.dart'
     if (dart.library.html) 'lan_scan/lan_scan_web.dart';
+import 'webview_embed/webview_embed_stub.dart'
+    if (dart.library.io) 'webview_embed/webview_embed_io.dart'
+    if (dart.library.html) 'webview_embed/webview_embed_web.dart';
 import 'ws_connect/ws_connect_stub.dart'
     if (dart.library.io) 'ws_connect/ws_connect_io.dart'
     if (dart.library.html) 'ws_connect/ws_connect_web.dart';
@@ -42,6 +44,13 @@ void main() async {
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const RewindApp());
 }
+
+/// True when this web build is being served from Signal K's own webapp
+/// mount point (see package.json's "name") rather than deployed standalone
+/// (e.g. the Netlify build) — in that case Signal K's host/port is always
+/// this same origin, never user-configurable.
+bool get _isSignalKWebapp =>
+    kIsWeb && Uri.base.path.startsWith('/rewind-xcover6-panel');
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 class RewindApp extends StatelessWidget {
@@ -2153,6 +2162,7 @@ class _DashboardState extends State<Dashboard> {
   // ─── Anchor page (WebView) ──────────────────────────────────────────────────
   Widget _anchorPage() => _AnchorWebView(
     host: settings.host,
+    port: settings.port,
     missingPluginHint: 'No se encontró el plugin de fondeo (Anchor Alarm) en Signal K.\nInstálalo desde el App Store de Signal K.',
     demo: settings.demoMode,
     demoExplainer: 'Aquí verías la alarma de fondeo (Anchor Alarm), embebida desde el servidor Signal K: la posición del ancla, el radio de garreo y el estado de la alarma.',
@@ -2160,6 +2170,7 @@ class _DashboardState extends State<Dashboard> {
 
   Widget _mapPage() => _AnchorWebView(
     host: settings.host,
+    port: settings.port,
     path: '/@signalk/freeboard-sk/',
     label: 'Freeboard-SK',
     demo: settings.demoMode,
@@ -2251,152 +2262,179 @@ class _DashboardState extends State<Dashboard> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('SIGNAL K', style: lbl),
-                        gap,
-                        Row(
-                          children: [
-                            _HostPresetChip(
-                              label: 'lysmarine.local',
-                              selected: settings.host == 'lysmarine.local',
-                              onTap: () {
-                                setSt(() {
-                                  settings.host = 'lysmarine.local';
-                                  hostController.text = settings.host;
-                                });
-                              },
-                            ),
-                            const SizedBox(width: 8),
-                            _HostPresetChip(
-                              label: '100.85.109.61',
-                              selected: settings.host == '100.85.109.61',
-                              onTap: () {
-                                setSt(() {
-                                  settings.host = '100.85.109.61';
-                                  hostController.text = settings.host;
-                                });
-                              },
-                            ),
-                          ],
-                        ),
-                        gap,
-                        // Manual IP/hostname entry — the third option alongside the two
-                        // presets above: "lysmarine.local" only resolves on the network
-                        // it was set up on (mDNS is network-scoped), so a different boat
-                        // needs to type its own Signal K IP here, or use the scan below.
-                        TextField(
-                          controller: hostController,
-                          decoration: const InputDecoration(
-                            labelText: 'Host (o escribe una IP manualmente)',
-                            isDense: true,
-                          ),
-                          onChanged: (v) =>
-                              setSt(() => settings.host = v.trim()),
-                        ),
-                        gap,
-                        OutlinedButton.icon(
-                          icon: scanning
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                        if (_isSignalKWebapp) ...[
+                          const Text('SIGNAL K', style: lbl),
+                          gap,
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.check_circle,
+                                color: cGreen,
+                                size: 16,
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'Conectado automáticamente a ${settings.host}:${settings.port} — esta app se sirve desde tu propio servidor Signal K, así que no hace falta configurar host/puerto.',
+                                  style: const TextStyle(
+                                    color: cMuted,
+                                    fontSize: 13,
                                   ),
-                                )
-                              : const Icon(Icons.wifi_find, size: 18),
-                          label: Text(
-                            scanning
-                                ? 'Buscando… ($scanChecked/$scanTotal)'
-                                : 'Buscar Signal K en la red (puerto 3000)',
+                                ),
+                              ),
+                            ],
                           ),
-                          onPressed: scanning
-                              ? null
-                              : () async {
+                        ] else ...[
+                          const Text('SIGNAL K', style: lbl),
+                          gap,
+                          Row(
+                            children: [
+                              _HostPresetChip(
+                                label: 'lysmarine.local',
+                                selected: settings.host == 'lysmarine.local',
+                                onTap: () {
                                   setSt(() {
-                                    scanning = true;
-                                    scanResults = [];
-                                    scanChecked = 0;
-                                    scanTotal = 0;
+                                    settings.host = 'lysmarine.local';
+                                    hostController.text = settings.host;
                                   });
-                                  try {
-                                    final results = await scanLanForSignalK(
-                                      3000,
-                                      onProgress: (c, t) => setSt(() {
-                                        scanChecked = c;
-                                        scanTotal = t;
-                                      }),
-                                    );
-                                    setSt(() {
-                                      scanResults = results;
-                                      scanning = false;
-                                    });
-                                  } catch (e) {
-                                    setSt(() => scanning = false);
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'No se pudo escanear la red: ${friendlyApiError(e)}',
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                  }
                                 },
-                        ),
-                        if (!scanning && scanResults.isEmpty && scanChecked > 0)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 6),
-                            child: Text(
-                              'No se encontró ningún Signal K en la red.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
+                              ),
+                              const SizedBox(width: 8),
+                              _HostPresetChip(
+                                label: '100.85.109.61',
+                                selected: settings.host == '100.85.109.61',
+                                onTap: () {
+                                  setSt(() {
+                                    settings.host = '100.85.109.61';
+                                    hostController.text = settings.host;
+                                  });
+                                },
+                              ),
+                            ],
                           ),
-                        if (scanResults.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6),
-                            child: Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                for (final ip in scanResults)
-                                  _HostPresetChip(
-                                    label: ip,
-                                    selected: settings.host == ip,
-                                    onTap: () {
+                          gap,
+                          // Manual IP/hostname entry — the third option alongside the two
+                          // presets above: "lysmarine.local" only resolves on the network
+                          // it was set up on (mDNS is network-scoped), so a different boat
+                          // needs to type its own Signal K IP here, or use the scan below.
+                          TextField(
+                            controller: hostController,
+                            decoration: const InputDecoration(
+                              labelText: 'Host (o escribe una IP manualmente)',
+                              isDense: true,
+                            ),
+                            onChanged: (v) =>
+                                setSt(() => settings.host = v.trim()),
+                          ),
+                          gap,
+                          OutlinedButton.icon(
+                            icon: scanning
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.wifi_find, size: 18),
+                            label: Text(
+                              scanning
+                                  ? 'Buscando… ($scanChecked/$scanTotal)'
+                                  : 'Buscar Signal K en la red (puerto 3000)',
+                            ),
+                            onPressed: scanning
+                                ? null
+                                : () async {
+                                    setSt(() {
+                                      scanning = true;
+                                      scanResults = [];
+                                      scanChecked = 0;
+                                      scanTotal = 0;
+                                    });
+                                    try {
+                                      final results = await scanLanForSignalK(
+                                        3000,
+                                        onProgress: (c, t) => setSt(() {
+                                          scanChecked = c;
+                                          scanTotal = t;
+                                        }),
+                                      );
                                       setSt(() {
-                                        settings.host = ip;
-                                        hostController.text = ip;
+                                        scanResults = results;
+                                        scanning = false;
                                       });
-                                    },
-                                  ),
-                              ],
+                                    } catch (e) {
+                                      setSt(() => scanning = false);
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'No se pudo escanear la red: ${friendlyApiError(e)}',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  },
+                          ),
+                          if (!scanning &&
+                              scanResults.isEmpty &&
+                              scanChecked > 0)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 6),
+                              child: Text(
+                                'No se encontró ningún Signal K en la red.',
+                                style: TextStyle(color: cMuted, fontSize: 12),
+                              ),
+                            ),
+                          if (scanResults.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final ip in scanResults)
+                                    _HostPresetChip(
+                                      label: ip,
+                                      selected: settings.host == ip,
+                                      onTap: () {
+                                        setSt(() {
+                                          settings.host = ip;
+                                          hostController.text = ip;
+                                        });
+                                      },
+                                    ),
+                                ],
+                              ),
+                            ),
+                          gap,
+                          TextField(
+                            controller: portController,
+                            decoration: const InputDecoration(
+                              labelText: 'Puerto',
+                              isDense: true,
+                            ),
+                            keyboardType: TextInputType.number,
+                          ),
+                          TextField(
+                            controller: authController,
+                            decoration: const InputDecoration(
+                              labelText:
+                                  'Autenticación Signal K (Basic, base64)',
+                              helperText: 'Solo para la conexión a Signal K — no para InfluxDB',
+                              isDense: true,
                             ),
                           ),
-                        gap,
-                        TextField(
-                          controller: portController,
-                          decoration: const InputDecoration(
-                            labelText: 'Puerto',
-                            isDense: true,
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            icon: const Icon(Icons.save, size: 18),
+                            label: const Text('Guardar y reconectar'),
+                            onPressed: () => doSave(),
                           ),
-                          keyboardType: TextInputType.number,
-                        ),
-                        TextField(
-                          controller: authController,
-                          decoration: const InputDecoration(
-                            labelText: 'Autenticación Signal K (Basic, base64)',
-                            helperText: 'Solo para la conexión a Signal K — no para InfluxDB',
-                            isDense: true,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          icon: const Icon(Icons.save, size: 18),
-                          label: const Text('Guardar y reconectar'),
-                          onPressed: () => doSave(),
-                        ),
+                        ],
                       ],
                     ),
                   ),
@@ -6894,10 +6932,11 @@ double? relativeWindAngle(double? directionDeg, double? referenceDeg) {
   return normalizeRelativeAngle(directionDeg - referenceDeg);
 }
 
-// ─── Anchor page: embedded Hoeken WebView ────────────────────────────────────
+// ─── Anchor page: embedded Hoeken/Freeboard-SK view ───────────────────────────
 class _AnchorWebView extends StatefulWidget {
   const _AnchorWebView({
     required this.host,
+    required this.port,
     this.path = '/hoekens-anchor-alarm/',
     this.label = 'Ancla',
     this.missingPluginHint,
@@ -6905,6 +6944,7 @@ class _AnchorWebView extends StatefulWidget {
     this.demoExplainer,
   });
   final String host;
+  final int port;
   final String path;
   final String label;
   final String? missingPluginHint;
@@ -6916,52 +6956,32 @@ class _AnchorWebView extends StatefulWidget {
 
 class _AnchorWebViewState extends State<_AnchorWebView>
     with AutomaticKeepAliveClientMixin {
-  late final WebViewController _controller;
   bool _loading = true;
   bool _error = false;
+  int _reloadNonce = 0;
 
   @override
   bool get wantKeepAlive => true;
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (_) {
-            if (mounted)
-              setState(() {
-                _loading = true;
-                _error = false;
-              });
-          },
-          onPageFinished: (_) {
-            if (mounted) setState(() => _loading = false);
-          },
-          onWebResourceError: (_) {
-            if (mounted)
-              setState(() {
-                _loading = false;
-                _error = true;
-              });
-          },
-        ),
-      );
-    if (!widget.demo)
-      _controller.loadRequest(
-        Uri.parse('http://${widget.host}:3000${widget.path}'),
-      );
+  String get _url => 'http://${widget.host}:${widget.port}${widget.path}';
+
+  void _reload() {
+    setState(() {
+      _loading = true;
+      _error = false;
+      _reloadNonce++;
+    });
   }
 
   @override
   void didUpdateWidget(_AnchorWebView old) {
     super.didUpdateWidget(old);
-    if (!widget.demo && (old.host != widget.host || old.path != widget.path)) {
-      _controller.loadRequest(
-        Uri.parse('http://${widget.host}:3000${widget.path}'),
-      );
+    if (!widget.demo &&
+        (old.host != widget.host ||
+            old.port != widget.port ||
+            old.path != widget.path)) {
+      _loading = true;
+      _error = false;
     }
   }
 
@@ -7008,10 +7028,22 @@ class _AnchorWebViewState extends State<_AnchorWebView>
     }
     return Stack(
       children: [
-        WebViewWidget(
-          controller: _controller,
-          gestureRecognizers: {
-            Factory<EagerGestureRecognizer>(() => EagerGestureRecognizer()),
+        PlatformWebView(
+          key: ValueKey(_reloadNonce),
+          url: _url,
+          onPageStarted: () {
+            if (mounted) setState(() => _loading = true);
+          },
+          onPageFinished: () {
+            if (mounted) setState(() => _loading = false);
+          },
+          onError: () {
+            if (mounted) {
+              setState(() {
+                _loading = false;
+                _error = true;
+              });
+            }
           },
         ),
         if (_loading)
@@ -7029,7 +7061,7 @@ class _AnchorWebViewState extends State<_AnchorWebView>
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'http://${widget.host}:3000${widget.path}',
+                  _url,
                   style: const TextStyle(color: cOrange, fontSize: 12),
                 ),
                 if (widget.missingPluginHint != null) ...[
@@ -7044,13 +7076,7 @@ class _AnchorWebViewState extends State<_AnchorWebView>
                 FilledButton.icon(
                   icon: const Icon(Icons.refresh),
                   label: const Text('Reintentar'),
-                  onPressed: () {
-                    setState(() {
-                      _loading = true;
-                      _error = false;
-                    });
-                    _controller.reload();
-                  },
+                  onPressed: _reload,
                 ),
               ],
             ),
@@ -7059,7 +7085,7 @@ class _AnchorWebViewState extends State<_AnchorWebView>
           top: 28,
           left: 8,
           child: GestureDetector(
-            onTap: () => _controller.reload(),
+            onTap: _reload,
             child: Container(
               padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
