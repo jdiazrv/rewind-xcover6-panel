@@ -62,19 +62,27 @@ Freeboard-SK, el Anchor Alarm, etc.) y se sirve desde ahí — al abrirla así,
 detecta sola el host/puerto del propio servidor Signal K, sin pedirlo en
 `CFG`.
 
-```sh
-flutter build web
-rm -rf public && cp -R build/web public
-```
+El repo ya incluye `public/` compilado (se regenera con `flutter build web
+&& rm -rf public && cp -R build/web public` tras cualquier cambio). Formas
+de instalarlo en el servidor:
 
-Luego, en el servidor Signal K (necesita Node/npm):
+**Desde la pantalla Appstore de Signal K** (más sencillo): Servidor →
+Appstore → pega la URL `https://github.com/jdiazrv/rewind-xcover6-panel`
+en la opción de instalar desde una URL/repositorio → instalar → reiniciar
+el servidor.
+
+**Por SSH**, en el servidor Signal K (necesita Node/npm):
 
 ```sh
-npm install /ruta/a/este/repo   # desde ~/.signalk, o donde tengas los plugins
+npm install https://github.com/jdiazrv/rewind-xcover6-panel.git   # desde ~/.signalk
 ```
 
 o simplemente copia/symlink toda la carpeta del proyecto dentro de
 `~/.signalk/node_modules/rewind-xcover6-panel` y reinicia el servidor.
+
+Para aparecer en el listado **público** del App Store de Signal K (visible
+en cualquier servidor, buscable), hay que publicarlo en el registro npm
+(`npm publish`, requiere cuenta de npm) — eso es un paso aparte, opcional.
 
 Funciona igual que en Android salvo por: la escora/cabeceo por acelerómetro
 (usa sensores del móvil/tablet) no está disponible en navegador, y las

@@ -31,8 +31,6 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
-# Signal K webapp package output (built from build/web — see README)
-/public/
 /coverage/
 
 # Symbolication related
