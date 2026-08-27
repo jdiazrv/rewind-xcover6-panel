@@ -1721,17 +1721,18 @@ class _DashboardState extends State<Dashboard> {
         );
       case 'ais':
         // One compact card for the closest-approach AIS target — CPA is the
-        // headline number, distancia/demora/TCPA/nombre live in the
-        // subtitle and (in full) in the detail dialog opened on tap.
+        // headline number. Name goes on its own line, demora/distancia/TCPA
+        // on the second (the subtitle now wraps to 2 lines) so nothing gets
+        // cut off by the ellipsis.
         final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
-        final subtitleParts = closest == null
-            ? const ['Sin AIS']
-            : [
-                _aisTargetName(closest.target),
-                if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
-                if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
-                if (closest.tcpaMin != null) '${closest.tcpaMin!.round()}min',
-              ];
+        final subtitle = closest == null
+            ? 'Sin AIS'
+            : '${_aisTargetName(closest.target)}\n'
+                  '${[
+                    if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
+                    if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
+                    if (closest.tcpaMin != null) '${closest.tcpaMin!.round()}min',
+                  ].join(' · ')}';
         return NavCardData(
           id: id,
           title: 'AIS',
@@ -1739,7 +1740,7 @@ class _DashboardState extends State<Dashboard> {
               ? '--'
               : closest.cpaNm!.toStringAsFixed(1),
           unit: 'NM',
-          subtitle: subtitleParts.join(' · '),
+          subtitle: subtitle,
           color: closest == null
               ? cMuted
               : (cpaCritical ? cRed : cOrange),
@@ -5974,7 +5975,8 @@ class MetricCard extends StatelessWidget {
               Center(
                 child: Text(
                   subtitle!,
-                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: cMuted,
@@ -7623,7 +7625,7 @@ class CardShell extends StatelessWidget {
     elevation: 0,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(14),
-      side: const BorderSide(color: cPanel2, width: 1),
+      side: BorderSide(color: cMuted.withValues(alpha: 0.35), width: 1.4),
     ),
     clipBehavior: Clip.antiAlias,
     child: InkWell(

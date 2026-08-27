@@ -2,6 +2,12 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.10] - 2026-08-27
+
+### Cambiado
+- **Tarjeta AIS**: recupera los 5 datos pedidos (nombre, demora, distancia, CPA, TCPA) — el subtítulo ahora ocupa 2 líneas (nombre arriba, demora/distancia/TCPA abajo) en vez de cortarse con "...".
+- **Bordes de las tarjetas** (NAV y el resto): más marcados/visibles que en la v1.4.5.
+
 ## [1.4.9] - 2026-08-27
 
 ### Cambiado
