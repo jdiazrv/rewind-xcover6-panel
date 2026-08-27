@@ -11,7 +11,6 @@ import 'package:http/http.dart' as http;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:latlong2/latlong.dart' as ll;
@@ -22,6 +21,9 @@ import 'fullscreen/fullscreen_stub.dart'
 import 'lan_scan/lan_scan_stub.dart'
     if (dart.library.io) 'lan_scan/lan_scan_io.dart'
     if (dart.library.html) 'lan_scan/lan_scan_web.dart';
+import 'ws_connect/ws_connect_stub.dart'
+    if (dart.library.io) 'ws_connect/ws_connect_io.dart'
+    if (dart.library.html) 'ws_connect/ws_connect_web.dart';
 
 import 'ais_view.dart';
 import 'attitude_sensor.dart';
@@ -361,13 +363,7 @@ class _DashboardState extends State<Dashboard> {
     );
     setState(() => signalK.status = 'Conectando…');
     try {
-      channel = IOWebSocketChannel.connect(
-        uri,
-        headers: settings.authBase64.isEmpty
-            ? null
-            : {'Authorization': 'Basic ${settings.authBase64}'},
-        pingInterval: const Duration(seconds: 20),
-      );
+      channel = connectSignalKWs(uri, authBase64: settings.authBase64);
       channel!.stream.listen(
         _onSignalKMessage,
         onError: _onSignalKError,
