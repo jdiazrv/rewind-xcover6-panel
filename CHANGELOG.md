@@ -2,6 +2,12 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.8] - 2026-08-27
+
+### Arreglado
+- **CFG → Conexión no guardaba bien la IP escrita a mano**: los campos de host/puerto/auth/InfluxDB se recreaban desde cero en cada actualización de datos de Signal K (varias veces por segundo), así que si escribías una IP nueva y llegaba un dato antes de pulsar "Guardar", el campo volvía a mostrar el valor guardado anterior. Ahora los controles de texto de CFG se crean una sola vez y persisten entre reconstrucciones.
+- **Webapp de Signal K**: si un dispositivo había visitado antes la webapp de otro barco/servidor, seguía reconectando a ese host antiguo en vez de al servidor desde el que se está sirviendo ahora. La webapp siempre usa su propio origen, ignorando cualquier host guardado.
+
 ## [1.4.7] - 2026-08-27
 
 ### Cambiado

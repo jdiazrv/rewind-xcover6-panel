@@ -106,6 +106,20 @@ class _DashboardState extends State<Dashboard> {
   bool _headerHidden = false;
   Timer? _navHideTimer;
 
+  // CFG > Conexión text field controllers. Kept as State fields (created
+  // once, lazily) rather than local vars inside _settingsPage(), which runs
+  // on every Dashboard rebuild — with live Signal K data arriving every
+  // second or so, a fresh TextEditingController(text: settings.host) on
+  // each rebuild wiped out whatever the user had mid-typed into the field
+  // before they hit "Guardar", snapping it back to the old saved host.
+  TextEditingController? _hostController;
+  TextEditingController? _portController;
+  TextEditingController? _authController;
+  TextEditingController? _bucketController;
+  TextEditingController? _influxHostController;
+  TextEditingController? _influxOrgController;
+  TextEditingController? _influxTokenController;
+
   // AIS (MAP > swipe down) — subscribed on demand, see _subscribeAis/_unsubscribeAis
   String? _selfContext;
   bool _aisSubscribed = false;
@@ -138,6 +152,16 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _boot() async {
     await _loadSettings();
+    // The first build() can run (and lazily create the CFG field
+    // controllers, see _settingsPage) before this async load finishes —
+    // refresh them now so they don't get stuck showing pre-load defaults.
+    _hostController?.text = settings.host;
+    _portController?.text = '${settings.port}';
+    _authController?.text = settings.authBase64;
+    _bucketController?.text = settings.influxBucket;
+    _influxHostController?.text = settings.influxHost;
+    _influxOrgController?.text = settings.influxOrg;
+    _influxTokenController?.text = settings.influxToken;
     if (!kIsWeb) await _loadWeatherCache();
     if (settings.demoMode) {
       _startDemoMode();
@@ -185,16 +209,26 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    // Installed as a Signal K webapp, this is served *from* the Signal K
-    // server itself — default to that same host/port on first run instead
-    // of making the user type it in, same as Freeboard-SK and other
-    // Signal K webapps do. Only applies before anything's ever been saved.
-    settings.host =
-        prefs.getString('host') ??
-        (kIsWeb && Uri.base.host.isNotEmpty ? Uri.base.host : settings.host);
-    settings.port =
-        prefs.getInt('port') ??
-        (kIsWeb && Uri.base.hasPort ? Uri.base.port : settings.port);
+    if (_isSignalKWebapp) {
+      // Served from Signal K's own webapp mount — always this same origin.
+      // Never trust a cached host/port here: a device that previously
+      // visited a *different* Signal K server's webapp (different boat,
+      // different IP/hostname) would otherwise keep reconnecting to that
+      // stale host instead of the one it's actually being served from.
+      settings.host = Uri.base.host;
+      if (Uri.base.hasPort) settings.port = Uri.base.port;
+    } else {
+      // Android app / standalone (Netlify) web build: host/port are
+      // user-configurable in CFG. On web, default to the page's own origin
+      // on first run (nothing saved yet) as a convenience guess only —
+      // unlike the webapp case above, a saved value always wins here.
+      settings.host =
+          prefs.getString('host') ??
+          (kIsWeb && Uri.base.host.isNotEmpty ? Uri.base.host : settings.host);
+      settings.port =
+          prefs.getInt('port') ??
+          (kIsWeb && Uri.base.hasPort ? Uri.base.port : settings.port);
+    }
     settings.authBase64 = prefs.getString('auth') ?? settings.authBase64;
     settings.keepAwake = prefs.getBool('keepAwake') ?? settings.keepAwake;
     settings.brightnessMode =
@@ -1312,6 +1346,13 @@ class _DashboardState extends State<Dashboard> {
     _phoneHeelTracker?.stop();
     channel?.sink.close();
     _pageController.dispose();
+    _hostController?.dispose();
+    _portController?.dispose();
+    _authController?.dispose();
+    _bucketController?.dispose();
+    _influxHostController?.dispose();
+    _influxOrgController?.dispose();
+    _influxTokenController?.dispose();
     super.dispose();
   }
 
@@ -2932,15 +2973,27 @@ class _DashboardState extends State<Dashboard> {
   // ─── Settings page ──────────────────────────────────────────────────────────
 
   Widget _settingsPage() {
-    final hostController = TextEditingController(text: settings.host);
-    final portController = TextEditingController(text: '${settings.port}');
-    final authController = TextEditingController(text: settings.authBase64);
-    final bucketController = TextEditingController(text: settings.influxBucket);
-    final influxHostController = TextEditingController(
+    // ??= : created once and reused across rebuilds (see the field
+    // declarations for why a fresh controller per rebuild was the bug).
+    final hostController = _hostController ??= TextEditingController(
+      text: settings.host,
+    );
+    final portController = _portController ??= TextEditingController(
+      text: '${settings.port}',
+    );
+    final authController = _authController ??= TextEditingController(
+      text: settings.authBase64,
+    );
+    final bucketController = _bucketController ??= TextEditingController(
+      text: settings.influxBucket,
+    );
+    final influxHostController = _influxHostController ??= TextEditingController(
       text: settings.influxHost,
     );
-    final influxOrgController = TextEditingController(text: settings.influxOrg);
-    final influxTokenController = TextEditingController(
+    final influxOrgController = _influxOrgController ??= TextEditingController(
+      text: settings.influxOrg,
+    );
+    final influxTokenController = _influxTokenController ??= TextEditingController(
       text: settings.influxToken,
     );
     var scanning = false;
