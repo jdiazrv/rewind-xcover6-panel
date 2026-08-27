@@ -1345,25 +1345,27 @@ class _DashboardState extends State<Dashboard> {
             Column(
               children: [
                 ClipRect(
-                  child: AnimatedAlign(
-                    duration: const Duration(milliseconds: 300),
-                    alignment: Alignment.topCenter,
-                    heightFactor: _headerHidden ? 0.0 : 1.0,
-                    child: _Header(
-                      pages: pages,
-                      selected: page,
-                      status: signalK.status,
-                      ok: signalK.connected,
-                      onSelect: (i) {
-                        _onPageChange(i);
-                        _pageController.animateToPage(
-                          i,
+                  child: (_headerHidden && kIsWeb)
+                      ? _CollapsedHeaderBar(onTap: _revealHeader)
+                      : AnimatedAlign(
                           duration: const Duration(milliseconds: 300),
-                          curve: Curves.easeInOut,
-                        );
-                      },
-                    ),
-                  ),
+                          alignment: Alignment.topCenter,
+                          heightFactor: _headerHidden ? 0.0 : 1.0,
+                          child: _Header(
+                            pages: pages,
+                            selected: page,
+                            status: signalK.status,
+                            ok: signalK.connected,
+                            onSelect: (i) {
+                              _onPageChange(i);
+                              _pageController.animateToPage(
+                                i,
+                                duration: const Duration(milliseconds: 300),
+                                curve: Curves.easeInOut,
+                              );
+                            },
+                          ),
+                        ),
                 ),
                 Expanded(
                   child: PageView(
@@ -1374,7 +1376,12 @@ class _DashboardState extends State<Dashboard> {
                 ),
               ],
             ),
-            if (_headerHidden)
+            if (_headerHidden && !kIsWeb)
+              // Web: the floating overlay handle sits over the WebView's
+              // <iframe>, which is a separate browser document and can
+              // swallow the tap at the OS/DOM level regardless of Flutter's
+              // own widget stacking — so on web we use _CollapsedHeaderBar
+              // instead, which reserves real (non-overlapping) layout space.
               Positioned.fill(
                 child: Align(
                   alignment: const Alignment(
@@ -4138,6 +4145,41 @@ class _HostPresetChip extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─── Collapsed header bar (web only) ──────────────────────────────────────────
+// Replaces the floating reveal-handle overlay on web: that overlay sits on
+// top of the WebView's <iframe> (MAP/ANC), and taps landing on an iframe's
+// rectangle are delivered straight to the iframe's own document by the
+// browser, never reaching Flutter's canvas — so the handle never registers
+// a tap there. This bar takes real space in the Column layout instead,
+// pushing the WebView down so the tap target never overlaps the iframe.
+class _CollapsedHeaderBar extends StatelessWidget {
+  const _CollapsedHeaderBar({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.opaque,
+    onTap: onTap,
+    onVerticalDragUpdate: (d) {
+      if (d.delta.dy > 0) onTap();
+    },
+    child: Container(
+      height: 22,
+      width: double.infinity,
+      color: cBg,
+      alignment: Alignment.center,
+      child: Container(
+        width: 48,
+        height: 4,
+        decoration: BoxDecoration(
+          color: cMuted.withOpacity(0.7),
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+    ),
+  );
 }
 
 // ─── Header ───────────────────────────────────────────────────────────────────
