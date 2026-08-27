@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -610,59 +611,77 @@ void _showAisDetail(BuildContext context, _AisPlot p) {
   );
   showDialog<void>(
     context: context,
-    builder: (_) => AlertDialog(
-      backgroundColor: cPanel,
-      title: Text(t.name ?? 'Sin nombre', style: const TextStyle(color: cText)),
-      content: SizedBox(
-        width: 320,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (t.mmsi != null) _AisTargetPhoto(mmsi: t.mmsi!),
-            row('MMSI', t.mmsi ?? '--'),
-            row(
-              'Posición',
-              t.lat != null && t.lon != null
-                  ? '${t.lat!.toStringAsFixed(4)}, ${t.lon!.toStringAsFixed(4)}'
-                  : '--',
+    // `t` is the same mutable AisTarget kept in the target map — its fields
+    // (position, COG, SOG...) keep updating live as new AIS data arrives,
+    // even while this dialog is open. Without a refresh, a target tapped
+    // right after it first appeared (before all its fields had arrived)
+    // stayed frozen showing "--" until the dialog was closed and reopened.
+    // Refreshing here every 2s means it fills in / corrects on its own.
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setSt) {
+        Timer(const Duration(seconds: 2), () {
+          if (ctx.mounted) setSt(() {});
+        });
+        return AlertDialog(
+          backgroundColor: cPanel,
+          title: Text(
+            t.name ?? 'Sin nombre',
+            style: const TextStyle(color: cText),
+          ),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (t.mmsi != null) _AisTargetPhoto(mmsi: t.mmsi!),
+                row('MMSI', t.mmsi ?? '--'),
+                row(
+                  'Posición',
+                  t.lat != null && t.lon != null
+                      ? '${t.lat!.toStringAsFixed(4)}, ${t.lon!.toStringAsFixed(4)}'
+                      : '--',
+                ),
+                row(
+                  'Rumbo (COG)',
+                  t.cogDeg != null ? '${t.cogDeg!.round()}°' : '--',
+                ),
+                row(
+                  'Velocidad (SOG)',
+                  t.sogKn != null ? '${t.sogKn!.toStringAsFixed(1)} kt' : '--',
+                ),
+                row(
+                  'Distancia',
+                  '${p.distNm.toStringAsFixed(2)} nm · ${p.bearingDeg.round()}°',
+                ),
+                row(
+                  'CPA',
+                  p.cpaNm != null ? '${p.cpaNm!.toStringAsFixed(2)} nm' : '--',
+                ),
+                row(
+                  'TCPA',
+                  p.tcpaMin != null
+                      ? '${p.tcpaMin!.toStringAsFixed(0)} min'
+                      : '--',
+                ),
+                if (_aisHasMeaningfulCpa(p)) row('Cruce', p.crossing!),
+                row(
+                  'Actualizado',
+                  t.lastUpdate != null
+                      ? 'hace ${DateTime.now().difference(t.lastUpdate!).inSeconds}s'
+                      : '--',
+                ),
+              ],
             ),
-            row(
-              'Rumbo (COG)',
-              t.cogDeg != null ? '${t.cogDeg!.round()}°' : '--',
-            ),
-            row(
-              'Velocidad (SOG)',
-              t.sogKn != null ? '${t.sogKn!.toStringAsFixed(1)} kt' : '--',
-            ),
-            row(
-              'Distancia',
-              '${p.distNm.toStringAsFixed(2)} nm · ${p.bearingDeg.round()}°',
-            ),
-            row(
-              'CPA',
-              p.cpaNm != null ? '${p.cpaNm!.toStringAsFixed(2)} nm' : '--',
-            ),
-            row(
-              'TCPA',
-              p.tcpaMin != null ? '${p.tcpaMin!.toStringAsFixed(0)} min' : '--',
-            ),
-            if (_aisHasMeaningfulCpa(p)) row('Cruce', p.crossing!),
-            row(
-              'Actualizado',
-              t.lastUpdate != null
-                  ? 'hace ${DateTime.now().difference(t.lastUpdate!).inSeconds}s'
-                  : '--',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cerrar'),
             ),
           ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cerrar'),
-        ),
-      ],
+        );
+      },
     ),
   );
 }

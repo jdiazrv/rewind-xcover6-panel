@@ -2,6 +2,16 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.9] - 2026-08-27
+
+### Cambiado
+- **Tarjetas CPA + TCPA fusionadas en una sola "AIS"**: muestra CPA como valor principal, y nombre/demora/distancia/TCPA en la línea inferior; al tocarla se abre el detalle completo (objetivo, demora, distancia, CPA, TCPA, cruce por proa/popa).
+- Los objetivos AIS con TCPA superior a 20 min ya no se muestran como "el" objetivo de aproximación más cercana — un CPA muy corto que todavía está a 40 min no es relevante ahora mismo.
+- Se actualiza el icono web (mismo icono que Android/Play Store).
+
+### Arreglado
+- **Detalle de un barco AIS (pestaña AIS)**: si tocabas un objetivo justo cuando aparecía, antes de recibir todos sus datos, el panel se quedaba con "--" congelado hasta cerrarlo y volver a abrirlo. Ahora se refresca solo cada 2s con los datos que van llegando.
+
 ## [1.4.8] - 2026-08-27
 
 ### Arreglado

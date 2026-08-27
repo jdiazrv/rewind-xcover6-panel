@@ -586,11 +586,10 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  // Whether the AIS page is open, or a CPA/TCPA NAV card needs live AIS
+  // Whether the AIS page is open, or the merged AIS NAV card needs live AIS
   // targets to compute "closest approach" — either one keeps the (otherwise
   // on-demand, to save bandwidth) vessels.* subscription alive.
-  bool get _navWantsAis =>
-      settings.navCardIds.contains('cpa') || settings.navCardIds.contains('tcpa');
+  bool get _navWantsAis => settings.navCardIds.contains('ais');
 
   void _syncAisSubscription() {
     final ids = _pageIds;
@@ -1385,6 +1384,10 @@ class _DashboardState extends State<Dashboard> {
   // Below this CPA, the NAV cards switch to a stronger alert color — this is
   // "about to matter" territory, not just "closer than most".
   static const _cpaCriticalNm = 0.5;
+  // Targets whose closest approach is further out than this aren't shown as
+  // "the" CPA/TCPA target — a very close CPA that's still 40 minutes away
+  // isn't actionable yet.
+  static const _cpaRelevantTcpaMin = 20.0;
   bool get _navFresh {
     final u = signalK.navUpdate;
     return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
@@ -1625,7 +1628,7 @@ class _DashboardState extends State<Dashboard> {
             ? () => _showAttitudeGauges(context)
             : data.id == 'gps'
             ? () => _showGpsDetail(context)
-            : data.id == 'cpa'
+            : data.id == 'ais'
             ? () => _showCpaDetail(context)
             : null,
         onLongPress: selectable ? () => _showNavCardPicker(slot) : null,
@@ -1716,34 +1719,27 @@ class _DashboardState extends State<Dashboard> {
               _lastUpdateText(signalK.navUpdate ?? signalK.lastUpdate),
           color: positionFresh ? cGreen : cMuted,
         );
-      case 'cpa':
+      case 'ais':
+        // One compact card for the closest-approach AIS target — CPA is the
+        // headline number, distancia/demora/TCPA/nombre live in the
+        // subtitle and (in full) in the detail dialog opened on tap.
         final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
+        final subtitleParts = closest == null
+            ? const ['Sin AIS']
+            : [
+                _aisTargetName(closest.target),
+                if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
+                if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
+                if (closest.tcpaMin != null) '${closest.tcpaMin!.round()}min',
+              ];
         return NavCardData(
           id: id,
-          title: 'CPA',
+          title: 'AIS',
           value: closest == null || closest.cpaNm == null
               ? '--'
               : closest.cpaNm!.toStringAsFixed(1),
           unit: 'NM',
-          subtitle: closest == null
-              ? 'Sin AIS'
-              : _aisTargetName(closest.target),
-          color: closest == null
-              ? cMuted
-              : (cpaCritical ? cRed : cOrange),
-        );
-      case 'tcpa':
-        final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
-        return NavCardData(
-          id: id,
-          title: 'TCPA',
-          value: closest == null || closest.tcpaMin == null
-              ? '--'
-              : closest.tcpaMin!.round().toString(),
-          unit: 'min',
-          subtitle: closest == null
-              ? 'Sin AIS'
-              : _aisTargetName(closest.target),
+          subtitle: subtitleParts.join(' · '),
           color: closest == null
               ? cMuted
               : (cpaCritical ? cRed : cOrange),
@@ -2047,7 +2043,7 @@ class _DashboardState extends State<Dashboard> {
                       children: [
                         const Expanded(
                           child: Text(
-                            'CPA',
+                            'AIS',
                             style: TextStyle(
                               color: cText,
                               fontSize: 18,
@@ -2182,6 +2178,10 @@ class _DashboardState extends State<Dashboard> {
       }
 
       if (cpaNm == null && tcpaMin == null) continue;
+      // A target 40 minutes out at its current CPA isn't a collision risk
+      // yet — don't let it steal the "closest approach" slot from something
+      // that's actually about to happen.
+      if (tcpaMin != null && tcpaMin > _cpaRelevantTcpaMin) continue;
       final candidate = (
         target: target,
         cpaNm: cpaNm,
