@@ -1,12 +1,14 @@
-// ignore_for_file: avoid_web_libraries_in_flutter
+import 'dart:js_interop';
 
-import 'dart:html' as html;
-import 'dart:js' as js;
+import 'package:web/web.dart' as web;
 
-bool get fullscreenSupported => html.document.documentElement != null;
+bool get fullscreenSupported => web.document.documentElement != null;
 
-bool get fullscreenActive => html.document.fullscreenElement != null;
+bool get fullscreenActive => web.document.fullscreenElement != null;
+
+@JS('rewindToggleFullscreen')
+external void _rewindToggleFullscreen();
 
 Future<void> toggleFullscreen() async {
-  js.context.callMethod('rewindToggleFullscreen');
+  _rewindToggleFullscreen();
 }

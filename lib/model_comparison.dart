@@ -513,11 +513,12 @@ pw.Widget pdfWindArrow(double? degTo, double? speedKn, {double size = 9}) {
   // A null speed (e.g. a model with no gust data for this hour) must not
   // silently draw as a "calm" muted arrow — show the same dash as a missing
   // direction instead, or gust mode would visually look like less wind.
-  if (degTo == null || speedKn == null)
+  if (degTo == null || speedKn == null) {
     return pw.Text(
       '-',
       style: pw.TextStyle(color: pdfMuted, fontSize: size * 0.8),
     );
+  }
   final color = pdfColorOf(meteogramColor(speedKn));
   return pw.CustomPaint(
     size: PdfPoint(size, size),
@@ -546,7 +547,7 @@ pw.Widget pdfWindArrow(double? degTo, double? speedKn, {double size = 9}) {
 // hours across the top, one colour-coded wind row per model (speed + gust +
 // direction arrow), so several models can be scanned and compared at a glance.
 class ModelComparisonDialog extends StatefulWidget {
-  const ModelComparisonDialog({
+  const ModelComparisonDialog({super.key, 
     required this.place,
     required this.lat,
     required this.lon,
@@ -592,18 +593,20 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
     });
     try {
       final d = await widget.fetch();
-      if (mounted)
+      if (mounted) {
         setState(() {
           _data = d.models;
           _waveHeight = d.waveHeight;
           _loading = false;
         });
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _error = friendlyApiError(e);
           _loading = false;
         });
+      }
     }
   }
 
@@ -816,8 +819,9 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
         final v = _nearestPoint(data[m.id]!, h)?.windKn;
         if (v != null) values.add(_corrected(v));
       }
-      if (values.length > 1)
+      if (values.length > 1) {
         spreads.add(values.reduce(math.max) - values.reduce(math.min));
+      }
     }
     if (spreads.isEmpty) return 0;
     return spreads.reduce((a, b) => a + b) / spreads.length;
@@ -927,8 +931,9 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
               .get(uri, headers: {'User-Agent': 'REWIND-XCover6-panel/1.0'})
               .timeout(const Duration(seconds: 8));
           final type = response.headers['content-type'] ?? '';
-          if (response.statusCode != 200 || !type.startsWith('image/'))
+          if (response.statusCode != 200 || !type.startsWith('image/')) {
             return null;
+          }
           tiles.add(response.bodyBytes);
         }
       }
@@ -1008,10 +1013,12 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
     alerts.add(
       'Confianza por horizonte: próximas 6 h ${_confidenceWithSpread(spread6h)}, 24 h ${_confidenceWithSpread(spread24h)}, 48 h ${_confidenceWithSpread(spread48h)}.',
     );
-    if (hasRain)
+    if (hasRain) {
       alerts.add('Hay probabilidad de lluvia en al menos un modelo.');
-    if (maxWave != null)
+    }
+    if (maxWave != null) {
       alerts.add('Ola máxima prevista: ${maxWave.toStringAsFixed(1)} m.');
+    }
     return alerts;
   }
 
@@ -1881,8 +1888,9 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
   }
 
   Widget _buildBody() {
-    if (_loading)
+    if (_loading) {
       return const Center(child: CircularProgressIndicator(color: cCyan));
+    }
     if (_error != null) {
       return Center(
         child: Column(
@@ -2194,9 +2202,9 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
       height: 62,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.18),
+        color: color.withValues(alpha: 0.18),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withOpacity(0.45)),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2249,9 +2257,9 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
       height: 44,
       margin: const EdgeInsets.symmetric(horizontal: 1, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.22),
+        color: color.withValues(alpha: 0.22),
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.5), width: 0.5),
+        border: Border.all(color: color.withValues(alpha: 0.5), width: 0.5),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -2286,13 +2294,14 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
   }
 
   Widget _waveCell(GraphPoint? p) {
-    if (p == null)
+    if (p == null) {
       return const SizedBox(
         height: 30,
         child: Center(
           child: Text('--', style: TextStyle(color: cMuted, fontSize: 12)),
         ),
       );
+    }
     return SizedBox(
       height: 30,
       child: Center(
@@ -2472,8 +2481,8 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
                     ),
                     selected: m.id == model.id,
                     selectedColor: m.color,
-                    backgroundColor: m.color.withOpacity(0.12),
-                    side: BorderSide(color: m.color.withOpacity(0.5)),
+                    backgroundColor: m.color.withValues(alpha: 0.12),
+                    side: BorderSide(color: m.color.withValues(alpha: 0.5)),
                     onSelected: (_) => setState(() => _meteogramModelId = m.id),
                   ),
               const SizedBox(width: 4),
@@ -2712,12 +2721,12 @@ class _SimpleLineChartPainter extends CustomPainter {
       path.close();
       canvas.drawPath(
         path,
-        Paint()..color = (areaColor ?? cMuted).withOpacity(0.18),
+        Paint()..color = (areaColor ?? cMuted).withValues(alpha: 0.18),
       );
 
       final axisColor = (areaColor ?? cMuted);
       final axisLabelStyle = TextStyle(
-        color: axisColor.withOpacity(0.85),
+        color: axisColor.withValues(alpha: 0.85),
         fontSize: 9,
         fontWeight: FontWeight.w600,
       );
@@ -2847,7 +2856,7 @@ class _ConsensusBandChartPainter extends CustomPainter {
     }
     if (started) {
       band.close();
-      canvas.drawPath(band, Paint()..color = cCyan.withOpacity(0.16));
+      canvas.drawPath(band, Paint()..color = cCyan.withValues(alpha: 0.16));
     }
 
     final line = Path();

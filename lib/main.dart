@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -349,14 +348,18 @@ class _DashboardState extends State<Dashboard> {
         signalK.houseTempK = _num(v);
     h['electrical.batteries.${c.batteryStartId}.voltage'] = (v) =>
         signalK.startV = _num(v);
-    if (c.solarPath != null && c.solarPath!.isNotEmpty)
+    if (c.solarPath != null && c.solarPath!.isNotEmpty) {
       h[c.solarPath!] = (v) => signalK.solarW = _num(v);
-    if (c.fridge1Path != null && c.fridge1Path!.isNotEmpty)
+    }
+    if (c.fridge1Path != null && c.fridge1Path!.isNotEmpty) {
       h[c.fridge1Path!] = (v) => signalK.fridge1TempK = _num(v);
-    if (c.fridge2Path != null && c.fridge2Path!.isNotEmpty)
+    }
+    if (c.fridge2Path != null && c.fridge2Path!.isNotEmpty) {
       h[c.fridge2Path!] = (v) => signalK.fridge2TempK = _num(v);
-    if (c.depthPath != null && c.depthPath!.isNotEmpty)
+    }
+    if (c.depthPath != null && c.depthPath!.isNotEmpty) {
       h[c.depthPath!] = (v) => signalK.depthM = _num(v);
+    }
     for (final t in c.tanks.where((t) => t.enabled)) {
       h[t.skPath] = (v) => signalK.tanks[t.tankKey] = _pct(v);
     }
@@ -462,7 +465,7 @@ class _DashboardState extends State<Dashboard> {
         }
       }
     }
-    if ((changed || aisChanged) && mounted)
+    if ((changed || aisChanged) && mounted) {
       setState(() {
         if (changed) {
           signalK.connected = true;
@@ -470,6 +473,7 @@ class _DashboardState extends State<Dashboard> {
           signalK.lastUpdate = DateTime.now();
         }
       });
+    }
   }
 
   void _routeAisValue(String context, String path, dynamic value) {
@@ -870,8 +874,9 @@ class _DashboardState extends State<Dashboard> {
               key == 'pgn' ||
               // Alarms/messages, never a data source we'd map a sensor to —
               // pure noise in the discovery list.
-              (prefix.isEmpty && key == 'notifications'))
+              (prefix.isEmpty && key == 'notifications')) {
             continue;
+          }
           walk(entry.value, prefix.isEmpty ? key : '$prefix.$key');
         }
       }
@@ -886,8 +891,9 @@ class _DashboardState extends State<Dashboard> {
             .firstMatch(path);
         if (battMatch != null) batteryIds.add(battMatch.group(1)!);
         final lowerPath = path.toLowerCase();
-        if (lowerPath.contains('solar') || lowerPath.contains('panel'))
+        if (lowerPath.contains('solar') || lowerPath.contains('panel')) {
           result.solarPaths.add(path);
+        }
         if (lowerPath.contains('depth')) {
           final node = leaves[path];
           final depthVal = node is Map ? _num(node['value']) : null;
@@ -915,10 +921,12 @@ class _DashboardState extends State<Dashboard> {
             capacityL: capM3 == null ? null : (capM3 * 1000).round(),
           );
         }
-        if (path == 'environment.outside.temperature')
+        if (path == 'environment.outside.temperature') {
           result.hasOutsideTemp = true;
-        if (path == 'environment.outside.pressure')
+        }
+        if (path == 'environment.outside.pressure') {
           result.hasOutsidePressure = true;
+        }
       }
       result.batteryIds.addAll(batteryIds);
       result.tanks.addAll(tankMap.values);
@@ -1012,11 +1020,12 @@ class _DashboardState extends State<Dashboard> {
       });
       unawaited(_saveWeatherCache());
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           weather.error = _weatherError(e);
           weather.updated ??= DateTime.now();
         });
+      }
     } finally {
       loadingWeather = false;
     }
@@ -1055,8 +1064,9 @@ class _DashboardState extends State<Dashboard> {
         .get(marineUri)
         .timeout(const Duration(seconds: 12));
     final doc = jsonDecode(response.body) as Map<String, dynamic>;
-    if (doc['error'] == true)
+    if (doc['error'] == true) {
       throw Exception(doc['reason'] as String? ?? 'Error de la API');
+    }
     final hourly = doc['hourly'] as Map<String, dynamic>?;
     if (hourly == null) throw Exception('Sin datos horarios');
     final times = (hourly['time'] as List).cast<num>();
@@ -1101,7 +1111,7 @@ class _DashboardState extends State<Dashboard> {
       if (waveTimes != null && waves != null) {
         for (var i = 0; i < waveTimes.length && i < waves.length; i++) {
           final v = _num(waves[i]);
-          if (v != null)
+          if (v != null) {
             waveHeight.add(
               GraphPoint(
                 time: DateTime.fromMillisecondsSinceEpoch(
@@ -1111,6 +1121,7 @@ class _DashboardState extends State<Dashboard> {
                 value: v,
               ),
             );
+          }
         }
       }
     } catch (_) {
@@ -1124,16 +1135,20 @@ class _DashboardState extends State<Dashboard> {
     final s = e.toString();
     if (s.contains('Daily API request limit') ||
         s.contains('limit exceeded') ||
-        s.contains('429'))
+        s.contains('429')) {
       return 'Límite diario superado';
-    if (s.contains('Hourly') || s.contains('hourly'))
+    }
+    if (s.contains('Hourly') || s.contains('hourly')) {
       return 'Límite horario superado';
-    if (s.contains('TimeoutException') || s.toLowerCase().contains('timeout'))
+    }
+    if (s.contains('TimeoutException') || s.toLowerCase().contains('timeout')) {
       return 'Tiempo de espera agotado';
+    }
     if (s.contains('SocketException') ||
         s.contains('Failed host lookup') ||
-        s.contains('Network'))
+        s.contains('Network')) {
       return 'Sin conexión a internet';
+    }
     // Extract "reason" message from Exception('…')
     final match = RegExp(r'Exception: (.+)').firstMatch(s);
     if (match != null) return match.group(1)!;
@@ -1152,8 +1167,9 @@ class _DashboardState extends State<Dashboard> {
     final base = list.isEmpty ? DateTime.now().toUtc() : list.first.time;
     for (final hours in [24, 48]) {
       final idx = _closestIndex(times, base.add(Duration(hours: hours)));
-      if (idx >= 0 && hourly != null)
+      if (idx >= 0 && hourly != null) {
         list.add(_forecastFromHourly(hourly, idx));
+      }
     }
     return list;
   }
@@ -1399,7 +1415,7 @@ class _DashboardState extends State<Dashboard> {
                       height: 24,
                       alignment: Alignment.topCenter,
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.45),
+                        color: Colors.black.withValues(alpha: 0.45),
                         borderRadius: const BorderRadius.vertical(
                           bottom: Radius.circular(12),
                         ),
@@ -1409,7 +1425,7 @@ class _DashboardState extends State<Dashboard> {
                         height: 4,
                         margin: const EdgeInsets.only(top: 8),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.7),
+                          color: Colors.white.withValues(alpha: 0.7),
                           borderRadius: BorderRadius.circular(2),
                         ),
                       ),
@@ -2992,14 +3008,14 @@ class _DashboardState extends State<Dashboard> {
                             children: [
                               Icon(
                                 Icons.show_chart,
-                                color: color.withOpacity(0.7),
+                                color: color.withValues(alpha: 0.7),
                                 size: 22,
                               ),
                               const SizedBox(width: 8),
                               Text(
                                 'Toca para ver gráfica',
                                 style: TextStyle(
-                                  color: cMuted.withOpacity(0.8),
+                                  color: cMuted.withValues(alpha: 0.8),
                                   fontSize: 16,
                                 ),
                               ),
@@ -3197,7 +3213,7 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
       setState(() {
         _lookingUp = false;
         _placeName = results[0] as String;
-        _nearestTown = results[1] as String?;
+        _nearestTown = results[1];
       });
     } catch (_) {
       if (!mounted || token != _lookupToken) return;
@@ -3509,14 +3525,16 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   /// room to actually see the path list.
   String? _pathHint(String path) {
     if (_navPaths.contains(path)) return 'Navegación';
-    if (_windPaths.contains(path))
+    if (_windPaths.contains(path)) {
       return path.contains('Apparent')
           ? (path.contains('speed') ? 'AWS' : 'AWA')
           : 'Viento';
+    }
     if (_envPaths.contains(path)) return 'Ambiente';
     if (path.startsWith('electrical.batteries.') &&
-        _usefulBatterySuffixes.any((s) => path.endsWith(s)))
+        _usefulBatterySuffixes.any((s) => path.endsWith(s))) {
       return 'Batería';
+    }
     if (path.startsWith('electrical.venus.')) return 'Venus';
     if (_fridgePathRe.hasMatch(path)) return 'Nevera';
     if (_tankPathRe.hasMatch(path)) return 'Tanque';
@@ -3534,8 +3552,9 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   bool _isInUse(String path) {
     if (_navPaths.contains(path) ||
         _windPaths.contains(path) ||
-        _envPaths.contains(path))
+        _envPaths.contains(path)) {
       return true;
+    }
     if (path == 'electrical.venus.dcPower') return true;
     for (final id in [
       _cfg.batteryHouseId,
@@ -3543,14 +3562,16 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       'bowthruster',
     ]) {
       if (path.startsWith('electrical.batteries.$id.') &&
-          _usefulBatterySuffixes.any((s) => path.endsWith(s)))
+          _usefulBatterySuffixes.any((s) => path.endsWith(s))) {
         return true;
+      }
     }
     if (path == _cfg.solarPath ||
         path == _cfg.fridge1Path ||
         path == _cfg.fridge2Path ||
-        path == _cfg.depthPath)
+        path == _cfg.depthPath) {
       return true;
+    }
     for (final t in _cfg.tanks.where((t) => t.enabled)) {
       if (path == t.skPath) return true;
     }
@@ -3728,9 +3749,9 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
             margin: const EdgeInsets.only(bottom: 8),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: cRed.withOpacity(0.12),
+              color: cRed.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: cRed.withOpacity(0.4)),
+              border: Border.all(color: cRed.withValues(alpha: 0.4)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -4175,7 +4196,7 @@ class _CollapsedHeaderBar extends StatelessWidget {
         height: 24,
         alignment: Alignment.topCenter,
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.45),
+          color: Colors.black.withValues(alpha: 0.45),
           borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
         ),
         child: Container(
@@ -4183,7 +4204,7 @@ class _CollapsedHeaderBar extends StatelessWidget {
           height: 4,
           margin: const EdgeInsets.only(top: 8),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.7),
+            color: Colors.white.withValues(alpha: 0.7),
             borderRadius: BorderRadius.circular(2),
           ),
         ),
@@ -4952,7 +4973,7 @@ class _DualArcPainter extends CustomPainter {
         p,
         tickEnd,
         Paint()
-          ..color = (isMajor ? cText : cMuted).withOpacity(isMajor ? 0.85 : 0.5)
+          ..color = (isMajor ? cText : cMuted).withValues(alpha: isMajor ? 0.85 : 0.5)
           ..strokeWidth = isMajor ? 1.6 : 1.0,
       );
       if (isMajor) {
@@ -4986,7 +5007,7 @@ class _DualArcPainter extends CustomPainter {
           width: ballRadius * 1.8,
           height: ballRadius * 0.9,
         ),
-        Paint()..color = Colors.black.withOpacity(0.4),
+        Paint()..color = Colors.black.withValues(alpha: 0.4),
       );
       canvas.drawCircle(
         p,
@@ -5000,7 +5021,7 @@ class _DualArcPainter extends CustomPainter {
       canvas.drawCircle(
         p + const Offset(-1.4, -1.6),
         1.3,
-        Paint()..color = Colors.white.withOpacity(0.55),
+        Paint()..color = Colors.white.withValues(alpha: 0.55),
       );
       // Re-stroke a thin highlight along the channel's top edge over the
       // bead, so the rim reads as being in front of it (i.e. the bead sits
@@ -5011,7 +5032,7 @@ class _DualArcPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.6
           ..strokeCap = StrokeCap.round
-          ..color = Colors.white.withOpacity(0.22),
+          ..color = Colors.white.withValues(alpha: 0.22),
       );
     }
   }
@@ -5113,7 +5134,7 @@ class MetricCard extends StatelessWidget {
                   Icon(
                     Icons.show_chart,
                     size: 13,
-                    color: color.withOpacity(0.5),
+                    color: color.withValues(alpha: 0.5),
                   ),
                 ],
               ],
@@ -5247,11 +5268,12 @@ class _GraphDialogState extends State<GraphDialog> {
       });
       if (usedSk) unawaited(_checkOtherSkRanges());
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _error = e.toString();
           _loading = false;
         });
+      }
     }
   }
 
@@ -5443,7 +5465,7 @@ class _GraphDialogState extends State<GraphDialog> {
   }
 
   Widget _buildBody() {
-    if (_loading)
+    if (_loading) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -5452,12 +5474,13 @@ class _GraphDialogState extends State<GraphDialog> {
             const SizedBox(height: 12),
             Text(
               'Cargando datos…',
-              style: TextStyle(color: _def.color.withOpacity(0.7)),
+              style: TextStyle(color: _def.color.withValues(alpha: 0.7)),
             ),
           ],
         ),
       );
-    if (_error != null)
+    }
+    if (_error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -5497,10 +5520,11 @@ class _GraphDialogState extends State<GraphDialog> {
           ),
         ),
       );
+    }
     // A KIP series with genuinely no data even at 24h isn't a temporary gap —
     // it means this path was never added to a widget in a KIP screen, so
     // KIP never started sampling it at all. Say so instead of "sin datos".
-    if (_points.isEmpty && _usedSk && _skRangeAvailable[0] == false)
+    if (_points.isEmpty && _usedSk && _skRangeAvailable[0] == false) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -5524,10 +5548,12 @@ class _GraphDialogState extends State<GraphDialog> {
           ),
         ),
       );
-    if (_points.isEmpty)
+    }
+    if (_points.isEmpty) {
       return const Center(
         child: Text('Sin datos', style: TextStyle(color: cMuted, fontSize: 24)),
       );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 4, 16, 4),
       child: LineGraph(
@@ -5632,7 +5658,7 @@ class LineGraph extends StatefulWidget {
 class _LineGraphState extends State<LineGraph> {
   GraphPoint? _sel;
 
-  static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0, _bPad = 30.0;
+  static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0;
 
   void _pick(Offset local, Size size) {
     final pL = _lPad, pR = size.width - _rPad;
@@ -5679,10 +5705,10 @@ class _LineGraphState extends State<LineGraph> {
           width: w,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: const Color(0xff0d1e2c).withOpacity(0.95),
+            color: const Color(0xff0d1e2c).withValues(alpha: 0.95),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: widget.color.withOpacity(0.7),
+              color: widget.color.withValues(alpha: 0.7),
               width: 1.5,
             ),
           ),
@@ -5786,20 +5812,21 @@ class _LineGraphPainter extends CustomPainter {
     // Nice grid step
     double step;
     final yRange = ySpan;
-    if (yRange < 5)
+    if (yRange < 5) {
       step = 1;
-    else if (yRange < 15)
+    } else if (yRange < 15) {
       step = 2;
-    else if (yRange < 40)
+    } else if (yRange < 40) {
       step = 5;
-    else if (yRange < 100)
+    } else if (yRange < 100) {
       step = 10;
-    else if (yRange < 250)
+    } else if (yRange < 250) {
       step = 25;
-    else if (yRange < 500)
+    } else if (yRange < 500) {
       step = 50;
-    else
+    } else {
       step = 100;
+    }
 
     final gridPaint = Paint()
       ..color = const Color(0xff1a2c38)
@@ -5910,7 +5937,7 @@ class _LineGraphPainter extends CustomPainter {
         ..shader = LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [color.withOpacity(0.3), color.withOpacity(0.03)],
+          colors: [color.withValues(alpha: 0.3), color.withValues(alpha: 0.03)],
         ).createShader(Rect.fromLTWH(pL, pT, pW, pH))
         ..style = PaintingStyle.fill,
     );
@@ -5924,8 +5951,9 @@ class _LineGraphPainter extends CustomPainter {
         if (!started) {
           linePath.moveTo(px, py);
           started = true;
-        } else
+        } else {
           linePath.lineTo(px, py);
+        }
       }
     }
     canvas.drawPath(
@@ -5955,7 +5983,7 @@ class _LineGraphPainter extends CustomPainter {
         Offset(sx, pT),
         Offset(sx, pB),
         Paint()
-          ..color = color.withOpacity(0.5)
+          ..color = color.withValues(alpha: 0.5)
           ..strokeWidth = 1.5,
       );
       canvas.drawCircle(Offset(sx, sy), 7, Paint()..color = color);
@@ -6301,13 +6329,14 @@ class ForecastStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (points.isEmpty)
+    if (points.isEmpty) {
       return const Center(
         child: Text(
           'Sin prevision',
           style: TextStyle(color: cMuted, fontSize: 24),
         ),
       );
+    }
     return ListView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.all(12),
@@ -6778,12 +6807,13 @@ class WindArrow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (deg == null)
+    if (deg == null) {
       return const SizedBox(
         width: 28,
         height: 28,
         child: Center(child: Text('--')),
       );
+    }
     return Transform.rotate(
       angle: ((deg! + 180) % 360) * math.pi / 180,
       child: Icon(Icons.navigation, color: windColor(speed), size: 28),

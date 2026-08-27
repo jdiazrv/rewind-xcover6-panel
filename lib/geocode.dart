@@ -70,8 +70,9 @@ Future<String?> nearestPopulatedPlace(double lat, double lon) async {
     final itemLat = double.tryParse(m['lat'] as String? ?? '');
     final itemLon = double.tryParse(m['lon'] as String? ?? '');
     final name = (m['name'] as String?)?.trim();
-    if (itemLat == null || itemLon == null || name == null || name.isEmpty)
+    if (itemLat == null || itemLon == null || name == null || name.isEmpty) {
       continue;
+    }
     final dist = _haversineKm(lat, lon, itemLat, itemLon);
     if (best == null || dist < best.dist) best = (name: name, dist: dist);
   }

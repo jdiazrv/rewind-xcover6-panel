@@ -428,8 +428,9 @@ class AisTarget {
     if (la == null || lo == null) return;
     final now = DateTime.now();
     if (track.isNotEmpty &&
-        now.difference(track.last.t) < const Duration(seconds: 15))
+        now.difference(track.last.t) < const Duration(seconds: 15)) {
       return;
+    }
     track.add((t: now, lat: la, lon: lo));
     track.removeWhere((p) => now.difference(p.t) > const Duration(hours: 1));
   }

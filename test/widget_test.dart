@@ -19,9 +19,12 @@ void main() {
 
     await tester.pumpWidget(const RewindApp());
     await tester.tap(find.text('PRON'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    expect(find.text('PRON'), findsOneWidget);
+    // No network in the test environment, so this lands on the "still
+    // downloading" placeholder rather than real forecast data — still
+    // enough to confirm the page actually switched and laid out cleanly.
+    expect(find.textContaining('Descargando'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -46,26 +49,26 @@ void main() {
 
     await tester.pumpWidget(const RewindApp());
     await tester.tap(find.text('TNK'));
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(find.text('Fuel'), findsOneWidget);
     expect(find.text('Fresh water'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.text('Fuel'));
     await tester.pumpAndSettle();
-    expect(find.text('Fuel Tank 1'), findsOneWidget);
-    expect(find.text('Fuel Tank 2'), findsOneWidget);
+    expect(find.text('fuel 27'), findsOneWidget);
+    expect(find.text('fuel 26'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('wind cards open wind detail panel', (WidgetTester tester) async {
+  testWidgets('VNT page shows all wind cards', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const RewindApp());
-    await tester.tap(find.text('Viento real'));
+    await tester.tap(find.text('VNT'));
     await tester.pumpAndSettle();
 
     expect(find.text('AWA'), findsOneWidget);

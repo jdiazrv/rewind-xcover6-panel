@@ -121,8 +121,9 @@ List<_AisPlot> _computeAisPlots(
   bool relativeMotion = true,
   int vectorMinutes = 10,
 }) {
-  if (ownLat == null || ownLon == null || size.shortestSide <= 0)
+  if (ownLat == null || ownLon == null || size.shortestSide <= 0) {
     return const [];
+  }
   final valid = targets.where((t) => t.lat != null && t.lon != null).toList();
   if (valid.isEmpty) return const [];
   // headingRad drives the proa/popa geometry (always the boat's real heading);
@@ -380,15 +381,17 @@ Path _genericHull(Offset pos, double bearingDeg) =>
 
 Path _hullForPlot(_AisPlot plot) {
   final type = plot.target.shipTypeId;
-  if (type == 36 || type == 37)
+  if (type == 36 || type == 37) {
     return _sailboatHull(
       plot.pos,
       plot.screenCourseDeg,
       0.9,
     ); // sailing / pleasure craft
+  }
   final bucket = type == null ? -1 : (type ~/ 10) * 10;
-  if (bucket == 70 || bucket == 80)
+  if (bucket == 70 || bucket == 80) {
     return _cargoHull(plot.pos, plot.screenCourseDeg); // cargo / tanker
+  }
   return _genericHull(plot.pos, plot.screenCourseDeg);
 }
 
@@ -467,7 +470,7 @@ class _AisRadarPainter extends CustomPainter {
       center,
       headingLineEnd,
       Paint()
-        ..color = cCyan.withOpacity(0.5)
+        ..color = cCyan.withValues(alpha: 0.5)
         ..strokeWidth = 1.5,
     );
     final northRad = northScreenAngleDeg * math.pi / 180;
@@ -540,7 +543,7 @@ class _AisRadarPainter extends CustomPainter {
         canvas.drawPath(
           trailPath,
           Paint()
-            ..color = style.fill.withOpacity(0.4)
+            ..color = style.fill.withValues(alpha: 0.4)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 1.5,
         );
@@ -705,7 +708,7 @@ class _AisTargetPhoto extends StatelessWidget {
 }
 
 class AisRelativeView extends StatefulWidget {
-  const AisRelativeView({
+  const AisRelativeView({super.key, 
     required this.targets,
     required this.ownHeadingDeg,
     required this.ownCogDeg,
@@ -960,7 +963,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.4),
+                      color: Colors.black.withValues(alpha: 0.4),
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -1039,7 +1042,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
       height: 30,
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.45),
+        color: Colors.black.withValues(alpha: 0.45),
         borderRadius: BorderRadius.circular(15),
       ),
       alignment: Alignment.center,
@@ -1059,7 +1062,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
         height: 30,
         padding: const EdgeInsets.only(left: 10, right: 4),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.45),
+          color: Colors.black.withValues(alpha: 0.45),
           borderRadius: BorderRadius.circular(15),
         ),
         child: Row(
@@ -1092,7 +1095,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
       width: 40,
       height: 40,
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.45),
+        color: Colors.black.withValues(alpha: 0.45),
         shape: BoxShape.circle,
       ),
       child: Icon(icon, color: cCyan, size: 22),
@@ -1140,8 +1143,9 @@ class _AisRelativeViewState extends State<AisRelativeView>
     final sorted = [...plots]
       ..sort((a, b) {
         final ta = a.tcpaMin, tb = b.tcpaMin;
-        if (ta == null && tb == null)
+        if (ta == null && tb == null) {
           return a.target.context.compareTo(b.target.context);
+        }
         if (ta == null) return 1;
         if (tb == null) return -1;
         final cmp = (ta * 2).round().compareTo((tb * 2).round());
@@ -1229,7 +1233,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
           Expanded(
             child: ListView.separated(
               itemCount: sorted.length,
-              separatorBuilder: (_, __) =>
+              separatorBuilder: (_, _) =>
                   const Divider(color: Color(0xff1e3040), height: 1),
               itemBuilder: (ctx, i) {
                 final p = sorted[i];

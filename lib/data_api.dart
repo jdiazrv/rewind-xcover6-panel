@@ -46,10 +46,11 @@ Future<List<GraphPoint>> influxQuery({
         body: query,
       )
       .timeout(const Duration(seconds: 15));
-  if (response.statusCode != 200)
+  if (response.statusCode != 200) {
     throw Exception(
       'HTTP ${response.statusCode}: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}',
     );
+  }
 
   final points = <GraphPoint>[];
   int timeCol = -1, valueCol = -1;
@@ -104,10 +105,11 @@ Future<List<GraphPoint>> skHistoryQuery({
             : {'Authorization': 'Basic $authBase64'},
       )
       .timeout(const Duration(seconds: 15));
-  if (response.statusCode != 200)
+  if (response.statusCode != 200) {
     throw Exception(
       'HTTP ${response.statusCode}: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}',
     );
+  }
   final doc = jsonDecode(response.body) as Map<String, dynamic>;
   final data = doc['data'];
   if (data is! List) return [];
@@ -153,15 +155,17 @@ Duration parseAggEvery(String a) {
 (double, double, double, double) _demoGraphBounds(MetricDef def) {
   final label = def.label.toLowerCase();
   if (label.contains('nevera')) return (4, 0.8, 0, 12);
-  if (label.contains('raspberry') || label.contains('cpu'))
+  if (label.contains('raspberry') || label.contains('cpu')) {
     return (55, 3, 35, 80);
+  }
   if (label.contains('mar')) return (23, 0.4, 10, 30);
   if (label.contains('exterior')) return (24, 2, 5, 40);
   if (def.offset != 0) return (22, 1.5, 5, 45); // generic Celsius temp fallback
   if (label.contains('bater')) return (75, 3, 20, 100);
   if (label.contains('corriente')) return (0, 4, -25, 25);
-  if (label.contains('voltaje') || label.contains('start'))
+  if (label.contains('voltaje') || label.contains('start')) {
     return (12.6, 0.08, 11.5, 14.4);
+  }
   if (label.contains('solar')) return (300, 60, 0, 900);
   if (label.contains('dc loads')) return (55, 15, 0, 200);
   if (label.contains('presi')) return (1015, 1.5, 990, 1035);

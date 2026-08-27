@@ -1,17 +1,18 @@
-// ignore_for_file: avoid_web_libraries_in_flutter
-
-import 'dart:html' as html;
+import 'dart:js_interop';
 import 'dart:typed_data';
 
+import 'package:web/web.dart' as web;
+
 Future<void> exportPdfReport({required Uint8List bytes, required String filename, required String subject}) async {
-  final blob = html.Blob([bytes], 'application/pdf');
-  final url = html.Url.createObjectUrlFromBlob(blob);
+  final blob = web.Blob([bytes.toJS].toJS, web.BlobPropertyBag(type: 'application/pdf'));
+  final url = web.URL.createObjectURL(blob);
   try {
-    html.AnchorElement(href: url)
+    (web.document.createElement('a') as web.HTMLAnchorElement)
+      ..href = url
       ..download = filename
       ..style.display = 'none'
       ..click();
   } finally {
-    html.Url.revokeObjectUrl(url);
+    web.URL.revokeObjectURL(url);
   }
 }
