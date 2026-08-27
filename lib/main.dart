@@ -1341,6 +1341,9 @@ class _DashboardState extends State<Dashboard> {
   // (see navUpdate/windUpdate on SignalKModel) so one dying instrument doesn't
   // hide behind the other still updating.
   static const _navWindStaleAfter = Duration(seconds: 8);
+  // Below this CPA, the NAV cards switch to a stronger alert color — this is
+  // "about to matter" territory, not just "closer than most".
+  static const _cpaCriticalNm = 0.5;
   bool get _navFresh {
     final u = signalK.navUpdate;
     return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
@@ -1673,6 +1676,7 @@ class _DashboardState extends State<Dashboard> {
           color: positionFresh ? cGreen : cMuted,
         );
       case 'cpa':
+        final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
         return NavCardData(
           id: id,
           title: 'CPA',
@@ -1683,9 +1687,12 @@ class _DashboardState extends State<Dashboard> {
           subtitle: closest == null
               ? 'Sin AIS'
               : _aisTargetName(closest.target),
-          color: closest == null ? cMuted : cOrange,
+          color: closest == null
+              ? cMuted
+              : (cpaCritical ? cRed : cOrange),
         );
       case 'tcpa':
+        final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
         return NavCardData(
           id: id,
           title: 'TCPA',
@@ -1696,7 +1703,9 @@ class _DashboardState extends State<Dashboard> {
           subtitle: closest == null
               ? 'Sin AIS'
               : _aisTargetName(closest.target),
-          color: closest == null ? cMuted : cOrange,
+          color: closest == null
+              ? cMuted
+              : (cpaCritical ? cRed : cOrange),
         );
       case 'time':
         final now = DateTime.now();
@@ -1940,35 +1949,44 @@ class _DashboardState extends State<Dashboard> {
             if (ctx.mounted) setSt(() {});
           });
           final closest = _closestApproachTarget();
+          final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
           final rows = closest == null
-              ? const [('Estado', 'Sin objetivos AIS con rumbo de colisión')]
-              : <(String, String)>[
-                  ('Objetivo', _aisTargetName(closest.target)),
+              ? const [('Estado', 'Sin objetivos AIS con rumbo de colisión', cText)]
+              : <(String, String, Color)>[
+                  ('Objetivo', _aisTargetName(closest.target), cText),
                   (
-                    'Rumbo',
+                    'Demora',
                     closest.bearingDeg != null
                         ? '${closest.bearingDeg!.round()}°'
                         : '--',
+                    cText,
                   ),
                   (
                     'Distancia',
                     closest.distNm != null
                         ? '${closest.distNm!.toStringAsFixed(1)} NM'
                         : '--',
+                    cText,
                   ),
                   (
                     'CPA',
                     closest.cpaNm != null
                         ? '${closest.cpaNm!.toStringAsFixed(1)} NM'
                         : '--',
+                    cpaCritical ? cRed : cText,
                   ),
                   (
                     'TCPA',
                     closest.tcpaMin != null
                         ? '${closest.tcpaMin!.round()} min'
                         : '--',
+                    cpaCritical ? cRed : cText,
                   ),
-                  ('Cruce', closest.crossing ?? 'Sin cruce claro'),
+                  (
+                    'Cruce',
+                    closest.crossing ?? 'Sin cruce claro',
+                    cpaCritical ? cRed : cText,
+                  ),
                 ];
           return Dialog(
             backgroundColor: cBg,
@@ -2021,8 +2039,8 @@ class _DashboardState extends State<Dashboard> {
                             Expanded(
                               child: Text(
                                 row.$2,
-                                style: const TextStyle(
-                                  color: cText,
+                                style: TextStyle(
+                                  color: row.$3,
                                   fontSize: 13,
                                   fontWeight: FontWeight.w600,
                                 ),

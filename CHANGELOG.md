@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.7] - 2026-08-27
+
+### Cambiado
+- **Detalle de CPA**: "Rumbo" ahora se llama "Demora" (el término correcto para el rumbo hacia el objetivo). Cuando el CPA es menor de 0,5 NM, las tarjetas CPA/TCPA y las filas de CPA/TCPA/Cruce en el detalle se resaltan en rojo.
+
 ## [1.4.6] - 2026-08-27
 
 ### Interno
