@@ -1,0 +1,27 @@
+default_platform(:android)
+opt_out_usage
+
+platform :android do
+  desc "Build the release AAB (uses the same signing config as `flutter build appbundle`)"
+  lane :build do
+    sh("cd .. && flutter build appbundle --release")
+  end
+
+  desc "Upload the current AAB to the Play Store internal testing track"
+  lane :deploy_internal do
+    upload_to_play_store(
+      track: "internal",
+      aab: "../build/app/outputs/bundle/release/app-release.aab",
+      release_status: "completed",
+    )
+  end
+
+  desc "Promote the current AAB straight to production"
+  lane :deploy_production do
+    upload_to_play_store(
+      track: "production",
+      aab: "../build/app/outputs/bundle/release/app-release.aab",
+      release_status: "completed",
+    )
+  end
+end

@@ -53,5 +53,10 @@ android/app/upload-keystore.jks
 *.jks
 *.keystore
 
+# fastlane — never commit the Play Console service-account key or its logs
+android/fastlane/play-service-account.json
+android/fastlane/report.xml
+android/fastlane/README.md
+
 # Zipped release artifacts (web build, etc.) — build outputs, not source
 outputs/
