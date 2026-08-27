@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="REWIND instrument panel.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="REWIND">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>REWIND Panel</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #061116;
+      overscroll-behavior: none;
+      touch-action: manipulation;
+    }
+    iframe[src*="netlify"],
+    a[href*="netlify.com"][aria-label*="Netlify"],
+    a[href*="netlify.com"][title*="Netlify"],
+    [id*="netlify" i],
+    [class*="netlify" i] {
+      display: none !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
+  </style>
+</head>
+<body>
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script>
+    window.rewindToggleFullscreen = function () {
+      const doc = document;
+      const el = doc.documentElement;
+      const standalone = window.navigator.standalone === true ||
+        window.matchMedia('(display-mode: standalone)').matches ||
+        window.matchMedia('(display-mode: fullscreen)').matches;
+      if (doc.fullscreenElement) {
+        if (doc.exitFullscreen) doc.exitFullscreen();
+        return;
+      }
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {});
+        return;
+      }
+      if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+        return;
+      }
+      const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isiOS && !standalone) {
+        alert('En iPhone Safari no permite pantalla completa desde un botón. Para verlo sin los botones del navegador: Compartir > Añadir a pantalla de inicio, y abre REWIND desde ese icono.');
+        return;
+      }
+      if (isiOS && standalone) {
+        alert('REWIND ya está abierto como app desde la pantalla de inicio.');
+        return;
+      }
+      alert('Este navegador no permite activar pantalla completa desde la web.');
+    };
+    window.rewindRemoveNetlifyBadge = function () {
+      const nodes = document.querySelectorAll('a, iframe, div, span');
+      for (const node of nodes) {
+        const href = node.getAttribute && (node.getAttribute('href') || node.getAttribute('src') || '');
+        const id = node.getAttribute && (node.getAttribute('id') || '');
+        const cls = node.getAttribute && (node.getAttribute('class') || '');
+        const txt = (node.textContent || '').trim().toLowerCase();
+        if ((href && href.toLowerCase().includes('netlify')) ||
+            (id && id.toLowerCase().includes('netlify')) ||
+            (cls && cls.toLowerCase().includes('netlify')) ||
+            txt === 'powered by netlify' ||
+            txt.includes('powered by netlify')) {
+          node.style.setProperty('display', 'none', 'important');
+          node.style.setProperty('visibility', 'hidden', 'important');
+        }
+      }
+    };
+    window.addEventListener('load', () => {
+      window.rewindRemoveNetlifyBadge();
+      setTimeout(window.rewindRemoveNetlifyBadge, 1000);
+      setTimeout(window.rewindRemoveNetlifyBadge, 3000);
+      new MutationObserver(window.rewindRemoveNetlifyBadge)
+        .observe(document.body, { childList: true, subtree: true });
+    });
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
