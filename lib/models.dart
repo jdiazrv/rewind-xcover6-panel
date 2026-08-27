@@ -138,7 +138,8 @@ const allNavCardIds = [
   'cpa',
   'tcpa',
   'time',
-  'vmg',
+  'vmgWind',
+  'vmgRoute',
 ];
 
 class NavCardData {
@@ -172,6 +173,11 @@ class SignalKModel {
   // so a single shared timestamp would mask a stale sensor as still-fresh.
   DateTime? navUpdate;
   DateTime? windUpdate;
+  // Only set while a route/waypoint is active in Signal K — the server
+  // simply stops emitting this path when there isn't one, so its own
+  // staleness (vs. navUpdate) is what tells the VMG-to-waypoint card
+  // "sin ruta" instead of showing a frozen old number.
+  DateTime? courseUpdate;
   // Navigation
   double? latitude;
   double? longitude;
@@ -181,6 +187,18 @@ class SignalKModel {
   double? cogTrueDeg;
   double? heelDeg;
   double? pitchDeg;
+  // GNSS/GPS quality — separate from the position update timestamp above,
+  // since these change far less often than lat/lon and shouldn't be marked
+  // stale just because the receiver hasn't emitted a new fix-quality delta.
+  int? gnssSatellites;
+  double? gnssHdop;
+  double? gnssAntennaAltitudeM;
+  String? gnssFixType; // Signal K navigation.gnss.type, e.g. "GPS", "GNSS"
+  String? gnssMethodQuality; // e.g. "no GPS", "GNSS Fix", "DGNSS Fix", "RTK fixed integer"
+  // VMG to the active route/waypoint, straight from Signal K's own course
+  // calculation (whatever plugin/core feature is computing the route) —
+  // we don't derive this ourselves, unlike VMG-to-wind below.
+  double? courseVmgKn;
   // Environment
   double? depthM;
   double? waterTempK;

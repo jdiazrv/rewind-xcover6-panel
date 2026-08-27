@@ -2,6 +2,16 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.3] - 2026-08-27
+
+### Añadido
+- **GPS con más datos**: la tarjeta GPS ahora muestra el nº de satélites y calidad de fix en la propia carta, y al tocarla abre el detalle completo (satélites, HDOP, tipo, calidad de fix, altitud de antena, posición, última actualización).
+- **VMG viento** y **VMG ruta**: dos tarjetas NAV nuevas y separadas — VMG viento se calcula en la app (STW/SOG · cos(TWA)), VMG ruta viene del cálculo de ruta activa de Signal K (`navigation.course.calcValues.velocityMadeGood`).
+
+### Arreglado
+- **CPA/TCPA en NAV mostraban "Sin AIS" aunque hubiera tráfico**: la suscripción a objetivos AIS solo se activaba al entrar en la pantalla AIS. Ahora también se activa automáticamente si alguna tarjeta NAV usa CPA o TCPA, sin depender de qué pantalla estés mirando.
+- El selector de tarjeta NAV (mantener pulsado) ya no ocupa toda la pantalla — ahora es un panel superpuesto más pequeño, para no confundirlo con una pantalla real de la app.
+
 ## [1.4.2] - 2026-08-27
 
 ### Añadido

@@ -392,7 +392,11 @@ class _DashboardState extends State<Dashboard> {
         onDone: _onSignalKDone,
       );
       _sendSignalKSubscription();
-      if (_aisSubscribed) _sendAisSubscription();
+      // A fresh connection always starts unsubscribed from AIS — re-derive
+      // whether it should be (AIS page open, or a CPA/TCPA NAV card is
+      // selected) rather than trusting the pre-reconnect _aisSubscribed flag.
+      _aisSubscribed = false;
+      _syncAisSubscription();
       setState(() {
         signalK.connected = true;
         signalK.status = 'Signal K';
@@ -411,6 +415,12 @@ class _DashboardState extends State<Dashboard> {
       'navigation.courseOverGroundTrue',
       'navigation.attitude',
       'navigation.attitude.roll',
+      'navigation.gnss.satellites',
+      'navigation.gnss.horizontalDilution',
+      'navigation.gnss.antennaAltitude',
+      'navigation.gnss.type',
+      'navigation.gnss.methodQuality',
+      'navigation.course.calcValues.velocityMadeGood',
       'environment.wind.speedApparent',
       'environment.wind.angleApparent',
       'environment.wind.angleTrueWater',
@@ -540,6 +550,22 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
+  // Whether the AIS page is open, or a CPA/TCPA NAV card needs live AIS
+  // targets to compute "closest approach" — either one keeps the (otherwise
+  // on-demand, to save bandwidth) vessels.* subscription alive.
+  bool get _navWantsAis =>
+      settings.navCardIds.contains('cpa') || settings.navCardIds.contains('tcpa');
+
+  void _syncAisSubscription() {
+    final ids = _pageIds;
+    final onAisPage = page < ids.length && ids[page] == 'AIS';
+    if (onAisPage || _navWantsAis) {
+      _subscribeAis();
+    } else {
+      _unsubscribeAis();
+    }
+  }
+
   void _subscribeAis() {
     if (_aisSubscribed) return;
     _aisSubscribed = true;
@@ -600,6 +626,20 @@ class _DashboardState extends State<Dashboard> {
         signalK.headingTrueDeg = n == null ? null : n * 57.2957795;
       case 'navigation.courseOverGroundTrue':
         signalK.cogTrueDeg = n == null ? null : n * 57.2957795;
+      case 'navigation.gnss.satellites':
+        signalK.gnssSatellites = n?.round();
+      case 'navigation.gnss.horizontalDilution':
+        signalK.gnssHdop = n;
+      case 'navigation.gnss.antennaAltitude':
+        signalK.gnssAntennaAltitudeM = n;
+      case 'navigation.gnss.type':
+        signalK.gnssFixType = value?.toString();
+      case 'navigation.gnss.methodQuality':
+        signalK.gnssMethodQuality = value?.toString();
+      case 'navigation.course.calcValues.velocityMadeGood':
+        signalK.courseVmgKn = n == null ? null : n * 1.94384;
+        signalK.courseUpdate = ts;
+        return true;
       case 'navigation.attitude':
         if (settings.usePhoneHeel) return true;
         if (value is Map) {
@@ -1309,17 +1349,20 @@ class _DashboardState extends State<Dashboard> {
     return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
   }
 
+  // Signal K simply stops emitting navigation.course.calcValues.velocityMadeGood
+  // when there's no active route — staleness here means "no waypoint", not
+  // "sensor died", but the same freshness check works for both.
+  bool get _courseFresh {
+    final u = signalK.courseUpdate;
+    return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
+  }
+
   double? _fresh(double? v) => _navFresh ? v : null;
   double? _freshWind(double? v) => _windFresh ? v : null;
 
   void _onPageChange(int i) {
     setState(() => page = i);
-    final ids = _pageIds;
-    if (i < ids.length && ids[i] == 'AIS') {
-      _subscribeAis();
-    } else {
-      _unsubscribeAis();
-    }
+    _syncAisSubscription();
     _navHideTimer?.cancel();
     if (_autoHidesHeader) {
       _navHideTimer = Timer(const Duration(seconds: 2), () {
@@ -1531,7 +1574,11 @@ class _DashboardState extends State<Dashboard> {
         color: data.color,
         zoom: _showZoom,
         graphMetrics: data.graphMetrics,
-        onTap: data.id == 'heel' ? () => _showAttitudeGauges(context) : null,
+        onTap: data.id == 'heel'
+            ? () => _showAttitudeGauges(context)
+            : data.id == 'gps'
+            ? () => _showGpsDetail(context)
+            : null,
         onLongPress: selectable ? () => _showNavCardPicker(slot) : null,
         onDoubleTap: selectable ? () => _showNavCardPicker(slot) : null,
         onSecondaryTap: selectable ? () => _showNavCardPicker(slot) : null,
@@ -1613,8 +1660,11 @@ class _DashboardState extends State<Dashboard> {
         return NavCardData(
           id: id,
           title: 'GPS',
-          value: positionFresh ? 'OK' : '--',
-          subtitle: _lastUpdateText(signalK.navUpdate ?? signalK.lastUpdate),
+          value: signalK.gnssSatellites?.toString() ?? (positionFresh ? 'OK' : '--'),
+          unit: signalK.gnssSatellites != null ? 'sat' : null,
+          subtitle:
+              signalK.gnssMethodQuality ??
+              _lastUpdateText(signalK.navUpdate ?? signalK.lastUpdate),
           color: positionFresh ? cGreen : cMuted,
         );
       case 'cpa':
@@ -1652,14 +1702,31 @@ class _DashboardState extends State<Dashboard> {
           subtitle: ddmmyyyy(now),
           color: cText,
         );
-      case 'vmg':
+      case 'vmgWind':
+        final twaForVmg = _freshWind(_dTwa);
+        final speedForVmg = stw ?? sog;
+        final vmgWind = (twaForVmg != null && speedForVmg != null)
+            ? speedForVmg * math.cos(twaForVmg * math.pi / 180)
+            : null;
         return NavCardData(
           id: id,
-          title: 'VMG',
-          value: '--',
+          title: 'VMG viento',
+          value: fmt(vmgWind, 1, ''),
           unit: 'kt',
-          subtitle: 'Sin waypoint',
-          color: cMuted,
+          subtitle: vmgWind == null
+              ? 'Sin viento'
+              : (vmgWind >= 0 ? 'Ciñendo' : 'Empopada'),
+          color: vmgWind == null ? cMuted : cGreen,
+        );
+      case 'vmgRoute':
+        final vmgRoute = _courseFresh ? signalK.courseVmgKn : null;
+        return NavCardData(
+          id: id,
+          title: 'VMG ruta',
+          value: fmt(vmgRoute, 1, ''),
+          unit: 'kt',
+          subtitle: vmgRoute == null ? 'Sin ruta' : null,
+          color: vmgRoute == null ? cMuted : cGreen,
         );
       default:
         return _navCardData(defaultNavCardIds.first);
@@ -1687,12 +1754,16 @@ class _DashboardState extends State<Dashboard> {
         .toList();
     showDialog<void>(
       context: context,
-      builder: (ctx) => Dialog.fullscreen(
+      builder: (ctx) => Dialog(
         backgroundColor: cBg,
-        child: SafeArea(
+        insetPadding: const EdgeInsets.all(24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 420),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
@@ -1702,7 +1773,7 @@ class _DashboardState extends State<Dashboard> {
                         'Cambiar carta NAV',
                         style: TextStyle(
                           color: cText,
-                          fontSize: 22,
+                          fontSize: 18,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
@@ -1713,9 +1784,10 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Expanded(
+                const SizedBox(height: 4),
+                Flexible(
                   child: GridView.builder(
+                    shrinkWrap: true,
                     itemCount: choices.length,
                     gridDelegate:
                         const SliverGridDelegateWithFixedCrossAxisCount(
@@ -1737,12 +1809,104 @@ class _DashboardState extends State<Dashboard> {
                           next[slot] = data.id;
                           setState(() => settings.navCardIds = next);
                           await _saveSettings();
+                          _syncAisSubscription();
                           if (ctx.mounted) Navigator.of(ctx).pop();
                         },
                       );
                     },
                   ),
                 ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showGpsDetail(BuildContext context) {
+    final sat = signalK.gnssSatellites;
+    final hdop = signalK.gnssHdop;
+    final alt = signalK.gnssAntennaAltitudeM;
+    final fixType = signalK.gnssFixType;
+    final quality = signalK.gnssMethodQuality;
+    final positionFresh =
+        _navFresh && signalK.latitude != null && signalK.longitude != null;
+    final rows = <(String, String)>[
+      ('Satélites', sat?.toString() ?? '--'),
+      ('HDOP', hdop != null ? hdop.toStringAsFixed(1) : '--'),
+      ('Tipo', fixType ?? '--'),
+      ('Calidad de fix', quality ?? '--'),
+      ('Altitud antena', alt != null ? '${alt.toStringAsFixed(0)} m' : '--'),
+      (
+        'Posición',
+        positionFresh
+            ? posLines(signalK.latitude, signalK.longitude)
+            : '--',
+      ),
+      (
+        'Última actualización',
+        _lastUpdateText(signalK.navUpdate ?? signalK.lastUpdate),
+      ),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: cBg,
+        insetPadding: const EdgeInsets.all(24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'GPS',
+                        style: TextStyle(
+                          color: cText,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: cMuted),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+                for (final row in rows)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 150,
+                          child: Text(
+                            row.$1,
+                            style: const TextStyle(color: cMuted, fontSize: 13),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            row.$2,
+                            style: const TextStyle(
+                              color: cText,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
