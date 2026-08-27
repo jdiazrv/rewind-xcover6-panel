@@ -62,9 +62,21 @@ Freeboard-SK, el Anchor Alarm, etc.) y se sirve desde ahí — al abrirla así,
 detecta sola el host/puerto del propio servidor Signal K, sin pedirlo en
 `CFG`.
 
-El repo ya incluye `public/` compilado (se regenera con `flutter build web
-&& rm -rf public && cp -R build/web public` tras cualquier cambio). Formas
-de instalarlo en el servidor:
+El repo ya incluye `public/` compilado. Signal K la monta bajo
+`/rewind-xcover6-panel/` (el `name` de `package.json`), así que hay que
+compilarla con ese `--base-href` — si no, la app carga en blanco (busca
+`main.dart.js` en la raíz del servidor en vez de en su subcarpeta).
+Regenerar tras cualquier cambio con:
+
+```sh
+flutter build web --base-href /rewind-xcover6-panel/
+rm -rf public && cp -R build/web public
+```
+
+(El zip para Netlify, en cambio, sí se compila con `flutter build web` a
+secas — ahí la app vive en la raíz del dominio.)
+
+Formas de instalarlo en el servidor:
 
 **Desde la pantalla Appstore de Signal K** (más sencillo): Servidor →
 Appstore → pega la URL `https://github.com/jdiazrv/rewind-xcover6-panel`
