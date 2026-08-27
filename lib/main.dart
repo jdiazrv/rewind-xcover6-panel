@@ -228,6 +228,7 @@ class _DashboardState extends State<Dashboard> {
     settings.phoneAttitudeInvertRoll =
         prefs.getBool('phoneAttitudeInvertRoll') ??
         settings.phoneAttitudeInvertRoll;
+    settings.navGridColumns = prefs.getInt('navGridColumns') ?? settings.navGridColumns;
     final navJson = prefs.getString('navCardIdsJson');
     if (navJson != null) {
       try {
@@ -269,6 +270,7 @@ class _DashboardState extends State<Dashboard> {
       jsonEncode(settings.sensorConfig.toJson()),
     );
     await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
+    await prefs.setInt('navGridColumns', settings.navGridColumns);
     await prefs.setBool('demoMode', settings.demoMode);
     await prefs.setBool('usePhoneHeel', settings.usePhoneHeel);
     await prefs.setBool(
@@ -1529,6 +1531,7 @@ class _DashboardState extends State<Dashboard> {
               SizedBox(
                 height: pageHeight,
                 child: _grid3x2(
+                  columns: settings.navGridColumns,
                   children: [
                     for (var i = 0; i < selected.length; i++)
                       _navMetricCard(selected[i], i),
@@ -1736,16 +1739,23 @@ class _DashboardState extends State<Dashboard> {
   }
 
   List<String> _validNavSelection(List<String> ids) {
+    final max = settings.navGridColumns * 2;
     final out = <String>[];
     for (final id in ids) {
       if (allNavCardIds.contains(id) && !out.contains(id)) out.add(id);
-      if (out.length == 6) break;
+      if (out.length == max) break;
     }
     for (final id in defaultNavCardIds) {
-      if (out.length == 6) break;
+      if (out.length == max) break;
       if (!out.contains(id)) out.add(id);
     }
-    return out;
+    // 4x2 needs 2 more cards than defaultNavCardIds provides — fill any
+    // remaining slots from the rest of the catalog.
+    for (final id in allNavCardIds) {
+      if (out.length == max) break;
+      if (!out.contains(id)) out.add(id);
+    }
+    return out.take(max).toList();
   }
 
   void _showNavCardPicker(int slot) {
@@ -2219,16 +2229,16 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Widget _grid3x2({required List<Widget> children}) {
+  Widget _grid3x2({required List<Widget> children, int columns = 3}) {
     const gap = 8.0;
     final rows = <Widget>[];
-    for (var i = 0; i < children.length; i += 3) {
-      final slice = children.sublist(i, math.min(i + 3, children.length));
+    for (var i = 0; i < children.length; i += columns) {
+      final slice = children.sublist(i, math.min(i + columns, children.length));
       rows.add(
         Expanded(
           child: Row(
             children: [
-              for (var j = 0; j < 3; j++) ...[
+              for (var j = 0; j < columns; j++) ...[
                 if (j > 0) const SizedBox(width: gap),
                 Expanded(
                   child: j < slice.length ? slice[j] : const SizedBox.shrink(),
@@ -2238,7 +2248,7 @@ class _DashboardState extends State<Dashboard> {
           ),
         ),
       );
-      if (i + 3 < children.length) rows.add(const SizedBox(height: gap));
+      if (i + columns < children.length) rows.add(const SizedBox(height: gap));
     }
     return Padding(
       padding: const EdgeInsets.all(gap),
@@ -3376,6 +3386,35 @@ class _DashboardState extends State<Dashboard> {
                           selected: {settings.brightnessMode},
                           onSelectionChanged: (v) {
                             setState(() => settings.brightnessMode = v.first);
+                            unawaited(_saveSettings());
+                          },
+                          style: const ButtonStyle(
+                            visualDensity: VisualDensity(
+                              horizontal: -2,
+                              vertical: -2,
+                            ),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        const Text(
+                          'PANTALLA NAV',
+                          style: TextStyle(
+                            color: cMuted,
+                            fontSize: 10,
+                            letterSpacing: 1.1,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        SegmentedButton<int>(
+                          segments: const [
+                            ButtonSegment(value: 3, label: Text('3×2 (6 cartas)')),
+                            ButtonSegment(value: 4, label: Text('4×2 (8 cartas)')),
+                          ],
+                          selected: {settings.navGridColumns},
+                          onSelectionChanged: (v) {
+                            setState(() => settings.navGridColumns = v.first);
                             unawaited(_saveSettings());
                           },
                           style: const ButtonStyle(
@@ -6758,7 +6797,7 @@ class _WindTapCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.black,
+      color: Colors.transparent,
       borderRadius: BorderRadius.circular(14),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -7509,7 +7548,12 @@ class CardShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Card(
-    color: cPanel,
+    color: Colors.transparent,
+    elevation: 0,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(14),
+      side: const BorderSide(color: cPanel2, width: 1),
+    ),
     clipBehavior: Clip.antiAlias,
     child: InkWell(
       onTap: onTap,
@@ -7582,12 +7626,28 @@ String tempNum(double? kelvin) =>
 String tempValue(double? kelvin) =>
     kelvin == null ? 'No data' : (kelvin - 273.15).toStringAsFixed(1);
 String? tempUnit(double? kelvin) => kelvin == null ? null : '°C';
+// Degrees + minutes.tenths (e.g. 36°43.3'N) — the format sailors actually
+// plot with, rather than raw decimal degrees.
+String _dmm(double value, bool isLat) {
+  final hemi = isLat ? (value >= 0 ? 'N' : 'S') : (value >= 0 ? 'E' : 'W');
+  final abs = value.abs();
+  var deg = abs.floor();
+  var min = (abs - deg) * 60;
+  var minStr = min.toStringAsFixed(1);
+  if (double.parse(minStr) >= 60) {
+    deg += 1;
+    minStr = '0.0';
+  }
+  final degStr = deg.toString().padLeft(isLat ? 2 : 3, '0');
+  return "$degStr°$minStr'$hemi";
+}
+
 String pos(double? lat, double? lon) => lat == null || lon == null
     ? '--'
-    : '${lat.toStringAsFixed(4)}, ${lon.toStringAsFixed(4)}';
+    : '${_dmm(lat, true)} ${_dmm(lon, false)}';
 String posLines(double? lat, double? lon) => lat == null || lon == null
     ? '--'
-    : '${lat.toStringAsFixed(4)}\n${lon.toStringAsFixed(4)}';
+    : '${_dmm(lat, true)}\n${_dmm(lon, false)}';
 String angle(double? value) => value == null ? '--' : value.round().toString();
 String angleAbs(double? value) => value == null
     ? '--'

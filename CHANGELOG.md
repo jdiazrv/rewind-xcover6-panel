@@ -2,6 +2,13 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.5] - 2026-08-27
+
+### Cambiado
+- **Estilo unificado de tarjetas**: NAV, VNT y el resto de pantallas ahora usan el mismo estilo — fondo transparente y borde fino, en vez de la mezcla de relleno sólido de NAV y relleno negro con borde de color de VNT.
+- **Posición en grados/minutos**: la latitud y longitud ahora se muestran como `36°43.3'N` / `004°25.3'W` (grados, minutos y décimas) en vez de grados decimales.
+- **CFG → Pantalla**: nueva opción para elegir el número de tarjetas de NAV, 3×2 (6, como hasta ahora) o 4×2 (8).
+
 ## [1.4.4] - 2026-08-27
 
 ### Añadido

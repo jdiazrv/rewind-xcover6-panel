@@ -563,6 +563,7 @@ class SettingsModel {
   String influxArchiveBucket = influxBucketDefault; // bucket for 7d / 1mes
   SensorConfig sensorConfig = SensorConfig();
   List<String> navCardIds = List<String>.of(defaultNavCardIds);
+  int navGridColumns = 3; // 3 -> 3x2 (6 cards), 4 -> 4x2 (8 cards)
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted
