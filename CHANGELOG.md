@@ -2,6 +2,16 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.1] - 2026-08-27
+
+### Arreglado
+- **Webapp (MAP/ANC)**: el botón para restaurar la cabecera oculta no respondía al tocarlo, porque quedaba flotando sobre el `<iframe>` de Freeboard-SK/Anchor Alarm y el navegador entregaba el toque directamente al iframe. Ahora, en web, se usa una barra colapsada con espacio de layout propio (no superpuesta), con el mismo estilo visual que el tirador de Android.
+- Etiquetas más claras en `CFG → Pantalla → MODO` (Tema claro / Auto (dispositivo) / Tema oscuro) — sigue siendo el filtro rojo de visión nocturna de siempre, no un tema claro real.
+
+### Interno
+- Limpieza de avisos del analizador (98 → 1, el restante es un falso positivo): `withOpacity` → `withValues`, llaves en `if`/`else`, cast e import innecesarios, migración de los últimos usos de `dart:html`/`dart:js` a `package:web`/`dart:js_interop`.
+- Arreglados 2 tests de widgets que daban falsos positivos/negativos por no esperar la animación de cambio de página, y por comprobar textos de UI que ya no existían.
+
 ## [1.4.0] - 2026-08-27
 
 Primera versión pública.
