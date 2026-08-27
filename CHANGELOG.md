@@ -2,6 +2,14 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.4] - 2026-08-27
+
+### Añadido
+- **Detalle de CPA**: al tocar la tarjeta CPA se abre un panel con objetivo, rumbo, distancia actual, CPA, TCPA y si el cruce es por proa o por popa (mismo criterio que la pestaña AIS: solo se etiqueta el cruce si el objetivo se mueve y pasará a menos de 5 NM). El panel se refresca cada 2s, así que si otro objetivo pasa a ser el más cercano, el panel salta a ese automáticamente.
+
+### Interno
+- Corregido un problema de build: Dropbox sobrescribía intermitentemente el APK/AAB recién compilados en `build/` con una copia antigua. Los artefactos de Android ahora se toman siempre de la salida real de Gradle fuera del árbol sincronizado.
+
 ## [1.4.3] - 2026-08-27
 
 ### Añadido

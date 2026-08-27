@@ -1578,6 +1578,8 @@ class _DashboardState extends State<Dashboard> {
             ? () => _showAttitudeGauges(context)
             : data.id == 'gps'
             ? () => _showGpsDetail(context)
+            : data.id == 'cpa'
+            ? () => _showCpaDetail(context)
             : null,
         onLongPress: selectable ? () => _showNavCardPicker(slot) : null,
         onDoubleTap: selectable ? () => _showNavCardPicker(slot) : null,
@@ -1915,13 +1917,143 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  ({AisTarget target, double? cpaNm, double? tcpaMin})?
+  void _showCpaDetail(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) {
+          // Refreshes every 2s while open so, per the same rule the NAV
+          // card itself follows, a target that becomes the new closest
+          // approach takes over the dialog instead of it staying stuck on
+          // whichever target was closest at the moment it was opened.
+          Timer(const Duration(seconds: 2), () {
+            if (ctx.mounted) setSt(() {});
+          });
+          final closest = _closestApproachTarget();
+          final rows = closest == null
+              ? const [('Estado', 'Sin objetivos AIS con rumbo de colisión')]
+              : <(String, String)>[
+                  ('Objetivo', _aisTargetName(closest.target)),
+                  (
+                    'Rumbo',
+                    closest.bearingDeg != null
+                        ? '${closest.bearingDeg!.round()}°'
+                        : '--',
+                  ),
+                  (
+                    'Distancia',
+                    closest.distNm != null
+                        ? '${closest.distNm!.toStringAsFixed(1)} NM'
+                        : '--',
+                  ),
+                  (
+                    'CPA',
+                    closest.cpaNm != null
+                        ? '${closest.cpaNm!.toStringAsFixed(1)} NM'
+                        : '--',
+                  ),
+                  (
+                    'TCPA',
+                    closest.tcpaMin != null
+                        ? '${closest.tcpaMin!.round()} min'
+                        : '--',
+                  ),
+                  ('Cruce', closest.crossing ?? 'Sin cruce claro'),
+                ];
+          return Dialog(
+            backgroundColor: cBg,
+            insetPadding: const EdgeInsets.all(24),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'CPA',
+                            style: TextStyle(
+                              color: cText,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: cMuted),
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                      ],
+                    ),
+                    for (final row in rows)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: 110,
+                              child: Text(
+                                row.$1,
+                                style: const TextStyle(
+                                  color: cMuted,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: Text(
+                                row.$2,
+                                style: const TextStyle(
+                                  color: cText,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  ({
+    AisTarget target,
+    double? cpaNm,
+    double? tcpaMin,
+    double? bearingDeg,
+    double? distNm,
+    String? crossing,
+  })?
   _closestApproachTarget() {
     final ownLat = signalK.latitude;
     final ownLon = signalK.longitude;
-    final ownCog = _fresh(signalK.cogTrueDeg) ?? _fresh(signalK.headingTrueDeg);
+    final ownHeading = _fresh(signalK.headingTrueDeg);
+    final ownCog = _fresh(signalK.cogTrueDeg) ?? ownHeading;
     final ownSog = _fresh(signalK.sogKn) ?? 0;
-    ({AisTarget target, double? cpaNm, double? tcpaMin})? best;
+    ({
+      AisTarget target,
+      double? cpaNm,
+      double? tcpaMin,
+      double? bearingDeg,
+      double? distNm,
+      String? crossing,
+    })?
+    best;
 
     for (final target in _aisTargets.values) {
       final last = target.lastUpdate;
@@ -1930,37 +2062,65 @@ class _DashboardState extends State<Dashboard> {
       }
       double? cpaNm = target.pluginCpaNm;
       double? tcpaMin = target.pluginTcpaMin;
+      double? bearingDeg;
+      double? distNm;
+      String? crossing;
 
-      if ((cpaNm == null || tcpaMin == null) &&
-          ownLat != null &&
-          ownLon != null &&
-          ownCog != null &&
-          target.lat != null &&
-          target.lon != null &&
-          target.cogDeg != null &&
-          target.sogKn != null) {
+      if (ownLat != null && ownLon != null && target.lat != null && target.lon != null) {
         final rel = _bearingDistanceNm(
           ownLat,
           ownLon,
           target.lat!,
           target.lon!,
         );
-        final brg = rel.bearingDeg * math.pi / 180;
-        final rN = rel.distNm * math.cos(brg);
-        final rE = rel.distNm * math.sin(brg);
-        final ownCogRad = ownCog * math.pi / 180;
-        final tgtCogRad = target.cogDeg! * math.pi / 180;
-        final vN =
-            target.sogKn! * math.cos(tgtCogRad) - ownSog * math.cos(ownCogRad);
-        final vE =
-            target.sogKn! * math.sin(tgtCogRad) - ownSog * math.sin(ownCogRad);
-        final cpa = _cpa(rN, rE, vN, vE);
-        cpaNm ??= cpa?.cpaNm;
-        tcpaMin ??= cpa?.tcpaMin;
+        bearingDeg = rel.bearingDeg;
+        distNm = rel.distNm;
+
+        if ((cpaNm == null || tcpaMin == null) &&
+            ownCog != null &&
+            target.cogDeg != null &&
+            target.sogKn != null) {
+          final brg = rel.bearingDeg * math.pi / 180;
+          final rN = rel.distNm * math.cos(brg);
+          final rE = rel.distNm * math.sin(brg);
+          final ownCogRad = ownCog * math.pi / 180;
+          final tgtCogRad = target.cogDeg! * math.pi / 180;
+          final vN =
+              target.sogKn! * math.cos(tgtCogRad) -
+              ownSog * math.cos(ownCogRad);
+          final vE =
+              target.sogKn! * math.sin(tgtCogRad) -
+              ownSog * math.sin(ownCogRad);
+          final cpa = _cpa(rN, rE, vN, vE);
+          cpaNm ??= cpa?.cpaNm;
+          tcpaMin ??= cpa?.tcpaMin;
+          // Same "worth calling proa/popa" gate as the AIS tab's own list
+          // view (_aisShowsCrossing): only when the target is actually
+          // moving and will pass close, so a stopped/anchored contact or a
+          // wide-berth crossing doesn't get a misleading label.
+          if (ownHeading != null &&
+              (cpaNm ?? double.infinity) < 5 &&
+              target.sogKn! > 0.2) {
+            crossing = _crossingLabel(
+              rN,
+              rE,
+              vN,
+              vE,
+              ownHeading * math.pi / 180,
+            );
+          }
+        }
       }
 
       if (cpaNm == null && tcpaMin == null) continue;
-      final candidate = (target: target, cpaNm: cpaNm, tcpaMin: tcpaMin);
+      final candidate = (
+        target: target,
+        cpaNm: cpaNm,
+        tcpaMin: tcpaMin,
+        bearingDeg: bearingDeg,
+        distNm: distNm,
+        crossing: crossing,
+      );
       if (best == null) {
         best = candidate;
         continue;
@@ -1976,6 +2136,27 @@ class _DashboardState extends State<Dashboard> {
       }
     }
     return best;
+  }
+
+  /// Where the relative track crosses our own heading line (dead ahead vs.
+  /// astern) — same geometry as the AIS tab's own crossing label, so "por
+  /// proa"/"por popa" means the same thing in both places.
+  String? _crossingLabel(
+    double relN,
+    double relE,
+    double vN,
+    double vE,
+    double headingRad,
+  ) {
+    final cosH = math.cos(headingRad), sinH = math.sin(headingRad);
+    final fwd0 = relN * cosH + relE * sinH;
+    final right0 = -relN * sinH + relE * cosH;
+    final vFwd = vN * cosH + vE * sinH;
+    final vRight = -vN * sinH + vE * cosH;
+    if (vRight.abs() < 0.05) return null;
+    final tStar = -right0 / vRight;
+    if (tStar < 0) return null;
+    return (fwd0 + vFwd * tStar) >= 0 ? 'POR PROA' : 'POR POPA';
   }
 
   ({double bearingDeg, double distNm}) _bearingDistanceNm(
