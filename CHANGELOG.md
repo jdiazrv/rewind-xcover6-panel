@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.12] - 2026-08-27
+
+### Añadido
+- Más tipos de alarma personalizada: batería (casa) por debajo de X V, SOC por debajo de X%, nevera por encima de X°C, algún tanque por debajo de X%, viento previsto superior a X kt en las próximas 6 horas.
+
 ## [1.4.11] - 2026-08-27
 
 ### Añadido
