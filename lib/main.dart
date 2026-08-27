@@ -2651,17 +2651,17 @@ class _DashboardState extends State<Dashboard> {
                           segments: const [
                             ButtonSegment(
                               value: 'dia',
-                              label: Text('Día'),
+                              label: Text('Tema claro'),
                               icon: Icon(Icons.wb_sunny_outlined, size: 14),
                             ),
                             ButtonSegment(
                               value: 'auto',
-                              label: Text('Auto'),
+                              label: Text('Auto (dispositivo)'),
                               icon: Icon(Icons.brightness_auto, size: 14),
                             ),
                             ButtonSegment(
                               value: 'noche',
-                              label: Text('Noche'),
+                              label: Text('Tema oscuro'),
                               icon: Icon(Icons.nightlight_outlined, size: 14),
                             ),
                           ],
@@ -4159,23 +4159,33 @@ class _CollapsedHeaderBar extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-    behavior: HitTestBehavior.opaque,
-    onTap: onTap,
-    onVerticalDragUpdate: (d) {
-      if (d.delta.dy > 0) onTap();
-    },
-    child: Container(
-      height: 22,
-      width: double.infinity,
-      color: cBg,
-      alignment: Alignment.center,
+  Widget build(BuildContext context) => Container(
+    height: 24,
+    width: double.infinity,
+    color: cBg,
+    alignment: Alignment.topCenter,
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      onVerticalDragUpdate: (d) {
+        if (d.delta.dy > 0) onTap();
+      },
       child: Container(
-        width: 48,
-        height: 4,
+        width: 80,
+        height: 24,
+        alignment: Alignment.topCenter,
         decoration: BoxDecoration(
-          color: cMuted.withOpacity(0.7),
-          borderRadius: BorderRadius.circular(2),
+          color: Colors.black.withOpacity(0.45),
+          borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+        ),
+        child: Container(
+          width: 48,
+          height: 4,
+          margin: const EdgeInsets.only(top: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.7),
+            borderRadius: BorderRadius.circular(2),
+          ),
         ),
       ),
     ),
