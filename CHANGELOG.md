@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.6] - 2026-08-27
+
+### Interno
+- Solo cambio de versión (sin cambios funcionales): Play Console ya tenía usado el código de versión 16 de un intento de subida anterior, así que se sube a 17.
+
 ## [1.4.5] - 2026-08-27
 
 ### Cambiado
