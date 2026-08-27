@@ -179,17 +179,35 @@ class SkZoneAlarmSetting {
 
 // Custom (client-side) alarm types — evaluated against live SignalKModel
 // values, independent of any Signal K server-side zone configuration.
-const customAlarmTypes = ['depthBelow', 'windAbove'];
+const customAlarmTypes = [
+  'depthBelow',
+  'windAbove',
+  'batteryVoltageBelow',
+  'socBelow',
+  'fridgeTempAbove',
+  'tankBelow',
+  'windForecastAbove',
+];
 
 String customAlarmTypeLabel(String type) => switch (type) {
   'depthBelow' => 'Profundidad menor de',
   'windAbove' => 'Viento (aparente) mayor de',
+  'batteryVoltageBelow' => 'Batería (casa) menor de',
+  'socBelow' => 'Batería SOC menor de',
+  'fridgeTempAbove' => 'Nevera mayor de',
+  'tankBelow' => 'Algún tanque menor de',
+  'windForecastAbove' => 'Viento previsto (6h) mayor de',
   _ => type,
 };
 
 String customAlarmTypeUnit(String type) => switch (type) {
   'depthBelow' => 'm',
   'windAbove' => 'kt',
+  'batteryVoltageBelow' => 'V',
+  'socBelow' => '%',
+  'fridgeTempAbove' => '°C',
+  'tankBelow' => '%',
+  'windForecastAbove' => 'kt',
   _ => '',
 };
 

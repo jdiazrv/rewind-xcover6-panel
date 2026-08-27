@@ -191,6 +191,28 @@ class _DashboardState extends State<Dashboard> {
       case 'windAbove':
         final w = signalK.awsKn;
         return w != null && w > rule.threshold;
+      case 'batteryVoltageBelow':
+        final v = signalK.houseV;
+        return v != null && v < rule.threshold;
+      case 'socBelow':
+        final s = signalK.houseSoc;
+        return s != null && s < rule.threshold;
+      case 'fridgeTempAbove':
+        bool over(double? kelvin) =>
+            kelvin != null && (kelvin - 273.15) > rule.threshold;
+        return over(signalK.fridge1TempK) || over(signalK.fridge2TempK);
+      case 'tankBelow':
+        return signalK.tanks.values.any(
+          (v) => v != null && v < rule.threshold,
+        );
+      case 'windForecastAbove':
+        final now = DateTime.now();
+        final cutoff = now.add(const Duration(hours: 6));
+        for (final p in weather.hourly) {
+          if (p.time.isBefore(now) || p.time.isAfter(cutoff)) continue;
+          if ((p.windKn ?? 0) > rule.threshold) return true;
+        }
+        return false;
       default:
         return false;
     }
