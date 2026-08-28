@@ -13,32 +13,44 @@ import 'models.dart';
 import 'pdf/pdf_theme.dart';
 import 'theme.dart';
 
-typedef _ReportRange = ({String label, String flux, String agg, Duration dur});
-
 typedef PolarData = ({
   List<int> twsEdges,
   List<({int loDeg, int hiDeg})> twaBands,
   List<List<double?>> avgStw,
   List<List<int>> counts,
 });
-const _reportRanges = <_ReportRange>[
-  (label: '24h', flux: '-24h', agg: '2m', dur: Duration(hours: 24)),
-  (label: '7 días', flux: '-7d', agg: '15m', dur: Duration(days: 7)),
-  (label: '1 mes', flux: '-30d', agg: '1h', dur: Duration(days: 30)),
-];
 
-class PerformanceReportDialog extends StatefulWidget {
-  const PerformanceReportDialog({super.key, required this.settings});
-  final SettingsModel settings;
-
-  @override
-  State<PerformanceReportDialog> createState() =>
-      _PerformanceReportDialogState();
+/// Opens the performance report for [range] — the same range the caller
+/// already has selected (e.g. a GraphDialog's own 1h/6h/12h/... buttons),
+/// so the report never asks the user to pick a period a second time.
+Future<void> openPerformanceReport(
+  BuildContext context, {
+  required SettingsModel settings,
+  required AppRange range,
+}) {
+  return Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => PerformanceReportPage(settings: settings, range: range),
+    ),
+  );
 }
 
-class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
-  int _rIdx = 0;
-  bool _loading = false;
+class PerformanceReportPage extends StatefulWidget {
+  const PerformanceReportPage({
+    super.key,
+    required this.settings,
+    required this.range,
+  });
+  final SettingsModel settings;
+  final AppRange range;
+
+  @override
+  State<PerformanceReportPage> createState() => _PerformanceReportPageState();
+}
+
+class _PerformanceReportPageState extends State<PerformanceReportPage> {
+  bool _loading = true;
   String? _error;
   Map<String, List<GraphPoint>> _series = {};
 
@@ -48,8 +60,9 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
     _fetch();
   }
 
-  Future<List<GraphPoint>> _query(MetricDef def, _ReportRange r) async {
+  Future<List<GraphPoint>> _query(MetricDef def) async {
     final s = widget.settings;
+    final r = widget.range;
     Future<List<GraphPoint>> fromInflux() => influxQuery(
       host: s.effectiveInfluxHost,
       org: s.influxOrg,
@@ -57,16 +70,14 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
       def: def,
       fluxRange: r.flux,
       aggEvery: r.agg,
-      bucket: r.dur > const Duration(hours: 48)
-          ? s.influxArchiveBucket
-          : s.influxBucket,
+      bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
     );
     Future<List<GraphPoint>> fromSk() => skHistoryQuery(
       host: s.host,
       port: s.port,
       authBase64: s.authBase64,
       def: def,
-      range: r.dur,
+      range: parseFluxRange(r.flux),
       resolution: parseAggEvery(r.agg),
     );
     switch (s.historySource) {
@@ -89,7 +100,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
       _error = null;
     });
     try {
-      final r = _reportRanges[_rIdx];
+      final r = widget.range;
       if (widget.settings.demoMode) {
         _series = {
           'sog': demoGraphSeries(mSog, r.flux, r.agg),
@@ -101,12 +112,12 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
         };
       } else {
         final results = await Future.wait([
-          _query(mSog, r),
-          _query(mStw, r),
-          _query(mAws, r),
-          _query(mTws, r),
-          _query(mHeel, r),
-          _query(mTwa, r),
+          _query(mSog),
+          _query(mStw),
+          _query(mAws),
+          _query(mTws),
+          _query(mHeel),
+          _query(mTwa),
         ]);
         _series = {
           'sog': results[0],
@@ -130,104 +141,35 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
+    return Scaffold(
       backgroundColor: cBg,
-      insetPadding: const EdgeInsets.all(24),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Informe de rendimiento',
-                      style: TextStyle(
-                        color: cText,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: cMuted),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  for (var i = 0; i < _reportRanges.length; i++)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text(_reportRanges[i].label),
-                        selected: _rIdx == i,
-                        onSelected: (_) {
-                          if (_rIdx != i) {
-                            setState(() => _rIdx = i);
-                            _fetch();
-                          }
-                        },
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (_loading)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Text(
-                    'Error obteniendo histórico: ${friendlyApiError(_error!)}',
-                    style: const TextStyle(color: cRed, fontSize: 12),
-                  ),
-                )
-              else
-                FilledButton.icon(
-                  icon: const Icon(Icons.picture_as_pdf),
-                  label: const Text('Generar y previsualizar'),
-                  onPressed: _openPreview,
+      appBar: AppBar(
+        backgroundColor: cBg,
+        foregroundColor: cText,
+        title: Text('Informe de rendimiento - ${widget.range.label}'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Error obteniendo histórico: ${friendlyApiError(_error!)}',
+                  style: const TextStyle(color: cRed, fontSize: 13),
+                  textAlign: TextAlign.center,
                 ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _openPreview() {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        fullscreenDialog: true,
-        builder: (_) => Scaffold(
-          backgroundColor: cBg,
-          appBar: AppBar(
-            backgroundColor: cBg,
-            foregroundColor: cText,
-            title: const Text('Informe de rendimiento'),
-          ),
-          body: PdfPreview(
-            canChangePageFormat: false,
-            canChangeOrientation: false,
-            canDebug: false,
-            allowPrinting: true,
-            allowSharing: true,
-            pdfFileName: 'rewind_rendimiento.pdf',
-            build: (_) => _buildReportPdf(),
-          ),
-        ),
-      ),
+              ),
+            )
+          : PdfPreview(
+              canChangePageFormat: false,
+              canChangeOrientation: false,
+              canDebug: false,
+              allowPrinting: true,
+              allowSharing: true,
+              pdfFileName: 'rewind_rendimiento.pdf',
+              build: (_) => _buildReportPdf(),
+            ),
     );
   }
 
@@ -368,7 +310,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
   }
 
   Future<Uint8List> _buildReportPdf() async {
-    final r = _reportRanges[_rIdx];
+    final r = widget.range;
     final sog = _series['sog'] ?? [];
     final stw = _series['stw'] ?? [];
     final aws = _series['aws'] ?? [];
@@ -379,10 +321,11 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
     final now = DateTime.now();
     final polar = _realPolar(stw, twa, tws);
 
+    final rangeDur = parseFluxRange(r.flux);
     final distanceNm = _distanceNm(sog, interval);
     final underwayFrac = _underwayFraction(sog);
     final underwayDur = Duration(
-      seconds: (r.dur.inSeconds * underwayFrac).round(),
+      seconds: (rangeDur.inSeconds * underwayFrac).round(),
     );
 
     const margin = 24.0;
@@ -390,12 +333,13 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
     final contentWidth = pageFormat.width - margin * 2;
 
     final doc = pw.Document();
+    final canvasFont = PdfFont.helvetica(doc.document);
 
     pw.Widget header() => pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
         pw.Text(
-          'Informe de rendimiento — REWIND',
+          'Informe de rendimiento - REWIND',
           style: const pw.TextStyle(
             color: pdfText,
             fontSize: 16,
@@ -403,7 +347,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           ),
         ),
         pw.Text(
-          'Periodo: ${r.label} · generado ${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+          'Periodo: ${r.label} - generado ${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
         ),
         pw.SizedBox(height: 6),
@@ -559,7 +503,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
           pw.SizedBox(height: 22),
           pw.Text(
-            'Polar de datos reales — STW media (kt)',
+            'Polar de datos reales - STW media (kt)',
             style: const pw.TextStyle(
               color: pdfText,
               fontSize: 12,
@@ -567,10 +511,18 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
             ),
           ),
           pw.Text(
-            'Por ángulo de viento aparente/real (TWA, filas) y franja de viento real (TWS, columnas) — mismos márgenes que la distribución de TWS. "--" = sin muestras suficientes en esa combinación.',
+            'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
             style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
           ),
-          pw.SizedBox(height: 6),
+          pw.SizedBox(height: 8),
+          pw.Center(
+            child: pdfPolarChart(
+              font: canvasFont,
+              polar: polar,
+              width: math.min(contentWidth, 340),
+            ),
+          ),
+          pw.SizedBox(height: 12),
           pdfPolarTable(polar, pdfGreen),
         ],
       ),
@@ -640,7 +592,7 @@ List<pw.Widget> pdfHistogramRows(
                 width: labelWidth,
                 child: pw.Text(
                   '${(lowStart + step * i).round()}'
-                  '${span > 0 ? '–${(lowStart + step * (i + 1)).round()}' : ''}$unit',
+                  '${span > 0 ? '-${(lowStart + step * (i + 1)).round()}' : ''}$unit',
                   style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
                 ),
               ),
@@ -682,6 +634,179 @@ List<pw.Widget> pdfHistogramRows(
 /// period. A proper radial polar plot is future work; this already answers
 /// "how fast does the boat actually go at each angle/wind strength" from
 /// real logged data, without any assumed/target polar to compare against.
+/// Small fixed palette cycled by TWS-band index, so each band gets a
+/// stable, distinguishable color across the chart and its legend.
+const _polarPalette = [
+  pdfCyan,
+  pdfGreen,
+  pdfOrange,
+  pdfPurple,
+  pdfTeal,
+  pdfYellow,
+  pdfRed,
+  pdfDarkRed,
+];
+
+/// Radial "how fast does the boat actually go" chart — one line per TWS
+/// band, plotted STW (radius) against TWA (angle from bow, mirrored
+/// port/starboard since the underlying data doesn't distinguish tack).
+pw.Widget pdfPolarChart({
+  required PdfFont font,
+  required PolarData polar,
+  required double width,
+  double height = 260,
+}) {
+  return pw.Column(
+    children: [
+      pw.CustomPaint(
+        size: PdfPoint(width, height),
+        painter: (canvas, size) {
+          var maxStw = 0.0;
+          for (final row in polar.avgStw) {
+            for (final v in row) {
+              if (v != null && v > maxStw) maxStw = v;
+            }
+          }
+          final cx = size.x / 2;
+          final cy = size.y - 20;
+          final maxR = math.min(size.x / 2 - 16, size.y - 34);
+          if (maxStw <= 0 || maxR <= 0) {
+            canvas
+              ..setFillColor(pdfMuted)
+              ..drawString(
+                font,
+                9,
+                'Sin datos suficientes de STW/TWA/TWS en este periodo.',
+                8,
+                size.y / 2,
+              );
+            return;
+          }
+          final ringStep = maxStw <= 4
+              ? 1.0
+              : maxStw <= 10
+              ? 2.0
+              : maxStw <= 20
+              ? 5.0
+              : 10.0;
+          final ringCount = (maxStw / ringStep).ceil().clamp(1, 12);
+          final rMax = ringCount * ringStep;
+          double rPx(double v) => (v / rMax) * maxR;
+
+          // Concentric STW rings.
+          for (var i = 1; i <= ringCount; i++) {
+            final r = rPx(ringStep * i);
+            canvas
+              ..setStrokeColor(pdfGrid)
+              ..setLineWidth(0.5)
+              ..drawEllipse(cx - r, cy - r, r * 2, r * 2)
+              ..strokePath()
+              ..setFillColor(pdfMuted)
+              ..drawString(
+                font,
+                6,
+                (ringStep * i).round().toString(),
+                cx + 2,
+                cy - r + 1,
+              );
+          }
+
+          // Radial spokes at every TWA band edge, mirrored L/R — angle 0 is
+          // straight up (dead ahead), 90 is abeam, 180 is dead astern.
+          final edges = <int>{
+            0,
+            for (final b in polar.twaBands) b.hiDeg,
+          };
+          for (final deg in edges) {
+            final rad = deg * math.pi / 180;
+            final dx = math.sin(rad) * maxR, dy = math.cos(rad) * maxR;
+            canvas
+              ..setStrokeColor(pdfGrid)
+              ..setLineWidth(0.5)
+              ..moveTo(cx, cy)
+              ..lineTo(cx + dx, cy + dy)
+              ..strokePath();
+            if (deg != 0) {
+              canvas
+                ..moveTo(cx, cy)
+                ..lineTo(cx - dx, cy + dy)
+                ..strokePath();
+            }
+            if (deg > 0) {
+              canvas
+                ..setFillColor(pdfMuted)
+                ..drawString(
+                  font,
+                  6,
+                  '$deg',
+                  cx + dx * 1.04 - 6,
+                  cy + dy * 1.04 - 3,
+                );
+            }
+          }
+
+          // One polyline per TWS band, mirrored on both sides; gaps (no
+          // samples for a TWA band) simply break the line rather than
+          // interpolating across missing data.
+          final twsBinCount = polar.twsEdges.length - 1;
+          for (var w = 0; w < twsBinCount; w++) {
+            final color = _polarPalette[w % _polarPalette.length];
+            for (final side in [1, -1]) {
+              canvas
+                ..setStrokeColor(color)
+                ..setLineWidth(1.4);
+              var started = false;
+              for (var b = 0; b < polar.twaBands.length; b++) {
+                final v = polar.avgStw[b][w];
+                if (v == null) {
+                  started = false;
+                  continue;
+                }
+                final mid =
+                    (polar.twaBands[b].loDeg + polar.twaBands[b].hiDeg) / 2;
+                final rad = mid * math.pi / 180;
+                final r = rPx(v);
+                final x = cx + side * math.sin(rad) * r;
+                final y = cy + math.cos(rad) * r;
+                if (!started) {
+                  canvas.moveTo(x, y);
+                  started = true;
+                } else {
+                  canvas.lineTo(x, y);
+                }
+              }
+              canvas.strokePath();
+            }
+          }
+        },
+      ),
+      pw.SizedBox(height: 6),
+      pw.Wrap(
+        spacing: 10,
+        runSpacing: 4,
+        children: [
+          for (var w = 0; w < polar.twsEdges.length - 1; w++)
+            pw.Row(
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                pw.Container(
+                  width: 9,
+                  height: 9,
+                  margin: const pw.EdgeInsets.only(right: 3),
+                  color: _polarPalette[w % _polarPalette.length],
+                ),
+                pw.Text(
+                  '${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt',
+                  style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+                ),
+              ],
+            ),
+        ],
+      ),
+    ],
+  );
+}
+
 pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
   final twsBinCount = polar.twsEdges.length - 1;
   if (twsBinCount < 1) {

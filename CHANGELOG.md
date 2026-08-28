@@ -2,6 +2,15 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.20] - 2026-08-28
+
+### Cambiado
+- **Informe de rendimiento**: se accede ahora desde el icono de PDF junto a los botones de rango (1h/6h/12h/...) de cualquier gráfica — usa directamente el periodo que tengas seleccionado ahí, sin volver a elegirlo. Se quita el botón separado de CFG → Diagnóstico.
+- **Informe de rendimiento**: la "polar de datos reales" ahora también se dibuja como un gráfico radial (velocidad real por ángulo y franja de viento), además de la tabla.
+
+### Arreglado
+- **PDF del informe**: varios textos usaban guiones/puntos especiales que no existen en la fuente básica del PDF y se veían como un rectángulo con una cruz — sustituidos por guiones normales.
+
 ## [1.4.19] - 2026-08-28
 
 ### Cambiado

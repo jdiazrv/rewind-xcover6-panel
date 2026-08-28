@@ -2915,6 +2915,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
         _WindTapCard(
           label: 'AWA',
@@ -2934,6 +2935,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
         _WindTapCard(
           label: 'SOG',
@@ -2952,6 +2954,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
         _WindTapCard(
           label: 'TWS',
@@ -2973,6 +2976,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
         _WindTapCard(
           label: 'TWA',
@@ -2994,6 +2998,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
         _WindTapCard(
           label: 'TWD',
@@ -3012,6 +3017,7 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
+          settings: settings,
         ),
       ],
     );
@@ -4501,16 +4507,6 @@ class _DashboardState extends State<Dashboard> {
                                     : cMuted,
                                 path: t.skPath,
                               ),
-                            const SizedBox(height: 14),
-                            OutlinedButton.icon(
-                              icon: const Icon(Icons.picture_as_pdf, size: 16),
-                              label: const Text('Informe de rendimiento'),
-                              onPressed: () => showDialog<void>(
-                                context: context,
-                                builder: (_) =>
-                                    PerformanceReportDialog(settings: settings),
-                              ),
-                            ),
                             const SizedBox(height: 10),
                             const Divider(color: Color(0xff1e3040), height: 1),
                             const SizedBox(height: 6),
@@ -4709,6 +4705,7 @@ class _DashboardState extends State<Dashboard> {
           bucket: settings.influxBucket,
           archiveBucket: settings.influxArchiveBucket,
           demo: settings.demoMode,
+          settings: settings,
         ),
       ),
     );
@@ -6934,6 +6931,7 @@ class GraphDialog extends StatefulWidget {
     this.bucket = influxBucketDefault,
     this.archiveBucket = influxBucketDefault,
     this.demo = false,
+    this.settings,
   });
   final List<MetricDef> metrics;
   final String historySource; // 'auto' | 'influx' | 'sk'
@@ -6946,13 +6944,16 @@ class GraphDialog extends StatefulWidget {
   final String bucket;
   final String archiveBucket;
   final bool demo;
+  // Only needed for the "Informe de rendimiento" button — null hides it
+  // (e.g. call sites that don't have the full SettingsModel handy).
+  final SettingsModel? settings;
 
   @override
   State<GraphDialog> createState() => _GraphDialogState();
 }
 
-typedef _Range = ({String label, String flux, String agg, bool longRange});
-const _ranges = <_Range>[
+typedef AppRange = ({String label, String flux, String agg, bool longRange});
+const appRanges = <AppRange>[
   (label: '1h', flux: '-1h', agg: '10s', longRange: false),
   (label: '6h', flux: '-6h', agg: '30s', longRange: false),
   (label: '12h', flux: '-12h', agg: '1m', longRange: false),
@@ -6990,7 +6991,7 @@ class _GraphDialogState extends State<GraphDialog> {
   // per-series retention (KIP defaults to 24h) means 48h/7d/1mes routinely
   // come back empty, so those range buttons get disabled instead of looking
   // clickable and then silently showing nothing.
-  List<bool?> _skRangeAvailable = List.filled(_ranges.length, null);
+  List<bool?> _skRangeAvailable = List.filled(appRanges.length, null);
 
   MetricDef get _def => widget.metrics[_mIdx];
 
@@ -7007,7 +7008,7 @@ class _GraphDialogState extends State<GraphDialog> {
       _error = null;
     });
     try {
-      final r = _ranges[_rIdx];
+      final r = appRanges[_rIdx];
       final (pts, usedSk) = widget.demo
           ? (demoGraphSeries(_def, r.flux, r.agg), false)
           : await _queryHistory(r);
@@ -7033,10 +7034,10 @@ class _GraphDialogState extends State<GraphDialog> {
   // other ranges so their buttons can be greyed out up front instead of
   // the user tapping into a range that's always going to come back empty.
   Future<void> _checkOtherSkRanges() async {
-    for (var i = 0; i < _ranges.length; i++) {
+    for (var i = 0; i < appRanges.length; i++) {
       if (i == _rIdx || _skRangeAvailable[i] != null) continue;
       try {
-        final pts = await _fetchSk(_ranges[i]);
+        final pts = await _fetchSk(appRanges[i]);
         if (mounted) setState(() => _skRangeAvailable[i] = pts.isNotEmpty);
       } catch (_) {
         if (mounted) setState(() => _skRangeAvailable[i] = false);
@@ -7044,7 +7045,7 @@ class _GraphDialogState extends State<GraphDialog> {
     }
   }
 
-  Future<List<GraphPoint>> _fetchInflux(_Range r) => influxQuery(
+  Future<List<GraphPoint>> _fetchInflux(AppRange r) => influxQuery(
     host: widget.influxHost,
     org: widget.influxOrg,
     token: widget.influxToken,
@@ -7054,7 +7055,7 @@ class _GraphDialogState extends State<GraphDialog> {
     bucket: r.longRange ? widget.archiveBucket : widget.bucket,
   );
 
-  Future<List<GraphPoint>> _fetchSk(_Range r) => skHistoryQuery(
+  Future<List<GraphPoint>> _fetchSk(AppRange r) => skHistoryQuery(
     host: widget.skHost,
     port: widget.skPort,
     authBase64: widget.skAuthBase64,
@@ -7063,7 +7064,7 @@ class _GraphDialogState extends State<GraphDialog> {
     resolution: parseAggEvery(_skAgg[r.label] ?? r.agg),
   );
 
-  Future<(List<GraphPoint>, bool)> _queryHistory(_Range r) async {
+  Future<(List<GraphPoint>, bool)> _queryHistory(AppRange r) async {
     switch (widget.historySource) {
       case 'influx':
         return (await _fetchInflux(r), false);
@@ -7139,6 +7140,16 @@ class _GraphDialogState extends State<GraphDialog> {
                 : 'Ver distribución',
             onPressed: () => setState(() => _histogramMode = !_histogramMode),
           ),
+          if (widget.settings != null)
+            IconButton(
+              icon: Icon(Icons.picture_as_pdf, color: _def.color),
+              tooltip: 'Informe de rendimiento (${appRanges[_rIdx].label})',
+              onPressed: () => openPerformanceReport(
+                context,
+                settings: widget.settings!,
+                range: appRanges[_rIdx],
+              ),
+            ),
           // Range buttons — greyed out and untappable once we know (from a
           // Signal K/KIP probe) that range has no data at all for this
           // series. Horizontally scrollable so adding more ranges never
@@ -7147,7 +7158,7 @@ class _GraphDialogState extends State<GraphDialog> {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                for (var i = 0; i < _ranges.length; i++)
+                for (var i = 0; i < appRanges.length; i++)
                   Padding(
                     padding: const EdgeInsets.only(left: 5),
                     child: GestureDetector(
@@ -7170,7 +7181,7 @@ class _GraphDialogState extends State<GraphDialog> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          _ranges[i].label,
+                          appRanges[i].label,
                           style: TextStyle(
                             color: _skRangeAvailable[i] == false
                                 ? const Color(0xff445560)
@@ -7203,7 +7214,7 @@ class _GraphDialogState extends State<GraphDialog> {
                   if (_mIdx != i) {
                     setState(() {
                       _mIdx = i;
-                      _skRangeAvailable = List.filled(_ranges.length, null);
+                      _skRangeAvailable = List.filled(appRanges.length, null);
                     });
                     _fetch();
                   }
@@ -7346,13 +7357,13 @@ class _GraphDialogState extends State<GraphDialog> {
         color: _def.color,
         unit: _def.unit,
         windowStart: DateTime.now().subtract(
-          parseFluxRange(_ranges[_rIdx].flux),
+          parseFluxRange(appRanges[_rIdx].flux),
         ),
         windowEnd: DateTime.now(),
         expectedStepMs: parseAggEvery(
           _usedSk
-              ? (_skAgg[_ranges[_rIdx].label] ?? _ranges[_rIdx].agg)
-              : _ranges[_rIdx].agg,
+              ? (_skAgg[appRanges[_rIdx].label] ?? appRanges[_rIdx].agg)
+              : appRanges[_rIdx].agg,
         ).inMilliseconds.toDouble(),
       ),
     );
@@ -7923,6 +7934,7 @@ class _WindTapCard extends StatelessWidget {
     this.gust,
     this.beaufort,
     this.demo = false,
+    this.settings,
   });
   final String label;
   final String value;
@@ -7942,6 +7954,7 @@ class _WindTapCard extends StatelessWidget {
   final String influxToken;
   final String skHost;
   final int skPort;
+  final SettingsModel? settings;
   final String skAuthBase64;
   final bool demo;
 
@@ -7967,6 +7980,7 @@ class _WindTapCard extends StatelessWidget {
               bucket: bucket,
               archiveBucket: archiveBucket,
               demo: demo,
+              settings: settings,
             ),
           ),
         ),
