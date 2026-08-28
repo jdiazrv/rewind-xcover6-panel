@@ -315,13 +315,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     List<GraphPoint> tws,
     List<GraphPoint> sog,
   ) {
-    const twaBands = [
-      (loDeg: 0, hiDeg: 30),
-      (loDeg: 30, hiDeg: 60),
-      (loDeg: 60, hiDeg: 90),
-      (loDeg: 90, hiDeg: 120),
-      (loDeg: 120, hiDeg: 150),
-      (loDeg: 150, hiDeg: 180),
+    const twaBandDeg = 10;
+    final twaBands = [
+      for (var d = 0; d < 180; d += twaBandDeg)
+        (loDeg: d, hiDeg: d + twaBandDeg),
     ];
     if (stw.isEmpty || twa.isEmpty || tws.isEmpty) {
       return (
@@ -396,7 +393,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       final angle = twaP.value.abs().clamp(0, 180);
       final bandIdx = math.min(
         twaBands.length - 1,
-        (angle / 30).floor(),
+        (angle / twaBandDeg).floor(),
       );
       final twsIdx = twsSpan > 0
           ? math.min(twsBinCount - 1, ((twsP.value - twsLow) / step).floor())

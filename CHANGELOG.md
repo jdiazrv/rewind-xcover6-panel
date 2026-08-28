@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.32] - 2026-08-28
+
+### Cambiado
+- **Informe de rendimiento → tabla de polar**: bandas de TWA cada 10° en vez de 30°.
+
 ## [1.4.31] - 2026-08-28
 
 ### Arreglado
