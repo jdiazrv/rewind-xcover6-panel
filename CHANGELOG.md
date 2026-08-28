@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.23] - 2026-08-28
+
+### Cambiado
+- **TNK**: cualquier tarjeta de tanque se puede tocar para ver su detalle (antes solo funcionaba si el grupo tenía más de un tanque). El detalle añade T. mar, batería (SOC y V) y solar como contexto rápido.
+
 ## [1.4.22] - 2026-08-28
 
 ### Arreglado
