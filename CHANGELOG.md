@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.14] - 2026-08-28
+
+### Arreglado
+- Una alarma de "nevera" guardada antes de la v1.4.13 se mostraba con el nombre interno roto en vez de una etiqueta legible, al haberse renombrado el tipo internamente. Ahora se migra automáticamente a "Nevera 1" al cargar.
+
 ## [1.4.13] - 2026-08-28
 
 ### Cambiado

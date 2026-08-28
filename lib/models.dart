@@ -262,14 +262,25 @@ class CustomAlarmRule {
     'enabled': enabled,
     'sound': sound,
   };
-  factory CustomAlarmRule.fromJson(Map<String, dynamic> j) => CustomAlarmRule(
-    id: j['id'] as String,
-    type: j['type'] as String,
-    threshold: (j['threshold'] as num).toDouble(),
-    target: j['target'] as String?,
-    enabled: j['enabled'] as bool? ?? true,
-    sound: j['sound'] as bool? ?? true,
-  );
+  factory CustomAlarmRule.fromJson(Map<String, dynamic> j) {
+    // Migrate the old fridge-only 'fridgeTempAbove' type (pre-1.4.13) to
+    // 'tempAbove' + an explicit target, so an alarm saved before the
+    // sensor picker existed doesn't show up as a broken raw type name.
+    var type = j['type'] as String;
+    var target = j['target'] as String?;
+    if (type == 'fridgeTempAbove') {
+      type = 'tempAbove';
+      target ??= 'fridge1';
+    }
+    return CustomAlarmRule(
+      id: j['id'] as String,
+      type: type,
+      threshold: (j['threshold'] as num).toDouble(),
+      target: target,
+      enabled: j['enabled'] as bool? ?? true,
+      sound: j['sound'] as bool? ?? true,
+    );
+  }
 }
 
 // ─── Data models ──────────────────────────────────────────────────────────────
