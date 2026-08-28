@@ -102,7 +102,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
-  List<({double lat, double lon})> _track = [];
+  List<({double lat, double lon, DateTime time})> _track = [];
 
   Future<void> _fetch() async {
     setState(() {
@@ -141,7 +141,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'heel': results[4],
           'twa': results[5],
         };
-        _track = await _fetchTrackPoints();
+        _track = await _fetchTrackPoints(results[0]);
       }
       if (mounted) setState(() => _loading = false);
     } catch (e) {
@@ -206,8 +206,14 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
   // GPS position is a compound value (lat+lon), so its two series need
   // joining by nearest timestamp (same technique as _realPolar) to
-  // reconstruct (lat, lon) pairs.
-  Future<List<({double lat, double lon})>> _fetchTrackPoints() async {
+  // reconstruct (lat, lon) pairs. [sog] filters out anchored/stationary
+  // samples (same SOG<=0.5kt threshold as the polar table) — without it,
+  // hundreds of GPS-jitter fixes recorded while sitting at anchor get
+  // connected point-to-point into a tangled scribble instead of the actual
+  // transit line, which is what made the map look like "muchas lineas".
+  Future<List<({double lat, double lon, DateTime time})>> _fetchTrackPoints(
+    List<GraphPoint> sog,
+  ) async {
     try {
       final res = await _fetchPositionSeries();
       final lats = res.lat;
@@ -221,23 +227,31 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               : 60,
         ),
       );
-      final out = <({double lat, double lon})>[];
-      for (final lp in lats) {
+      GraphPoint? nearest(List<GraphPoint> series, DateTime t) {
         GraphPoint? best;
         Duration? bestDiff;
-        for (final p in lons) {
-          final diff = p.time.difference(lp.time).abs();
+        for (final p in series) {
+          final diff = p.time.difference(t).abs();
           if (diff > tol) continue;
           if (bestDiff == null || diff < bestDiff) {
             best = p;
             bestDiff = diff;
           }
         }
-        if (best != null &&
-            lp.value.abs() <= 90 &&
-            best.value.abs() <= 180) {
-          out.add((lat: lp.value, lon: best.value));
+        return best;
+      }
+
+      final out = <({double lat, double lon, DateTime time})>[];
+      for (final lp in lats) {
+        final lonP = nearest(lons, lp.time);
+        if (lonP == null || lp.value.abs() > 90 || lonP.value.abs() > 180) {
+          continue;
         }
+        if (sog.isNotEmpty) {
+          final sogP = nearest(sog, lp.time);
+          if (sogP == null || sogP.value <= 0.5) continue;
+        }
+        out.add((lat: lp.value, lon: lonP.value, time: lp.time));
       }
       return out;
     } catch (_) {
@@ -618,7 +632,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
           ),
           pw.SizedBox(height: 6),
-          ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth, maxStep: 2),
+          ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
         ],
       ),
     );
@@ -810,7 +824,7 @@ class TrackMapResult {
 /// key) whose combined area fully covers the track's padded bounding box,
 /// capped at [maxCols] x [maxRows] tiles so the request stays bounded.
 Future<TrackMapResult?> _fetchTrackMapTiles(
-  List<({double lat, double lon})> points, {
+  List<({double lat, double lon, DateTime time})> points, {
   int maxCols = 6,
   int maxRows = 5,
 }) async {
@@ -894,7 +908,7 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
 /// enough position data to draw a track.
 pw.Widget pdfTrackMap({
   required TrackMapResult? map,
-  required List<({double lat, double lon})> points,
+  required List<({double lat, double lon, DateTime time})> points,
   required double width,
   double height = 220,
 }) {
@@ -915,6 +929,23 @@ pw.Widget pdfTrackMap({
   }
 
   final projected = points.map((p) => map.project(p.lat, p.lon)).toList();
+
+  // Long gaps between consecutive samples (anchored for days between two
+  // separate trips, a signal dropout, etc.) shouldn't be drawn as a straight
+  // "teleport" line connecting them — break the stroke there instead. The
+  // break threshold scales with the report's own typical sample spacing
+  // rather than a fixed duration, since ranges query at very different
+  // resolutions (a few seconds for 1h up to an hour for 1 mes).
+  final gaps = [
+    for (var i = 1; i < points.length; i++)
+      points[i].time.difference(points[i - 1].time),
+  ]..sort((a, b) => a.compareTo(b));
+  final medianGap = gaps.isEmpty
+      ? const Duration(minutes: 15)
+      : gaps[gaps.length ~/ 2];
+  final breakThreshold = medianGap * 4 < const Duration(minutes: 20)
+      ? const Duration(minutes: 20)
+      : medianGap * 4;
 
   return pw.Container(
     width: width,
@@ -962,7 +993,10 @@ pw.Widget pdfTrackMap({
                 final (xf, yf) = projected[i];
                 final x = size.x * xf;
                 final y = size.y * (1 - yf);
-                if (i == 0) {
+                final gapBefore = i == 0
+                    ? Duration.zero
+                    : points[i].time.difference(points[i - 1].time);
+                if (i == 0 || gapBefore > breakThreshold) {
                   canvas.moveTo(x, y);
                 } else {
                   canvas.lineTo(x, y);

@@ -2,6 +2,13 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.33] - 2026-08-28
+
+### Arreglado
+- **Traza GPS del informe**: la línea salía trenzada/con muchas rayas en vez de una sola línea limpia — InfluxDB no garantiza que las filas vengan ordenadas por tiempo (y a veces repite una marca de tiempo con dos valores distintos), y la traza se dibujaba en el orden en que llegaban los datos en vez de en orden cronológico. Ahora se ordena por tiempo y se descartan duplicados antes de dibujar — corregido también en las demás gráficas del informe, que podían sufrir el mismo problema de forma menos visible.
+- **Traza GPS del informe**: los huecos largos entre posiciones (días sin datos entre dos salidas distintas) ya no se dibujan como una línea recta "teletransportada" cruzando el mapa — la línea se corta ahí en vez de unir los dos tramos.
+- **Distribución de viento (TWS)**: vuelve a franjas de 5kt (el cambio a 2kt solo debía aplicar a la tabla de la polar, no a este histograma).
+
 ## [1.4.32] - 2026-08-28
 
 ### Cambiado

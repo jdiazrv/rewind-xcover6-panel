@@ -6,6 +6,21 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 
+// Response row order isn't guaranteed to match `_time` order, and
+// `aggregateWindow` has been observed to emit two overlapping buckets for
+// the same nominal timestamp — either one left as-is turns a chart/track
+// into a line that zigzags backwards and forwards instead of progressing
+// chronologically. Sorts, then keeps only the first point per timestamp.
+List<GraphPoint> _sortAndDedupe(List<GraphPoint> points) {
+  points.sort((a, b) => a.time.compareTo(b.time));
+  final out = <GraphPoint>[];
+  for (final p in points) {
+    if (out.isNotEmpty && out.last.time == p.time) continue;
+    out.add(p);
+  }
+  return out;
+}
+
 // ─── InfluxDB ─────────────────────────────────────────────────────────────────
 // Deliberately blank — a real org/token used to ship here as the built-in
 // default, which meant every install (including ones shared with Play
@@ -74,7 +89,7 @@ Future<List<GraphPoint>> influxQuery({
     if (dt == null || v == null || !v.isFinite) continue;
     points.add(GraphPoint(time: dt, value: v * def.scale + def.offset));
   }
-  return points;
+  return _sortAndDedupe(points);
 }
 
 // GPS position is stored differently from every other metric this app
@@ -149,7 +164,10 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
         lon.add(point);
     }
   }
-  return (lat: lat, lon: lon);
+  // Same non-guaranteed row order as `influxQuery` — a track line drawn
+  // straight from response order braids back and forth instead of tracing
+  // the boat's actual path.
+  return (lat: _sortAndDedupe(lat), lon: _sortAndDedupe(lon));
 }
 
 // ─── Signal K History API (standard SK endpoint — the same API a boat's
@@ -197,7 +215,7 @@ Future<List<GraphPoint>> skHistoryQuery({
     if (dt == null || v == null || !v.isFinite) continue;
     points.add(GraphPoint(time: dt, value: v * def.scale + def.offset));
   }
-  return points;
+  return _sortAndDedupe(points);
 }
 
 // ─── DEMO mode: synthetic graph data (no InfluxDB call) ───────────────────────
