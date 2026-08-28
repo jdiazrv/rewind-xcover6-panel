@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de privacidad — REWIND Panel</title>
+<style>
+  :root {
+    --bg: #071015;
+    --panel: #101c24;
+    --text: #f3fbff;
+    --muted: #9fb3bd;
+    --cyan: #19c7e8;
+    --border: #1e3040;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 {
+    font-size: 28px;
+    font-weight: 800;
+    margin: 0 0 6px 0;
+  }
+  .updated { color: var(--muted); font-size: 14px; margin: 0 0 36px 0; }
+  h2 {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--cyan);
+    margin: 40px 0 12px 0;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+  h2:first-of-type { border-top: none; padding-top: 0; }
+  p, li { color: var(--text); font-size: 15px; }
+  ul { padding-left: 20px; }
+  li { margin-bottom: 8px; }
+  a { color: var(--cyan); }
+  .box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin: 16px 0;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  code {
+    background: var(--panel);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Política de privacidad de REWIND Panel</h1>
+  <p class="updated">Última actualización: 28 de agosto de 2026</p>
+
+  <div class="box">
+    Resumen: REWIND Panel no recopila, almacena ni comparte tus datos personales.
+    La app se conecta directamente desde tu dispositivo al servidor Signal K de
+    tu propio barco, con la configuración que tú introduces — no existe ningún
+    servidor intermedio operado por el desarrollador.
+  </div>
+
+  <h2>Qué datos usa la app y dónde van</h2>
+  <p>REWIND Panel es un panel de instrumentos náutico que muestra datos en
+  tiempo real de tu barco. Para funcionar, se conecta directamente a:</p>
+  <ul>
+    <li><strong>Tu servidor Signal K</strong> — el host, puerto y credenciales
+    (si tu servidor las requiere) que introduces en Ajustes. La app envía y
+    recibe estos datos únicamente entre tu dispositivo y ese servidor.</li>
+    <li><strong>InfluxDB (opcional)</strong> — solo si tú introduces manualmente
+    un host, organización, token y bucket propios en Ajustes → Histórico, para
+    mostrar gráficas del historial de tu barco. No se incluye ninguna
+    credencial por defecto.</li>
+    <li><strong>Open-Meteo</strong> (<a href="https://open-meteo.com" target="_blank" rel="noopener">open-meteo.com</a>) —
+    para el pronóstico meteorológico, usando la posición GPS de tu barco o una
+    ubicación que elijas manualmente en el mapa.</li>
+    <li><strong>MarineTraffic</strong> — solo al abrir el detalle de un barco
+    en la pantalla AIS, para intentar mostrar su foto pública por MMSI (un
+    número de identificación de barco, no un dato personal tuyo).</li>
+  </ul>
+  <p>Ninguno de estos datos pasa por servidores del desarrollador de la app:
+  las conexiones son directas desde tu dispositivo a los servicios anteriores.</p>
+
+  <h2>Qué se guarda en tu dispositivo</h2>
+  <p>La configuración de la app (host y puerto de Signal K, credenciales que
+  tú introduzcas, sensores configurados, alarmas personalizadas, preferencias
+  de pantalla) se guarda únicamente en el almacenamiento local de tu
+  dispositivo (<code>SharedPreferences</code> de Android, o el almacenamiento
+  del navegador si usas la versión webapp). No se sincroniza con ningún
+  servidor ni cuenta — si desinstalas la app o borras sus datos, esa
+  configuración desaparece.</p>
+
+  <h2>Cuentas, analítica y publicidad</h2>
+  <p>REWIND Panel no requiere crear ninguna cuenta, no incluye publicidad, y
+  no utiliza herramientas de analítica o seguimiento de terceros. No se
+  recopila información sobre el uso de la app.</p>
+
+  <h2>Permisos del dispositivo</h2>
+  <p>La app puede solicitar acceso a los sensores de movimiento del
+  dispositivo (acelerómetro/magnetómetro) únicamente si activas la opción de
+  usar el propio teléfono/tablet como sensor de escora, para barcos sin
+  sensor de actitud propio. Esa lectura se usa solo en tiempo real, dentro
+  de la propia app, para calcular y mostrar la escora y el cabeceo — no se
+  almacena ni se envía a ningún servidor.</p>
+
+  <h2>Menores</h2>
+  <p>La app no está dirigida a menores y no recopila intencionadamente datos
+  de menores de edad.</p>
+
+  <h2>Cambios en esta política</h2>
+  <p>Si esta política cambia, se actualizará esta misma página con una nueva
+  fecha de actualización.</p>
+
+  <h2>Contacto</h2>
+  <p>Para cualquier consulta sobre esta política de privacidad, puedes abrir
+  un issue en el repositorio del proyecto:
+  <a href="https://github.com/jdiazrv/rewind-xcover6-panel" target="_blank" rel="noopener">github.com/jdiazrv/rewind-xcover6-panel</a>.</p>
+</div>
+</body>
+</html>
