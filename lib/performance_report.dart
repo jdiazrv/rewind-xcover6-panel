@@ -501,7 +501,26 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ),
           pw.SizedBox(height: 6),
           ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
-          pw.SizedBox(height: 22),
+        ],
+      ),
+    );
+
+    // Own page — the chart plus its legend plus the table together are
+    // taller than the space usually left after the histograms, so sharing
+    // a page with them meant the polar routinely got cut/overlapped at the
+    // page break.
+    doc.addPage(
+      pw.MultiPage(
+        pageTheme: pageTheme,
+        footer: (ctx) => pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text(
+            'Página ${ctx.pageNumber} / ${ctx.pagesCount}',
+            style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
+          ),
+        ),
+        build: (ctx) => [
+          header(),
           pw.Text(
             'Polar de datos reales - STW media (kt)',
             style: const pw.TextStyle(
@@ -522,7 +541,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               width: math.min(contentWidth, 340),
             ),
           ),
-          pw.SizedBox(height: 12),
+          pw.SizedBox(height: 16),
           pdfPolarTable(polar, pdfGreen),
         ],
       ),

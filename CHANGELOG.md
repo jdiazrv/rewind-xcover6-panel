@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.21] - 2026-08-28
+
+### Arreglado
+- **Informe de rendimiento**: la polar de datos reales (gráfico + tabla) pasa a su propia página del PDF, para que no se solape con la distribución de SOG/TWS.
+
 ## [1.4.20] - 2026-08-28
 
 ### Cambiado
