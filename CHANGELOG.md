@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.22] - 2026-08-28
+
+### Arreglado
+- **TNK**: un tanque descubierto cuyo servidor Signal K no publica su capacidad (solo el nivel) se quedaba en 0 litros configurados y, aunque el dato en vivo llegaba bien (visible en CFG → Diagnóstico), la tarjeta de TNK lo mostraba siempre al 0% en vez del nivel real — ahora, sin capacidad conocida, usa directamente el nivel recibido. Además, "0%" ya no se confunde con "sin datos": sin ninguna lectura, la tarjeta muestra "--".
+
 ## [1.4.21] - 2026-08-28
 
 ### Arreglado

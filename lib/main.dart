@@ -8583,7 +8583,13 @@ class TankCard extends StatelessWidget {
                                   text: TextSpan(
                                     children: [
                                       TextSpan(
-                                        text: percent.round().toString(),
+                                        // "--" (not "0") when there's no
+                                        // reading at all, so an actually-empty
+                                        // tank and a missing/unconfigured one
+                                        // don't look identical.
+                                        text: value == null
+                                            ? '--'
+                                            : percent.round().toString(),
                                         style: TextStyle(
                                           color: cText,
                                           fontSize: large ? 52 : 42,

@@ -787,16 +787,28 @@ class TankViewData {
   double? percent(Map<String, double?> values) {
     var liters = 0.0;
     var capacity = 0;
-    var found = false;
+    var unweightedSum = 0.0;
+    var unweightedCount = 0;
     for (final s in slots) {
-      final cap = s.capacityL;
       final pct = values[s.tankKey];
-      if (cap <= 0 || pct == null) continue;
-      liters += cap * pct / 100.0;
-      capacity += cap;
-      found = true;
+      if (pct == null) continue;
+      final cap = s.capacityL;
+      if (cap > 0) {
+        liters += cap * pct / 100.0;
+        capacity += cap;
+      } else {
+        // Discovered tanks whose Signal K server only publishes
+        // currentLevel (no capacity node) default to capacityL 0 until
+        // someone fills it in — without this fallback, a perfectly valid
+        // live reading got silently dropped here (liters-weighted average
+        // saw zero total capacity) and the card showed a misleading "0%"
+        // instead of the real level.
+        unweightedSum += pct;
+        unweightedCount++;
+      }
     }
-    if (!found || capacity == 0) return null;
-    return liters * 100.0 / capacity;
+    if (capacity > 0) return liters * 100.0 / capacity;
+    if (unweightedCount > 0) return unweightedSum / unweightedCount;
+    return null;
   }
 }
