@@ -2,6 +2,14 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.31] - 2026-08-28
+
+### Arreglado
+- **Traza GPS del informe**: la posición no se encontraba en InfluxDB porque se buscaba como medida propia ("navigation.position.latitude"), pero signalk-to-influxdb2 la guarda como una única medida "navigation.position" con campos "lat"/"lon" — corregido con una consulta específica para posición.
+
+### Cambiado
+- **Informe de rendimiento → Polar**: quitado el gráfico radial (quedaba con mala legibilidad); se mantiene la tabla, que ahora además excluye los momentos con el barco parado (SOG<=0.5kt) del promedio.
+
 ## [1.4.30] - 2026-08-28
 
 ### Cambiado

@@ -77,6 +77,81 @@ Future<List<GraphPoint>> influxQuery({
   return points;
 }
 
+// GPS position is stored differently from every other metric this app
+// queries: signalk-to-influxdb2 writes it as a single "navigation.position"
+// measurement with two fields ("lat"/"lon"), not as its own measurement per
+// scalar value — so it needs its own query (selecting both fields) and its
+// own CSV parse (splitting rows by the `_field` column) instead of reusing
+// `influxQuery`, which assumes one value per measurement.
+Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
+  required String host,
+  required String fluxRange,
+  required String aggEvery,
+  String bucket = influxBucketDefault,
+  String org = influxOrgDefault,
+  String token = influxTokenDefault,
+}) async {
+  final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
+  final query =
+      'from(bucket:"$bucket")'
+      '|>range(start:$fluxRange,stop:now())'
+      '|>filter(fn:(r)=>r._measurement=="navigation.position" and (r._field=="lat" or r._field=="lon"))'
+      '|>aggregateWindow(every:$aggEvery,fn:mean,createEmpty:false)'
+      '|>keep(columns:["_time","_value","_field"])';
+  final response = await http
+      .post(
+        url,
+        headers: {
+          'Authorization': 'Token $token',
+          'Content-Type': 'application/vnd.flux',
+          'Accept': 'application/csv',
+        },
+        body: query,
+      )
+      .timeout(const Duration(seconds: 15));
+  if (response.statusCode != 200) {
+    throw Exception(
+      'HTTP ${response.statusCode}: ${response.body.length > 200 ? response.body.substring(0, 200) : response.body}',
+    );
+  }
+
+  final lat = <GraphPoint>[];
+  final lon = <GraphPoint>[];
+  int timeCol = -1, valueCol = -1, fieldCol = -1;
+  for (final line in const LineSplitter().convert(response.body)) {
+    if (line.isEmpty || line.startsWith('#')) continue;
+    final cells = line.split(',');
+    if (timeCol < 0) {
+      final t = cells.indexOf('_time');
+      if (t >= 0) {
+        timeCol = t;
+        valueCol = cells.indexOf('_value');
+        fieldCol = cells.indexOf('_field');
+      }
+      continue;
+    }
+    if (valueCol < 0 ||
+        fieldCol < 0 ||
+        cells.length <= math.max(timeCol, math.max(valueCol, fieldCol))) {
+      continue;
+    }
+    final ts = cells[timeCol];
+    final vs = cells[valueCol];
+    if (ts.isEmpty || vs.isEmpty || vs == 'null') continue;
+    final dt = DateTime.tryParse(ts);
+    final v = double.tryParse(vs);
+    if (dt == null || v == null || !v.isFinite) continue;
+    final point = GraphPoint(time: dt, value: v);
+    switch (cells[fieldCol]) {
+      case 'lat':
+        lat.add(point);
+      case 'lon':
+        lon.add(point);
+    }
+  }
+  return (lat: lat, lon: lon);
+}
+
 // ─── Signal K History API (standard SK endpoint — the same API a boat's
 // InfluxDB plugin OR a SQLite-backed provider like KIP can serve, so this one
 // query works regardless of which the server has registered) ────────────────

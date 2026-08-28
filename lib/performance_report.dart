@@ -160,53 +160,58 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   // chosen history source), the track always tries InfluxDB first when a
   // token is configured, using the same archive-vs-regular bucket the rest
   // of the report already picks by range, and only falls back to Signal K
-  // if Influx has nothing for this range.
-  Future<List<GraphPoint>> _queryPositionSeries(MetricDef def) async {
+  // if Influx has nothing for this range. Unlike every other metric here,
+  // position isn't stored as its own measurement — signalk-to-influxdb2
+  // writes it as a single "navigation.position" measurement with "lat"/"lon"
+  // fields, which is why this needs its own query instead of `influxQuery`.
+  Future<({List<GraphPoint> lat, List<GraphPoint> lon})>
+  _fetchPositionSeries() async {
     final s = widget.settings;
     final r = widget.range;
     if (s.influxToken.isNotEmpty) {
       try {
-        final pts = await influxQuery(
+        final res = await influxPositionQuery(
           host: s.effectiveInfluxHost,
           org: s.influxOrg,
           token: s.influxToken,
-          def: def,
           fluxRange: r.flux,
           aggEvery: r.agg,
           bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
         );
-        if (pts.isNotEmpty) return pts;
+        if (res.lat.isNotEmpty && res.lon.isNotEmpty) return res;
       } catch (_) {
         // Fall through to the Signal K History API below.
       }
     }
-    return skHistoryQuery(
-      host: _resolvedSkHost ?? s.host,
-      port: s.port,
-      authBase64: s.authBase64,
-      def: def,
-      range: parseFluxRange(r.flux),
-      resolution: parseAggEvery(r.agg),
-    );
+    final results = await Future.wait([
+      skHistoryQuery(
+        host: _resolvedSkHost ?? s.host,
+        port: s.port,
+        authBase64: s.authBase64,
+        def: const MetricDef('navigation.position.latitude', 'Lat', 'deg'),
+        range: parseFluxRange(r.flux),
+        resolution: parseAggEvery(r.agg),
+      ),
+      skHistoryQuery(
+        host: _resolvedSkHost ?? s.host,
+        port: s.port,
+        authBase64: s.authBase64,
+        def: const MetricDef('navigation.position.longitude', 'Lon', 'deg'),
+        range: parseFluxRange(r.flux),
+        resolution: parseAggEvery(r.agg),
+      ),
+    ]);
+    return (lat: results[0], lon: results[1]);
   }
 
-  // GPS position is a compound value (lat+lon), so it doesn't fit the plain
-  // scalar MetricDef/GraphPoint path the other metrics use — most
-  // Signal-K-to-InfluxDB plugins flatten it into two separate fields
-  // instead, which is what this queries as two ordinary series and then
-  // joins by nearest timestamp (same technique as _realPolar).
+  // GPS position is a compound value (lat+lon), so its two series need
+  // joining by nearest timestamp (same technique as _realPolar) to
+  // reconstruct (lat, lon) pairs.
   Future<List<({double lat, double lon})>> _fetchTrackPoints() async {
     try {
-      final results = await Future.wait([
-        _queryPositionSeries(
-          const MetricDef('navigation.position.latitude', 'Lat', 'deg'),
-        ),
-        _queryPositionSeries(
-          const MetricDef('navigation.position.longitude', 'Lon', 'deg'),
-        ),
-      ]);
-      final lats = results[0];
-      final lons = results[1];
+      final res = await _fetchPositionSeries();
+      final lats = res.lat;
+      final lons = res.lon;
       if (lats.isEmpty || lons.isEmpty) return [];
       final tol = Duration(
         seconds: math.max(
@@ -308,6 +313,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     List<GraphPoint> stw,
     List<GraphPoint> twa,
     List<GraphPoint> tws,
+    List<GraphPoint> sog,
   ) {
     const twaBands = [
       (loDeg: 0, hiDeg: 30),
@@ -382,6 +388,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       final twaP = nearest(twa, sp.time, tol);
       final twsP = nearest(tws, sp.time, tol);
       if (twaP == null || twsP == null) continue;
+      // Anchored/stationary moments (same SOG>0.5kt threshold used for the
+      // "tiempo navegando" stat) would otherwise drag every band's average
+      // toward zero with samples that aren't actually sailing.
+      final sogP = nearest(sog, sp.time, tol);
+      if (sogP == null || sogP.value <= 0.5) continue;
       final angle = twaP.value.abs().clamp(0, 180);
       final bandIdx = math.min(
         twaBands.length - 1,
@@ -421,7 +432,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twa = _series['twa'] ?? [];
     final interval = parseAggEvery(r.agg);
     final now = DateTime.now();
-    final polar = _realPolar(stw, twa, tws);
+    final polar = _realPolar(stw, twa, tws, sog);
 
     final rangeDur = parseFluxRange(r.flux);
     final distanceNm = _distanceNm(sog, interval);
@@ -435,7 +446,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final contentWidth = pageFormat.width - margin * 2;
 
     final doc = pw.Document();
-    final canvasFont = PdfFont.helvetica(doc.document);
     final trackMap = await _fetchTrackMapTiles(_track);
 
     String fmtDateTime(DateTime d) =>
@@ -652,19 +662,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             ),
           ),
           pw.Text(
-            'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
+            'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Excluye momentos parado (SOG<0.5kt). Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
             style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
           ),
           pw.SizedBox(height: 8),
-          pw.Center(
-            child: pdfPolarChart(
-              font: canvasFont,
-              polar: polar,
-              width: math.min(contentWidth, 300),
-              height: math.min(contentWidth, 300),
-            ),
-          ),
-          pw.SizedBox(height: 16),
           pdfPolarTable(polar, pdfGreen),
         ],
       ),
@@ -774,21 +775,9 @@ List<pw.Widget> pdfHistogramRows(
 
 /// Real-data polar as a table — TWA bands (rows) × TWS bands (columns),
 /// each cell the average STW logged in that combination during the report
-/// period. A proper radial polar plot is future work; this already answers
-/// "how fast does the boat actually go at each angle/wind strength" from
-/// real logged data, without any assumed/target polar to compare against.
-/// Small fixed palette cycled by TWS-band index, so each band gets a
-/// stable, distinguishable color across the chart and its legend.
-const _polarPalette = [
-  pdfCyan,
-  pdfGreen,
-  pdfOrange,
-  pdfPurple,
-  pdfTeal,
-  pdfYellow,
-  pdfRed,
-  pdfDarkRed,
-];
+/// period, excluding stationary samples (SOG<=0.5kt). Answers "how fast
+/// does the boat actually go at each angle/wind strength" from real logged
+/// data, without any assumed/target polar to compare against.
 
 /// A fetched grid of OSM tiles covering a track's bounding box, plus enough
 /// to re-project any (lat, lon) back onto that grid for overlay drawing.
@@ -1004,173 +993,6 @@ pw.Widget pdfTrackMap({
         ),
       ],
     ),
-  );
-}
-
-/// Radial "how fast does the boat actually go" chart — one line per TWS
-/// band, plotted STW (radius) against TWA (angle from bow, mirrored
-/// port/starboard since the underlying data doesn't distinguish tack).
-pw.Widget pdfPolarChart({
-  required PdfFont font,
-  required PolarData polar,
-  required double width,
-  double height = 260,
-}) {
-  return pw.Column(
-    children: [
-      pw.CustomPaint(
-        size: PdfPoint(width, height),
-        painter: (canvas, size) {
-          var maxStw = 0.0;
-          for (final row in polar.avgStw) {
-            for (final v in row) {
-              if (v != null && v > maxStw) maxStw = v;
-            }
-          }
-          // A polar rose is centered in its box like a compass, not hinged
-          // to an edge — and note `package:pdf`'s canvas is PDF-native
-          // (origin bottom-left, y grows UPWARD), the opposite of screen/
-          // canvas coordinates. A previous version placed the center near
-          // `size.y` (meant to be "near the bottom" in screen terms) which
-          // in this y-up space is near the TOP of the box, so the rose
-          // immediately overflowed off the top of the page.
-          final cx = size.x / 2;
-          final cy = size.y / 2;
-          final maxR = math.min(size.x, size.y) / 2 - 24;
-          if (maxStw <= 0 || maxR <= 0) {
-            canvas
-              ..setFillColor(pdfMuted)
-              ..drawString(
-                font,
-                9,
-                'Sin datos suficientes de STW/TWA/TWS en este periodo.',
-                8,
-                size.y / 2,
-              );
-            return;
-          }
-          final ringStep = maxStw <= 4
-              ? 1.0
-              : maxStw <= 10
-              ? 2.0
-              : maxStw <= 20
-              ? 5.0
-              : 10.0;
-          final ringCount = (maxStw / ringStep).ceil().clamp(1, 12);
-          final rMax = ringCount * ringStep;
-          double rPx(double v) => (v / rMax) * maxR;
-
-          // Concentric STW rings.
-          for (var i = 1; i <= ringCount; i++) {
-            final r = rPx(ringStep * i);
-            canvas
-              ..setStrokeColor(pdfGrid)
-              ..setLineWidth(0.5)
-              ..drawEllipse(cx - r, cy - r, r * 2, r * 2)
-              ..strokePath()
-              ..setFillColor(pdfMuted)
-              ..drawString(
-                font,
-                6,
-                (ringStep * i).round().toString(),
-                cx + 2,
-                cy - r + 1,
-              );
-          }
-
-          // Radial spokes at every TWA band edge, mirrored L/R — angle 0 is
-          // straight up (dead ahead), 90 is abeam, 180 is dead astern.
-          final edges = <int>{
-            0,
-            for (final b in polar.twaBands) b.hiDeg,
-          };
-          for (final deg in edges) {
-            final rad = deg * math.pi / 180;
-            final dx = math.sin(rad) * maxR, dy = math.cos(rad) * maxR;
-            canvas
-              ..setStrokeColor(pdfGrid)
-              ..setLineWidth(0.5)
-              ..moveTo(cx, cy)
-              ..lineTo(cx + dx, cy + dy)
-              ..strokePath();
-            if (deg != 0) {
-              canvas
-                ..moveTo(cx, cy)
-                ..lineTo(cx - dx, cy + dy)
-                ..strokePath();
-            }
-            if (deg > 0) {
-              canvas
-                ..setFillColor(pdfMuted)
-                ..drawString(
-                  font,
-                  6,
-                  '$deg',
-                  cx + dx * 1.04 - 6,
-                  cy + dy * 1.04 - 3,
-                );
-            }
-          }
-
-          // One polyline per TWS band, mirrored on both sides; gaps (no
-          // samples for a TWA band) simply break the line rather than
-          // interpolating across missing data.
-          final twsBinCount = polar.twsEdges.length - 1;
-          for (var w = 0; w < twsBinCount; w++) {
-            final color = _polarPalette[w % _polarPalette.length];
-            for (final side in [1, -1]) {
-              canvas
-                ..setStrokeColor(color)
-                ..setLineWidth(1.4);
-              var started = false;
-              for (var b = 0; b < polar.twaBands.length; b++) {
-                final v = polar.avgStw[b][w];
-                if (v == null) {
-                  started = false;
-                  continue;
-                }
-                final mid =
-                    (polar.twaBands[b].loDeg + polar.twaBands[b].hiDeg) / 2;
-                final rad = mid * math.pi / 180;
-                final r = rPx(v);
-                final x = cx + side * math.sin(rad) * r;
-                final y = cy + math.cos(rad) * r;
-                if (!started) {
-                  canvas.moveTo(x, y);
-                  started = true;
-                } else {
-                  canvas.lineTo(x, y);
-                }
-              }
-              canvas.strokePath();
-            }
-          }
-        },
-      ),
-      pw.SizedBox(height: 6),
-      pw.Wrap(
-        spacing: 10,
-        runSpacing: 4,
-        children: [
-          for (var w = 0; w < polar.twsEdges.length - 1; w++)
-            pw.Row(
-              mainAxisSize: pw.MainAxisSize.min,
-              children: [
-                pw.Container(
-                  width: 9,
-                  height: 9,
-                  margin: const pw.EdgeInsets.only(right: 3),
-                  color: _polarPalette[w % _polarPalette.length],
-                ),
-                pw.Text(
-                  '${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt',
-                  style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-                ),
-              ],
-            ),
-        ],
-      ),
-    ],
   );
 }
 
