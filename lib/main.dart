@@ -4992,7 +4992,9 @@ class _DashboardState extends State<Dashboard> {
           bucket: settings.influxBucket,
           archiveBucket: settings.influxArchiveBucket,
           demo: settings.demoMode,
-          settings: settings,
+          // "Informe de rendimiento" is wind-performance specific — only
+          // _WindTapCard (the VNT screen's cards) offers it.
+          settings: null,
         ),
       ),
     );
@@ -7743,11 +7745,43 @@ class _GraphDialogState extends State<GraphDialog> {
     );
   }
 
+  static final RegExp _engineRunTimeRe = RegExp(r'^propulsion\.[^.]+\.runTime');
+
   Widget _buildStats() {
     final values = _points.map((p) => p.value).toList();
     final current = values.last;
     final minV = values.reduce(math.min);
     final maxV = values.reduce(math.max);
+    // Engine hours is a lifetime odometer-style counter, not a value that
+    // fluctuates — "min/max/trend" is meaningless for it. What's actually
+    // useful is how much it grew during the selected period.
+    if (_engineRunTimeRe.hasMatch(_def.skPath)) {
+      final usedH = values.last - values.first;
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          children: [
+            Text(
+              'Uso en el periodo: ${usedH.toStringAsFixed(1)} h',
+              style: const TextStyle(
+                color: cText,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '${current.toStringAsFixed(1)} h totales',
+              style: TextStyle(
+                color: _def.color,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     final q = math.max(1, values.length ~/ 4);
     final earlySum = values.take(q).fold(0.0, (a, b) => a + b);
     final lateSum = values.skip(values.length - q).fold(0.0, (a, b) => a + b);

@@ -8,6 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 import 'data_api.dart';
+import 'dns_resolve_stub.dart' if (dart.library.io) 'dns_resolve_io.dart';
 import 'main.dart';
 import 'model_comparison.dart' show pdfInfoCard;
 import 'models.dart';
@@ -55,6 +56,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   String? _error;
   Map<String, List<GraphPoint>> _series = {};
 
+  // Resolved once per report generation and reused for every Signal K
+  // History API call, so all of a report's queries hit the exact same
+  // server even if the configured host is an mDNS ".local" name whose
+  // resolution can otherwise flip between individual HTTP requests.
+  String? _resolvedSkHost;
+
   @override
   void initState() {
     super.initState();
@@ -73,8 +80,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       aggEvery: r.agg,
       bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
     );
-    Future<List<GraphPoint>> fromSk() => skHistoryQuery(
-      host: s.host,
+    Future<List<GraphPoint>> fromSk() async => skHistoryQuery(
+      host: _resolvedSkHost ?? s.host,
       port: s.port,
       authBase64: s.authBase64,
       def: def,
@@ -104,6 +111,9 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     });
     try {
       final r = widget.range;
+      if (!widget.settings.demoMode) {
+        _resolvedSkHost = await resolveHostOnce(widget.settings.host);
+      }
       if (widget.settings.demoMode) {
         _series = {
           'sog': demoGraphSeries(mSog, r.flux, r.agg),
@@ -144,6 +154,42 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
+  // Position history tends to outlive what the Signal K History API
+  // (KIP/SQLite) retains — that backend is geared for recent/live data, not
+  // an archive — so unlike the other metrics (which respect the user's
+  // chosen history source), the track always tries InfluxDB first when a
+  // token is configured, using the same archive-vs-regular bucket the rest
+  // of the report already picks by range, and only falls back to Signal K
+  // if Influx has nothing for this range.
+  Future<List<GraphPoint>> _queryPositionSeries(MetricDef def) async {
+    final s = widget.settings;
+    final r = widget.range;
+    if (s.influxToken.isNotEmpty) {
+      try {
+        final pts = await influxQuery(
+          host: s.effectiveInfluxHost,
+          org: s.influxOrg,
+          token: s.influxToken,
+          def: def,
+          fluxRange: r.flux,
+          aggEvery: r.agg,
+          bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
+        );
+        if (pts.isNotEmpty) return pts;
+      } catch (_) {
+        // Fall through to the Signal K History API below.
+      }
+    }
+    return skHistoryQuery(
+      host: _resolvedSkHost ?? s.host,
+      port: s.port,
+      authBase64: s.authBase64,
+      def: def,
+      range: parseFluxRange(r.flux),
+      resolution: parseAggEvery(r.agg),
+    );
+  }
+
   // GPS position is a compound value (lat+lon), so it doesn't fit the plain
   // scalar MetricDef/GraphPoint path the other metrics use — most
   // Signal-K-to-InfluxDB plugins flatten it into two separate fields
@@ -152,10 +198,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   Future<List<({double lat, double lon})>> _fetchTrackPoints() async {
     try {
       final results = await Future.wait([
-        _query(
+        _queryPositionSeries(
           const MetricDef('navigation.position.latitude', 'Lat', 'deg'),
         ),
-        _query(
+        _queryPositionSeries(
           const MetricDef('navigation.position.longitude', 'Lon', 'deg'),
         ),
       ]);
@@ -287,17 +333,18 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twsMin = twsValues.reduce(math.min);
     final twsMax = twsValues.reduce(math.max);
     final twsSpan = twsMax - twsMin;
+    // TWS bands stay narrow (max 2kt) since wind strength changes the
+    // predicted speed a lot — a 5kt-wide band used to blur together
+    // conditions that sail very differently.
     int niceStep(double s) {
-      if (s <= 8) return 1;
-      if (s <= 16) return 2;
-      if (s <= 40) return 5;
-      return 10;
+      if (s <= 6) return 1;
+      return 2;
     }
 
     final step = niceStep(twsSpan);
     final twsLow = (twsMin / step).floor() * step;
     final twsBinCount = twsSpan > 0
-        ? ((twsMax - twsLow) / step).ceil().clamp(1, 12)
+        ? ((twsMax - twsLow) / step).ceil().clamp(1, 16)
         : 1;
     final twsEdges = [for (var i = 0; i <= twsBinCount; i++) twsLow + step * i];
 
@@ -564,7 +611,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
           ),
           pw.SizedBox(height: 6),
-          ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
+          ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth, maxStep: 2),
         ],
       ),
     );
@@ -634,8 +681,9 @@ List<pw.Widget> pdfHistogramRows(
   List<GraphPoint> points,
   String unit,
   PdfColor color,
-  double width,
-) {
+  double width, {
+  int maxStep = 20,
+}) {
   if (points.isEmpty) {
     return [
       pw.Text(
@@ -651,11 +699,11 @@ List<pw.Widget> pdfHistogramRows(
   // Whole-number bin edges (e.g. "6–8kt", not "6.3–8.7kt") — step chosen
   // from the span so there are roughly 6-10 bins regardless of scale.
   int niceStep(double s) {
-    if (s <= 8) return 1;
-    if (s <= 16) return 2;
-    if (s <= 40) return 5;
-    if (s <= 80) return 10;
-    return 20;
+    if (s <= 8) return math.min(1, maxStep);
+    if (s <= 16) return math.min(2, maxStep);
+    if (s <= 40) return math.min(5, maxStep);
+    if (s <= 80) return math.min(10, maxStep);
+    return maxStep;
   }
 
   final step = niceStep(span);

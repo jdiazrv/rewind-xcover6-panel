@@ -2,6 +2,23 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.30] - 2026-08-28
+
+### Cambiado
+- **Informe de rendimiento**: el botón para generarlo ahora solo aparece en las gráficas de la pantalla VNT (viento) — antes también aparecía al abrir la gráfica de cualquier otra carta (tanques, baterías, horas de motor...), donde no tenía sentido.
+- **Traza GPS del informe**: la posición ahora se busca primero en InfluxDB (usando el mismo bucket de archivo para periodos largos que ya usan el resto de gráficas), porque suele conservar mucho más histórico que el History API de Signal K (KIP/SQLite) — con Signal K solo como respaldo si Influx no tiene nada.
+
+### Añadido
+- **Horas de motor**: al abrir su gráfica ahora se muestra el uso real del motor en el periodo seleccionado (diferencia entre el valor final e inicial), en vez de un mínimo/máximo/tendencia sin sentido para un contador que solo crece.
+
+## [1.4.29] - 2026-08-28
+
+### Arreglado
+- **Informe de rendimiento**: cuando la conexión Signal K usa un nombre de red (p.ej. `lysmarine.local`) en vez de una IP, cada consulta del informe resolvía ese nombre por separado — si la resolución cambiaba a mitad de la generación del informe, algunas métricas (típicamente la posición GPS de la traza) podían acabar consultando el servidor equivocado y volver vacías sin ningún error visible. Ahora el nombre se resuelve una sola vez al empezar a generar el informe y esa misma dirección se reutiliza para todas sus consultas.
+
+### Cambiado
+- **Distribución de viento (TWS) y bandas de la polar**: franjas más finas (2kt en vez de 5kt) — con 5kt se mezclaban condiciones de navegación muy distintas en la misma franja.
+
 ## [1.4.28] - 2026-08-28
 
 ### Arreglado
