@@ -14,6 +14,13 @@ import 'pdf/pdf_theme.dart';
 import 'theme.dart';
 
 typedef _ReportRange = ({String label, String flux, String agg, Duration dur});
+
+typedef PolarData = ({
+  List<int> twsEdges,
+  List<({int loDeg, int hiDeg})> twaBands,
+  List<List<double?>> avgStw,
+  List<List<int>> counts,
+});
 const _reportRanges = <_ReportRange>[
   (label: '24h', flux: '-24h', agg: '2m', dur: Duration(hours: 24)),
   (label: '7 días', flux: '-7d', agg: '15m', dur: Duration(days: 7)),
@@ -90,6 +97,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           'aws': demoGraphSeries(mAws, r.flux, r.agg),
           'tws': demoGraphSeries(mTws, r.flux, r.agg),
           'heel': demoGraphSeries(mHeel, r.flux, r.agg),
+          'twa': demoGraphSeries(mTwa, r.flux, r.agg),
         };
       } else {
         final results = await Future.wait([
@@ -98,6 +106,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           _query(mAws, r),
           _query(mTws, r),
           _query(mHeel, r),
+          _query(mTwa, r),
         ]);
         _series = {
           'sog': results[0],
@@ -105,6 +114,7 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           'aws': results[2],
           'tws': results[3],
           'heel': results[4],
+          'twa': results[5],
         };
       }
       if (mounted) setState(() => _loading = false);
@@ -244,6 +254,119 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
     return sog.where((p) => p.value > 0.5).length / sog.length;
   }
 
+  // "Polar de datos reales": average STW by TWA (30° bands, port/starboard
+  // combined since a boat's polar is symmetric) × TWS band — the same
+  // whole-number TWS margins used by the wind distribution above, so
+  // "el margen que haya pedido" (the histogram's bin width) drives this
+  // table too. STW/TWA/TWS come back as 3 independent series from the same
+  // query window, so they're joined by nearest timestamp rather than by
+  // index, tolerant of small gaps between them.
+  PolarData _realPolar(
+    List<GraphPoint> stw,
+    List<GraphPoint> twa,
+    List<GraphPoint> tws,
+  ) {
+    const twaBands = [
+      (loDeg: 0, hiDeg: 30),
+      (loDeg: 30, hiDeg: 60),
+      (loDeg: 60, hiDeg: 90),
+      (loDeg: 90, hiDeg: 120),
+      (loDeg: 120, hiDeg: 150),
+      (loDeg: 150, hiDeg: 180),
+    ];
+    if (stw.isEmpty || twa.isEmpty || tws.isEmpty) {
+      return (
+        twsEdges: const [0],
+        twaBands: twaBands,
+        avgStw: [
+          for (final _ in twaBands) <double?>[],
+        ],
+        counts: [
+          for (final _ in twaBands) <int>[],
+        ],
+      );
+    }
+    final twsValues = tws.map((p) => p.value).toList();
+    final twsMin = twsValues.reduce(math.min);
+    final twsMax = twsValues.reduce(math.max);
+    final twsSpan = twsMax - twsMin;
+    int niceStep(double s) {
+      if (s <= 8) return 1;
+      if (s <= 16) return 2;
+      if (s <= 40) return 5;
+      return 10;
+    }
+
+    final step = niceStep(twsSpan);
+    final twsLow = (twsMin / step).floor() * step;
+    final twsBinCount = twsSpan > 0
+        ? ((twsMax - twsLow) / step).ceil().clamp(1, 12)
+        : 1;
+    final twsEdges = [for (var i = 0; i <= twsBinCount; i++) twsLow + step * i];
+
+    GraphPoint? nearest(List<GraphPoint> series, DateTime t, Duration tol) {
+      GraphPoint? best;
+      Duration? bestDiff;
+      for (final p in series) {
+        final diff = p.time.difference(t).abs();
+        if (diff > tol) continue;
+        if (bestDiff == null || diff < bestDiff) {
+          best = p;
+          bestDiff = diff;
+        }
+      }
+      return best;
+    }
+
+    final tol = Duration(
+      seconds: math.max(
+        30,
+        stw.length > 1
+            ? stw[1].time.difference(stw[0].time).inSeconds ~/ 2
+            : 60,
+      ),
+    );
+
+    final sums = [
+      for (final _ in twaBands) List<double>.filled(twsBinCount, 0),
+    ];
+    final counts = [
+      for (final _ in twaBands) List<int>.filled(twsBinCount, 0),
+    ];
+
+    for (final sp in stw) {
+      final twaP = nearest(twa, sp.time, tol);
+      final twsP = nearest(tws, sp.time, tol);
+      if (twaP == null || twsP == null) continue;
+      final angle = twaP.value.abs().clamp(0, 180);
+      final bandIdx = math.min(
+        twaBands.length - 1,
+        (angle / 30).floor(),
+      );
+      final twsIdx = twsSpan > 0
+          ? math.min(twsBinCount - 1, ((twsP.value - twsLow) / step).floor())
+          : 0;
+      if (twsIdx < 0) continue;
+      sums[bandIdx][twsIdx] += sp.value;
+      counts[bandIdx][twsIdx]++;
+    }
+
+    final avgStw = [
+      for (var b = 0; b < twaBands.length; b++)
+        [
+          for (var w = 0; w < twsBinCount; w++)
+            counts[b][w] == 0 ? null : sums[b][w] / counts[b][w],
+        ],
+    ];
+
+    return (
+      twsEdges: twsEdges,
+      twaBands: twaBands,
+      avgStw: avgStw,
+      counts: counts,
+    );
+  }
+
   Future<Uint8List> _buildReportPdf() async {
     final r = _reportRanges[_rIdx];
     final sog = _series['sog'] ?? [];
@@ -251,8 +374,10 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
     final aws = _series['aws'] ?? [];
     final tws = _series['tws'] ?? [];
     final heel = _series['heel'] ?? [];
+    final twa = _series['twa'] ?? [];
     final interval = parseAggEvery(r.agg);
     final now = DateTime.now();
+    final polar = _realPolar(stw, twa, tws);
 
     final distanceNm = _distanceNm(sog, interval);
     final underwayFrac = _underwayFraction(sog);
@@ -432,6 +557,21 @@ class _PerformanceReportDialogState extends State<PerformanceReportDialog> {
           ),
           pw.SizedBox(height: 6),
           ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
+          pw.SizedBox(height: 22),
+          pw.Text(
+            'Polar de datos reales — STW media (kt)',
+            style: const pw.TextStyle(
+              color: pdfText,
+              fontSize: 12,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+          pw.Text(
+            'Por ángulo de viento aparente/real (TWA, filas) y franja de viento real (TWS, columnas) — mismos márgenes que la distribución de TWS. "--" = sin muestras suficientes en esa combinación.',
+            style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+          ),
+          pw.SizedBox(height: 6),
+          pdfPolarTable(polar, pdfGreen),
         ],
       ),
     );
@@ -460,19 +600,31 @@ List<pw.Widget> pdfHistogramRows(
   final values = points.map((p) => p.value).toList();
   final minV = values.reduce(math.min);
   final maxV = values.reduce(math.max);
-  const binCount = 8;
   final span = maxV - minV;
-  final binWidth = span > 0 ? span / binCount : 1.0;
+  // Whole-number bin edges (e.g. "6–8kt", not "6.3–8.7kt") — step chosen
+  // from the span so there are roughly 6-10 bins regardless of scale.
+  int niceStep(double s) {
+    if (s <= 8) return 1;
+    if (s <= 16) return 2;
+    if (s <= 40) return 5;
+    if (s <= 80) return 10;
+    return 20;
+  }
+
+  final step = niceStep(span);
+  final lowStart = (minV / step).floor() * step;
+  final binCount = span > 0
+      ? ((maxV - lowStart) / step).ceil().clamp(1, 20)
+      : 1;
   final counts = List<int>.filled(binCount, 0);
   for (final v in values) {
     final idx = span > 0
-        ? math.min(binCount - 1, ((v - minV) / binWidth).floor())
+        ? math.min(binCount - 1, ((v - lowStart) / step).floor())
         : 0;
     counts[idx]++;
   }
   final total = values.length;
   final maxCount = counts.reduce(math.max);
-  final decimals = binWidth < 2 ? 1 : 0;
   const labelWidth = 70.0;
   const pctWidth = 40.0;
   final barMaxWidth = width - labelWidth - pctWidth - 12;
@@ -487,7 +639,8 @@ List<pw.Widget> pdfHistogramRows(
               pw.SizedBox(
                 width: labelWidth,
                 child: pw.Text(
-                  '${(minV + binWidth * i).toStringAsFixed(decimals)}–${(span > 0 ? minV + binWidth * (i + 1) : maxV).toStringAsFixed(decimals)}$unit',
+                  '${(lowStart + step * i).round()}'
+                  '${span > 0 ? '–${(lowStart + step * (i + 1)).round()}' : ''}$unit',
                   style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
                 ),
               ),
@@ -522,4 +675,78 @@ List<pw.Widget> pdfHistogramRows(
           ),
         ),
   ];
+}
+
+/// Real-data polar as a table — TWA bands (rows) × TWS bands (columns),
+/// each cell the average STW logged in that combination during the report
+/// period. A proper radial polar plot is future work; this already answers
+/// "how fast does the boat actually go at each angle/wind strength" from
+/// real logged data, without any assumed/target polar to compare against.
+pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
+  final twsBinCount = polar.twsEdges.length - 1;
+  if (twsBinCount < 1) {
+    return pw.Text(
+      'Sin datos suficientes (TWA/TWS/STW) en este periodo.',
+      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+    );
+  }
+  pw.Widget cell(String text, {bool header = false}) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+    child: pw.Text(
+      text,
+      textAlign: pw.TextAlign.center,
+      style: pw.TextStyle(
+        color: header ? pdfText : pdfMuted,
+        fontSize: 8,
+        fontWeight: header ? pw.FontWeight.bold : pw.FontWeight.normal,
+      ),
+    ),
+  );
+
+  return pw.Table(
+    border: pw.TableBorder.all(color: pdfGrid, width: 0.5),
+    columnWidths: {
+      0: const pw.FlexColumnWidth(1.3),
+      for (var w = 0; w < twsBinCount; w++) w + 1: const pw.FlexColumnWidth(1),
+    },
+    children: [
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(color: pdfPanel),
+        children: [
+          cell('TWA \\ TWS', header: true),
+          for (var w = 0; w < twsBinCount; w++)
+            cell('${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt', header: true),
+        ],
+      ),
+      for (var b = 0; b < polar.twaBands.length; b++)
+        pw.TableRow(
+          children: [
+            cell(
+              '${polar.twaBands[b].loDeg}-${polar.twaBands[b].hiDeg}°',
+              header: true,
+            ),
+            for (var w = 0; w < twsBinCount; w++)
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 5,
+                ),
+                child: pw.Text(
+                  polar.avgStw[b][w] == null
+                      ? '--'
+                      : polar.avgStw[b][w]!.toStringAsFixed(1),
+                  textAlign: pw.TextAlign.center,
+                  style: pw.TextStyle(
+                    color: polar.avgStw[b][w] == null ? pdfMuted : color,
+                    fontSize: 9,
+                    fontWeight: polar.avgStw[b][w] == null
+                        ? pw.FontWeight.normal
+                        : pw.FontWeight.bold,
+                  ),
+                ),
+              ),
+          ],
+        ),
+    ],
+  );
 }

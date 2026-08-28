@@ -2,6 +2,15 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.19] - 2026-08-28
+
+### Cambiado
+- **Gráficas → distribución**: barras verticales (antes horizontales), con los márgenes de cada franja siempre en números enteros.
+- **Informe de rendimiento**: los márgenes de la distribución de viento también en números enteros.
+
+### Añadido
+- **Informe de rendimiento**: nueva tabla "Polar de datos reales" — velocidad media (STW) por ángulo de viento (TWA, en bandas de 30°) y franja de viento real (TWS, mismos márgenes que la distribución), calculada a partir del histórico real del periodo — sin curva de polar teórica con la que comparar, tal y como se pidió.
+
 ## [1.4.18] - 2026-08-28
 
 ### Añadido

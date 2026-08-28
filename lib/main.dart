@@ -7422,84 +7422,101 @@ class _HistogramChart extends StatelessWidget {
   final String unit;
   final Color color;
 
+  // A step that divides the observed range into whole-number bins (e.g.
+  // wind in 2kt steps, not "6.3–8.7kt") — chosen from the span so there are
+  // roughly 6-10 bins regardless of whether the metric spans 5 units or 50.
+  static int _niceStep(double span) {
+    if (span <= 8) return 1;
+    if (span <= 16) return 2;
+    if (span <= 40) return 5;
+    if (span <= 80) return 10;
+    return 20;
+  }
+
   @override
   Widget build(BuildContext context) {
     final minV = values.reduce(math.min);
     final maxV = values.reduce(math.max);
-    const binCount = 8;
-    // All-identical readings (e.g. a flat calm) would otherwise divide by a
-    // zero range — fall back to a single bin covering that one value.
     final span = maxV - minV;
-    final binWidth = span > 0 ? span / binCount : 1.0;
+    final step = _niceStep(span);
+    final lowStart = (minV / step).floor() * step;
+    final binCount = span > 0
+        ? ((maxV - lowStart) / step).ceil().clamp(1, 20)
+        : 1;
     final counts = List<int>.filled(binCount, 0);
     for (final v in values) {
       final idx = span > 0
-          ? math.min(binCount - 1, ((v - minV) / binWidth).floor())
+          ? math.min(binCount - 1, ((v - lowStart) / step).floor())
           : 0;
       counts[idx]++;
     }
     final total = values.length;
     final maxCount = counts.reduce(math.max);
-    final decimals = binWidth < 2 ? 1 : 0;
 
-    return ListView.builder(
-      itemCount: binCount,
-      itemBuilder: (context, i) {
-        final lo = minV + binWidth * i;
-        final hi = span > 0 ? lo + binWidth : maxV;
-        final pct = total == 0 ? 0.0 : counts[i] * 100 / total;
-        final barFrac = maxCount == 0 ? 0.0 : counts[i] / maxCount;
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 5),
+    return Column(
+      children: [
+        Expanded(
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              SizedBox(
-                width: 92,
-                child: Text(
-                  '${lo.toStringAsFixed(decimals)}–${hi.toStringAsFixed(decimals)}$unit',
-                  style: const TextStyle(color: cMuted, fontSize: 12),
-                ),
-              ),
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, constraints) => Stack(
-                    children: [
-                      Container(
-                        height: 20,
-                        decoration: BoxDecoration(
-                          color: cPanel2,
-                          borderRadius: BorderRadius.circular(4),
+              for (var i = 0; i < binCount; i++)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 3),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Text(
+                          counts[i] == 0
+                              ? ''
+                              : '${(counts[i] * 100 / total).round()}%',
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
                         ),
-                      ),
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        height: 20,
-                        width: constraints.maxWidth * barFrac,
-                        decoration: BoxDecoration(
-                          color: color,
-                          borderRadius: BorderRadius.circular(4),
+                        const SizedBox(height: 3),
+                        Expanded(
+                          child: FractionallySizedBox(
+                            alignment: Alignment.bottomCenter,
+                            heightFactor: maxCount == 0
+                                ? 0.0
+                                : math.max(0.02, counts[i] / maxCount),
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              decoration: BoxDecoration(
+                                color: counts[i] == 0 ? cPanel2 : color,
+                                borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(3),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 48,
-                child: Text(
-                  '${pct.toStringAsFixed(0)}%',
-                  textAlign: TextAlign.right,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
             ],
           ),
-        );
-      },
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            for (var i = 0; i < binCount; i++)
+              Expanded(
+                child: Text(
+                  '${(lowStart + step * i).round()}'
+                  '${span > 0 ? '–${(lowStart + step * (i + 1)).round()}' : ''}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: cMuted, fontSize: 10),
+                ),
+              ),
+          ],
+        ),
+        Text(unit, style: const TextStyle(color: cMuted, fontSize: 10)),
+      ],
     );
   }
 }
