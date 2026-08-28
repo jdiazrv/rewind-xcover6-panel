@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.34] - 2026-08-28
+
+### Quitado
+- **Tanques agrupados**: quitada la fila de estadísticas extra (T. mar, batería, solar) del panel de detalle al tocar un grupo de tanques.
+
 ## [1.4.33] - 2026-08-28
 
 ### Arreglado

@@ -5051,47 +5051,6 @@ class _DashboardState extends State<Dashboard> {
                       ),
                     ),
                   ),
-                  // Other live boat parameters useful for context while
-                  // checking tanks (e.g. deciding whether to run the
-                  // watermaker, or how much battery is left before doing so).
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8, bottom: 4),
-                    child: Wrap(
-                      alignment: WrapAlignment.center,
-                      spacing: 28,
-                      runSpacing: 10,
-                      children: [
-                        _tankDetailStat(
-                          'T. mar',
-                          signalK.waterTempK != null
-                              ? '${(signalK.waterTempK! - 273.15).toStringAsFixed(1)}°C'
-                              : '--',
-                          cCyan,
-                        ),
-                        _tankDetailStat(
-                          'Batería',
-                          signalK.houseSoc != null
-                              ? '${signalK.houseSoc!.round()}%'
-                              : '--',
-                          cGreen,
-                        ),
-                        _tankDetailStat(
-                          'Batería V',
-                          signalK.houseV != null
-                              ? '${signalK.houseV!.toStringAsFixed(1)} V'
-                              : '--',
-                          cGreen,
-                        ),
-                        _tankDetailStat(
-                          'Solar',
-                          signalK.solarW != null
-                              ? '${signalK.solarW!.round()} W'
-                              : '--',
-                          cOrange,
-                        ),
-                      ],
-                    ),
-                  ),
                 ],
               ),
             ),
@@ -5100,21 +5059,6 @@ class _DashboardState extends State<Dashboard> {
       ),
     );
   }
-
-  Widget _tankDetailStat(String label, String value, Color color) => Column(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Text(
-        value,
-        style: TextStyle(
-          color: color,
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      Text(label, style: const TextStyle(color: cMuted, fontSize: 12)),
-    ],
-  );
 
   void _showModelComparison(BuildContext context) {
     showDialog<void>(
