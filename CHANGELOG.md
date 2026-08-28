@@ -2,6 +2,17 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.18] - 2026-08-28
+
+### Añadido
+- **Gráficas**: nuevos botones de rango 1h, 6h y 12h además de los ya existentes; barra de rangos ahora desplazable horizontalmente.
+- **Gráficas**: nueva vista de distribución (icono de barras junto al título) que muestra, para el rango de tiempo elegido, el % de tiempo pasado en cada franja de valores — por ejemplo, qué porcentaje del tiempo el viento estuvo entre 6-8 nudos, entre 10-15, etc.
+- **CFG → Diagnóstico**: nuevo botón "Informe de rendimiento" que genera un PDF (previsualizable, imprimible y compartible) con distancia navegada, tiempo navegando, SOG/STW/AWS/TWS medios y máximos, escora máxima, y la distribución de SOG y de viento real (TWS) del periodo elegido (24h / 7 días / 1 mes).
+
+### Cambiado
+- **NAV**: el catálogo de cartas no seleccionadas (al deslizar hacia abajo) pasa a ser una segunda pantalla propia con indicador de página, en vez de una lista que se desplazaba debajo — cíclica (de la última se vuelve a la primera) y con un indicador que distingue la pantalla de cartas elegidas de las de catálogo.
+- **Viento aparente** (NAV): AWS y AWA se alinean a la izquierda en vez de centrarse cada línea por separado.
+
 ## [1.4.17] - 2026-08-28
 
 ### Arreglado

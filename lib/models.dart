@@ -124,6 +124,13 @@ const mSog = MetricDef(
   scale: 1.94384,
   color: cGreen,
 );
+const mStw = MetricDef(
+  'navigation.speedThroughWater',
+  'STW',
+  'kn',
+  scale: 1.94384,
+  color: cCyan,
+);
 
 const defaultNavCardIds = ['sog', 'stw', 'heading', 'cog', 'depth', 'heel'];
 const allNavCardIds = [

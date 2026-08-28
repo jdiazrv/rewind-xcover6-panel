@@ -33,6 +33,7 @@ import 'data_api.dart';
 import 'geocode.dart';
 import 'model_comparison.dart';
 import 'models.dart';
+import 'performance_report.dart';
 import 'theme.dart';
 
 void main() async {
@@ -1889,6 +1890,7 @@ class _DashboardState extends State<Dashboard> {
     _phoneHeelTracker?.stop();
     channel?.sink.close();
     _pageController.dispose();
+    _navScrollController.dispose();
     _hostController?.dispose();
     _portController?.dispose();
     _authController?.dispose();
@@ -2097,6 +2099,9 @@ class _DashboardState extends State<Dashboard> {
   }
 
   // ─── NAV page ───────────────────────────────────────────────────────────────
+  int _navPageIndex = 0;
+  final _navScrollController = ScrollController();
+
   Widget _navPage() {
     final selectedIds = _validNavSelection(settings.navCardIds);
     if (!listEquals(selectedIds, settings.navCardIds)) {
@@ -2108,53 +2113,115 @@ class _DashboardState extends State<Dashboard> {
         .map(_navCardData)
         .toList();
 
+    // Library pages hold exactly as many cards as fit on the main grid
+    // (same columns×2 capacity) so _grid3x2's Expanded rows always divide
+    // the available height evenly — no page ever needs to crop a card.
+    final capacity = settings.navGridColumns * 2;
+    final libraryPages = <List<NavCardData>>[];
+    for (var i = 0; i < remaining.length; i += capacity) {
+      libraryPages.add(
+        remaining.sublist(i, math.min(i + capacity, remaining.length)),
+      );
+    }
+
+    final pages = <Widget>[
+      _grid3x2(
+        columns: settings.navGridColumns,
+        children: [
+          for (var i = 0; i < selected.length; i++)
+            _navMetricCard(selected[i], i),
+        ],
+      ),
+      for (final chunk in libraryPages)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+          child: _grid3x2(
+            columns: settings.navGridColumns,
+            children: [
+              for (var i = 0; i < chunk.length; i++)
+                _navMetricCard(
+                  chunk[i],
+                  selectedIds.length + i,
+                  selectable: false,
+                ),
+            ],
+          ),
+        ),
+    ];
+
+    final totalPages = pages.length;
+    if (_navPageIndex >= totalPages) _navPageIndex = 0;
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final pageHeight = math.max(320.0, constraints.maxHeight);
-        return Scrollbar(
-          thumbVisibility: true,
-          child: ListView(
+        final page = SizedBox(
+          key: ValueKey(_navPageIndex),
+          height: pageHeight,
+          child: pages[_navPageIndex],
+        );
+
+        if (totalPages == 1) {
+          return ListView(
             key: const PageStorageKey<String>('nav-scroll'),
-            primary: false,
+            controller: _navScrollController,
             physics: const AlwaysScrollableScrollPhysics(),
             padding: EdgeInsets.zero,
+            children: [page],
+          );
+        }
+
+        // Manual vertical swipe instead of a nested PageView — a PageView
+        // nested inside this screen's outer horizontal PageView was
+        // observed to silently swallow taps on the cards it contains (a
+        // gesture-arena issue specific to that nesting), so paging is
+        // driven by a plain drag gesture + AnimatedSwitcher instead.
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onVerticalDragEnd: (details) {
+            final v = details.primaryVelocity ?? 0;
+            if (v.abs() < 200) return;
+            setState(() {
+              _navPageIndex = v < 0
+                  ? (_navPageIndex + 1) % totalPages // swipe up → next
+                  : (_navPageIndex - 1 + totalPages) %
+                        totalPages; // swipe down → previous
+            });
+          },
+          child: Stack(
             children: [
-              SizedBox(
-                height: pageHeight,
-                child: _grid3x2(
-                  columns: settings.navGridColumns,
+              // Content always fills exactly `pageHeight` so this never
+              // actually has anything to scroll — kept as a real
+              // (AlwaysScrollableScrollPhysics, Scrollbar-wrapped) ListView
+              // rather than a bare SizedBox or a NeverScrollableScrollPhysics
+              // one, because both of those were observed to swallow taps on
+              // the cards inside, under this screen's nested-gesture setup.
+              Scrollbar(
+                controller: _navScrollController,
+                thumbVisibility: true,
+                child: ListView(
+                  key: const PageStorageKey<String>('nav-scroll'),
+                  controller: _navScrollController,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
                   children: [
-                    for (var i = 0; i < selected.length; i++)
-                      _navMetricCard(selected[i], i),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 200),
+                      child: page,
+                    ),
                   ],
                 ),
               ),
-              if (remaining.isNotEmpty)
-                SizedBox(
-                  height: pageHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                    // Scrollable (not NeverScrollable) so a growing card
-                    // catalog never gets cards silently clipped off the
-                    // bottom of this fixed-height "page" — it just scrolls.
-                    child: GridView.builder(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: remaining.length,
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 8,
-                            mainAxisSpacing: 8,
-                            childAspectRatio: 1.45,
-                          ),
-                      itemBuilder: (context, i) => _navMetricCard(
-                        remaining[i],
-                        selectedIds.length + i,
-                        selectable: false,
-                      ),
-                    ),
+              Positioned(
+                top: 6,
+                right: 10,
+                child: IgnorePointer(
+                  child: _NavPageIndicator(
+                    total: totalPages,
+                    current: _navPageIndex,
                   ),
                 ),
+              ),
             ],
           ),
         );
@@ -4434,6 +4501,16 @@ class _DashboardState extends State<Dashboard> {
                                     : cMuted,
                                 path: t.skPath,
                               ),
+                            const SizedBox(height: 14),
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.picture_as_pdf, size: 16),
+                              label: const Text('Informe de rendimiento'),
+                              onPressed: () => showDialog<void>(
+                                context: context,
+                                builder: (_) =>
+                                    PerformanceReportDialog(settings: settings),
+                              ),
+                            ),
                             const SizedBox(height: 10),
                             const Divider(color: Color(0xff1e3040), height: 1),
                             const SizedBox(height: 6),
@@ -6876,6 +6953,9 @@ class GraphDialog extends StatefulWidget {
 
 typedef _Range = ({String label, String flux, String agg, bool longRange});
 const _ranges = <_Range>[
+  (label: '1h', flux: '-1h', agg: '10s', longRange: false),
+  (label: '6h', flux: '-6h', agg: '30s', longRange: false),
+  (label: '12h', flux: '-12h', agg: '1m', longRange: false),
   (label: '24h', flux: '-24h', agg: '2m', longRange: false),
   (label: '48h', flux: '-48h', agg: '5m', longRange: false),
   (label: '7d', flux: '-7d', agg: '15m', longRange: true),
@@ -6887,6 +6967,9 @@ const _ranges = <_Range>[
 // to downsample as conservatively as the Influx `agg` steps above — use a
 // finer resolution per range instead of reusing the Influx one.
 const _skAgg = <String, String>{
+  '1h': '2s',
+  '6h': '10s',
+  '12h': '20s',
   '24h': '30s',
   '48h': '1m',
   '7d': '5m',
@@ -6895,7 +6978,9 @@ const _skAgg = <String, String>{
 
 class _GraphDialogState extends State<GraphDialog> {
   int _mIdx = 0;
-  int _rIdx = 0;
+  // Default range stays 24h (now index 3, after the new 1h/6h/12h buttons).
+  int _rIdx = 3;
+  bool _histogramMode = false;
   List<GraphPoint> _points = [];
   bool _loading = false;
   String? _error;
@@ -7038,45 +7123,68 @@ class _GraphDialogState extends State<GraphDialog> {
                 fontWeight: FontWeight.w700,
                 color: cText,
               ),
+              overflow: TextOverflow.ellipsis,
             ),
           ),
+          // Toggle between the line chart and a distribution histogram
+          // ("% of time spent in each value range") over the same time
+          // window/range buttons.
+          IconButton(
+            icon: Icon(
+              _histogramMode ? Icons.show_chart : Icons.bar_chart,
+              color: _def.color,
+            ),
+            tooltip: _histogramMode
+                ? 'Ver gráfica de línea'
+                : 'Ver distribución',
+            onPressed: () => setState(() => _histogramMode = !_histogramMode),
+          ),
           // Range buttons — greyed out and untappable once we know (from a
-          // Signal K/KIP probe) that range has no data at all for this series.
-          for (var i = 0; i < _ranges.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(left: 5),
-              child: GestureDetector(
-                onTap: _skRangeAvailable[i] == false
-                    ? null
-                    : () {
-                        if (_rIdx != i) {
-                          setState(() => _rIdx = i);
-                          _fetch();
-                        }
-                      },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _rIdx == i ? _def.color : cPanel2,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    _ranges[i].label,
-                    style: TextStyle(
-                      color: _skRangeAvailable[i] == false
-                          ? const Color(0xff445560)
-                          : (_rIdx == i ? cBg : cMuted),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
+          // Signal K/KIP probe) that range has no data at all for this
+          // series. Horizontally scrollable so adding more ranges never
+          // overflows the bar on a narrow screen.
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (var i = 0; i < _ranges.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 5),
+                    child: GestureDetector(
+                      onTap: _skRangeAvailable[i] == false
+                          ? null
+                          : () {
+                              if (_rIdx != i) {
+                                setState(() => _rIdx = i);
+                                _fetch();
+                              }
+                            },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _rIdx == i ? _def.color : cPanel2,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          _ranges[i].label,
+                          style: TextStyle(
+                            color: _skRangeAvailable[i] == false
+                                ? const Color(0xff445560)
+                                : (_rIdx == i ? cBg : cMuted),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
+              ],
             ),
+          ),
         ],
       ),
     );
@@ -7221,6 +7329,16 @@ class _GraphDialogState extends State<GraphDialog> {
         child: Text('Sin datos', style: TextStyle(color: cMuted, fontSize: 24)),
       );
     }
+    if (_histogramMode) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+        child: _HistogramChart(
+          values: _points.map((p) => p.value).toList(),
+          unit: _def.unit,
+          color: _def.color,
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 4, 16, 4),
       child: LineGraph(
@@ -7289,6 +7407,99 @@ class _GraphDialogState extends State<GraphDialog> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ─── Distribution histogram (% of time spent in each value range) ─────────────
+class _HistogramChart extends StatelessWidget {
+  const _HistogramChart({
+    required this.values,
+    required this.unit,
+    required this.color,
+  });
+  final List<double> values;
+  final String unit;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final minV = values.reduce(math.min);
+    final maxV = values.reduce(math.max);
+    const binCount = 8;
+    // All-identical readings (e.g. a flat calm) would otherwise divide by a
+    // zero range — fall back to a single bin covering that one value.
+    final span = maxV - minV;
+    final binWidth = span > 0 ? span / binCount : 1.0;
+    final counts = List<int>.filled(binCount, 0);
+    for (final v in values) {
+      final idx = span > 0
+          ? math.min(binCount - 1, ((v - minV) / binWidth).floor())
+          : 0;
+      counts[idx]++;
+    }
+    final total = values.length;
+    final maxCount = counts.reduce(math.max);
+    final decimals = binWidth < 2 ? 1 : 0;
+
+    return ListView.builder(
+      itemCount: binCount,
+      itemBuilder: (context, i) {
+        final lo = minV + binWidth * i;
+        final hi = span > 0 ? lo + binWidth : maxV;
+        final pct = total == 0 ? 0.0 : counts[i] * 100 / total;
+        final barFrac = maxCount == 0 ? 0.0 : counts[i] / maxCount;
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 92,
+                child: Text(
+                  '${lo.toStringAsFixed(decimals)}–${hi.toStringAsFixed(decimals)}$unit',
+                  style: const TextStyle(color: cMuted, fontSize: 12),
+                ),
+              ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Stack(
+                    children: [
+                      Container(
+                        height: 20,
+                        decoration: BoxDecoration(
+                          color: cPanel2,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        height: 20,
+                        width: constraints.maxWidth * barFrac,
+                        decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: 48,
+                child: Text(
+                  '${pct.toStringAsFixed(0)}%',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -8455,6 +8666,45 @@ class WeatherIcon extends StatelessWidget {
 }
 
 // ─── Alarms (CFG tab) ──────────────────────────────────────────────────────
+// Dot pagination for the NAV page's cyclic vertical swipe. Page 0 (the
+// user's actual selected cards) is drawn as a small square instead of a
+// dot — everything else is "more cards to pick from" — so it's obvious at
+// a glance whether you're home or browsing the catalog.
+class _NavPageIndicator extends StatelessWidget {
+  const _NavPageIndicator({required this.total, required this.current});
+  final int total;
+  final int current;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < total; i++) ...[
+            if (i > 0) const SizedBox(width: 5),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: i == 0 ? 8 : 6,
+              height: i == 0 ? 8 : 6,
+              decoration: BoxDecoration(
+                color: i == current ? cCyan : cMuted.withValues(alpha: 0.5),
+                shape: i == 0 ? BoxShape.rectangle : BoxShape.circle,
+                borderRadius: i == 0 ? BorderRadius.circular(2) : null,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _ThresholdRow extends StatefulWidget {
   const _ThresholdRow({
     required this.label,
