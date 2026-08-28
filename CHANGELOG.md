@@ -2,6 +2,14 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.26] - 2026-08-28
+
+### Arreglado
+- **CFG → Configurar sensores**: el path de horas de motor (`propulsion.*.runTime`) ahora se resalta en verde en la lista de paths descubiertos cuando está configurado y conectado, igual que solar/nevera/profundidad.
+
+### Añadido
+- **Horas motor**: la carta ahora se puede tocar para ver su gráfica histórica, con la misma vista de distribución que viento/velocidad.
+
 ## [1.4.25] - 2026-08-28
 
 ### Añadido

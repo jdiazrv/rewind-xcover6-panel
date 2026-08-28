@@ -2602,12 +2602,24 @@ class _DashboardState extends State<Dashboard> {
         );
       case 'engineHours':
         final h = signalK.engineHours;
+        final enginePath = settings.sensorConfig.enginePath;
         return NavCardData(
           id: id,
           title: 'Horas motor',
           value: h != null ? h.toStringAsFixed(1) : '--',
           unit: h != null ? 'h' : null,
           color: h == null ? cMuted : cText,
+          graphMetrics: enginePath == null
+              ? null
+              : [
+                  MetricDef(
+                    enginePath,
+                    'Horas motor',
+                    'h',
+                    scale: 1 / 3600.0,
+                    color: cText,
+                  ),
+                ],
         );
       default:
         return _navCardData(defaultNavCardIds.first);
@@ -5465,6 +5477,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   static final RegExp _tankPathRe = RegExp(
     r'^tanks\.[^.]+\.[^.]+\.currentLevel$',
   );
+  static final RegExp _enginePathRe = RegExp(r'^propulsion\.[^.]+\.runTime$');
   // Only the specific sub-fields the app actually reads — a battery exposes
   // many more (design specs, alarms, time remaining…) that we never touch,
   // so highlighting the whole electrical.batteries.* subtree would light up
@@ -5522,6 +5535,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     if (path.startsWith('electrical.venus.')) return 'Venus';
     if (_fridgePathRe.hasMatch(path)) return 'Nevera';
     if (_tankPathRe.hasMatch(path)) return 'Tanque';
+    if (_enginePathRe.hasMatch(path)) return 'Horas motor';
     final lower = path.toLowerCase();
     if (lower.contains('solar') || lower.contains('panel')) return 'Solar';
     if (lower.contains('depth')) return 'Profundidad';
@@ -5553,7 +5567,8 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     if (path == _cfg.solarPath ||
         path == _cfg.fridge1Path ||
         path == _cfg.fridge2Path ||
-        path == _cfg.depthPath) {
+        path == _cfg.depthPath ||
+        path == _cfg.enginePath) {
       return true;
     }
     for (final t in _cfg.tanks.where((t) => t.enabled)) {
