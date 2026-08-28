@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.4.26+37
+version: 1.4.27+38
 
 environment:
   sdk: ^3.13.1
@@ -103,5 +103,11 @@ flutter_launcher_icons:
   android: true
   ios: false
   image_path: "assets/icon.png"
+  # Foreground is the gauge glyph alone (transparent bg), scaled to sit
+  # inside the 66/108dp adaptive-icon safe zone — see
+  # https://developer.android.com/develop/ui/compose/system/icon_design_adaptive
+  # image_path above (the full square with baked-in background) is only
+  # used for the legacy/Play-Store icon, which isn't adaptive-masked.
   adaptive_icon_background: "#0a1628"
-  adaptive_icon_foreground: "assets/icon.png"
+  adaptive_icon_foreground: "assets/icon_foreground.png"
+  adaptive_icon_monochrome: "assets/icon_monochrome.png"

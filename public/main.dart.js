@@ -129490,7 +129490,7 @@ n=b3.h(0,n)!=null?B.ac:B.P
 b4.push(A.j1(!1,a7,!0,A.ef(q,m,n,"tanks."+p+"."+o+".currentLevel  (toca para ver todo)"),a7,!0,a7,a7,a7,a7,a7,a7,a7,a7,a7,a7,new A.aJi(b1,r),a7,a7,a7,a7,a7,a7,a7))}b4.push(B.dn)
 b4.push(B.qe)
 b4.push(B.by)
-b4.push(A.a5("v1.4.26 \xb7 2026-08-28",a7,a7,a7,a7,B.eK,a7,a7))
+b4.push(A.a5("v1.4.27 \xb7 2026-08-28",a7,a7,a7,a7,B.eK,a7,a7))
 b4.push(B.on)
 b4.push(B.b7d)
 return A.k0(A.bl(b4,B.an,B.I,B.N,B.W),a7,B.a5,B.fw,a7,B.aK)},

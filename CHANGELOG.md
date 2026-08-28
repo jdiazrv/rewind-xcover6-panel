@@ -2,6 +2,12 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.27] - 2026-08-28
+
+### Arreglado
+- **Icono de la app**: los tres arcos de color del velocímetro no compartían exactamente el mismo centro/radio (calculados a ojo) y quedaban ligeramente descuadrados. Recalculados con trigonometría exacta para que encajen perfectamente.
+- **Icono adaptativo de Android**: separado en capa de fondo (color) y primer plano (solo el velocímetro, sin fondo, con margen dentro de la "zona segura" de 66/108dp), más una capa monocromo para el tematizado de Android 13+ — antes se usaba la imagen completa como ambas capas, sin respetar la zona segura, así que quedaba recortado según el launcher.
+
 ## [1.4.26] - 2026-08-28
 
 ### Arreglado
