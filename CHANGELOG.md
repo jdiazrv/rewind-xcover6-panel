@@ -2,6 +2,25 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.16] - 2026-08-28
+
+### Añadido
+- **CFG → Diagnóstico**: añadidas las filas que faltaban (COG, TWD, VMG viento/ruta, satélites/HDOP/calidad de fix GNSS, altitud de antena, voltaje y temperatura del bowthruster).
+- **Alarmas personalizadas de temperatura**: ahora se puede elegir cualquier sensor de temperatura descubierto en el barco (excepto exterior, interior y T. mar), no solo una lista fija de 5.
+- **NAV**: nueva carta "Viento aparente" (AWS + AWA en dos líneas).
+- **Alarma de corredera**: alarma independiente (con su propio interruptor, fuera de las personalizadas) que salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled o parada.
+- **AIS**: umbrales de CPA y TCPA "relevantes" (a partir de qué distancia/tiempo un objetivo deja de mostrarse como el más cercano) ahora configurables en CFG → Alarmas, en vez de fijos.
+
+### Cambiado
+- Todas las referencias a "Batería casa" pasan a llamarse "Batería de servicio".
+- **Tarjeta AIS**: la primera línea grande ahora es TCPA y la segunda CPA (antes al revés).
+- **Info ampliada de AIS** (al tocar la tarjeta AIS de NAV): ahora muestra la misma ficha completa que la pantalla AIS (foto del barco, MMSI, posición, COG, SOG, distancia, CPA, TCPA, cruce, última actualización), no solo un resumen.
+
+## [1.4.15] - 2026-08-28
+
+### Arreglado
+- **Tarjeta AIS**: cuando hay objetivos AIS pero ninguno tiene un cruce previsto en los próximos 20 min, ahora dice "Sin cruce previsto" en vez de "Sin AIS" — ese mensaje se reserva para cuando de verdad no hay ningún objetivo.
+
 ## [1.4.14] - 2026-08-28
 
 ### Arreglado

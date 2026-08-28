@@ -135,6 +135,36 @@ class _DashboardState extends State<Dashboard> {
   AudioPlayer? _alarmPlayer;
   bool _alarmSoundPlaying = false;
   final _mutedAlarms = <String>{}; // acknowledged-until-it-clears, no auto-unmute
+  // Generic "last value by Signal K path" cache for any *.temperature path
+  // we're subscribed to — lets a 'tempAbove' custom alarm target *any*
+  // discovered temperature sensor, not just a hardcoded handful, without
+  // needing a dedicated SignalKModel field for each one.
+  final _customTempValues = <String, double?>{};
+
+  // Corredera stall alarm — needs a sustained (3s) condition, not just an
+  // instant snapshot, so this is tracked across ticks of _staleWatchdog
+  // rather than computed fresh inside the _activeAlarms getter.
+  DateTime? _correderaSince;
+  bool _correderaActive = false;
+  void _checkCorredera() {
+    if (!settings.alarmCorrederaEnabled) {
+      _correderaSince = null;
+      _correderaActive = false;
+      return;
+    }
+    final sog = signalK.sogKn;
+    final stw = signalK.stwKn;
+    final condition = sog != null && sog > 2 && stw != null && stw == 0;
+    if (!condition) {
+      _correderaSince = null;
+      _correderaActive = false;
+      return;
+    }
+    _correderaSince ??= DateTime.now();
+    _correderaActive =
+        DateTime.now().difference(_correderaSince!) >=
+        const Duration(seconds: 3);
+  }
 
   void _routeNotification(String path, dynamic value) {
     if (value is! Map) {
@@ -180,6 +210,15 @@ class _DashboardState extends State<Dashboard> {
         muted: _mutedAlarms.contains(key),
       ));
     }
+    if (settings.alarmCorrederaEnabled && _correderaActive) {
+      const key = 'corredera';
+      out.add((
+        key: key,
+        label: 'Corredera (SOG sin STW)',
+        sound: settings.alarmCorrederaSound,
+        muted: _mutedAlarms.contains(key),
+      ));
+    }
     return out;
   }
 
@@ -198,14 +237,13 @@ class _DashboardState extends State<Dashboard> {
         final s = signalK.houseSoc;
         return s != null && s < rule.threshold;
       case 'tempAbove':
-        final kelvin = switch (rule.target) {
-          'fridge1' => signalK.fridge1TempK,
-          'fridge2' => signalK.fridge2TempK,
-          'battery' => signalK.houseTempK,
-          'cpu' => signalK.cpuTempK,
-          'bowthruster' => signalK.bowthrusterTempK,
-          _ => null,
-        };
+        // rule.target is a real Signal K path (e.g.
+        // "environment.fridge_2.temperature") — _customTempValues caches
+        // the latest reading for *every* subscribed *.temperature path,
+        // so this works for any discovered sensor, not just a fixed set.
+        final kelvin = rule.target == null
+            ? null
+            : _customTempValues[rule.target];
         return kelvin != null && (kelvin - 273.15) > rule.threshold;
       case 'tankBelow':
         return signalK.tanks.values.any(
@@ -249,6 +287,7 @@ class _DashboardState extends State<Dashboard> {
   // type) to the header tab it belongs to — good enough to point the user
   // at the right screen without a hardcoded table for every possible SK path.
   String? _pageForAlarmKey(String key) {
+    if (key == 'corredera') return 'NAV';
     if (key.startsWith('custom:')) {
       final id = key.substring('custom:'.length);
       for (final rule in settings.customAlarms) {
@@ -280,6 +319,9 @@ class _DashboardState extends State<Dashboard> {
   // example asked for); extend this switch for other cards as needed.
   bool _isCardAlarming(String cardId) {
     for (final a in _activeAlarms) {
+      if (a.key == 'corredera' && (cardId == 'sog' || cardId == 'stw')) {
+        return true;
+      }
       if (a.key.startsWith('custom:')) {
         final id = a.key.substring('custom:'.length);
         for (final rule in settings.customAlarms) {
@@ -303,7 +345,20 @@ class _DashboardState extends State<Dashboard> {
     final sortedTypes = [...customAlarmTypes]
       ..sort((a, b) => customAlarmTypeLabel(a).compareTo(customAlarmTypeLabel(b)));
     var type = sortedTypes.first;
-    var target = tempAlarmTargets.first;
+    // Seeded with the sensors this app already knows the paths for; "Buscar
+    // más sensores" below adds any other *.temperature path Signal K is
+    // currently reporting, so this covers whatever's actually on the boat
+    // rather than a fixed list.
+    final c = settings.sensorConfig;
+    final tempTargets = <String>{
+      if (c.fridge1Path != null && c.fridge1Path!.isNotEmpty) c.fridge1Path!,
+      if (c.fridge2Path != null && c.fridge2Path!.isNotEmpty) c.fridge2Path!,
+      'electrical.batteries.${c.batteryHouseId}.temperature',
+      'environment.rpi.cpu.temperature',
+      'electrical.batteries.bowthruster.temperature',
+    };
+    var target = tempTargets.first;
+    var discoveringTemps = false;
     final thresholdController = TextEditingController(text: '5');
     return showDialog<CustomAlarmRule>(
       context: context,
@@ -353,13 +408,38 @@ class _DashboardState extends State<Dashboard> {
                       dropdownColor: cPanel,
                       style: const TextStyle(color: cText),
                       items: [
-                        for (final t in tempAlarmTargets)
+                        for (final t in tempTargets)
                           DropdownMenuItem(
                             value: t,
                             child: Text(tempAlarmTargetLabel(t)),
                           ),
                       ],
                       onChanged: (v) => setSt(() => target = v ?? target),
+                    ),
+                    TextButton.icon(
+                      icon: discoveringTemps
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.search, size: 16),
+                      label: const Text('Buscar más sensores de temperatura'),
+                      onPressed: discoveringTemps
+                          ? null
+                          : () async {
+                              setSt(() => discoveringTemps = true);
+                              final d = await discoverSkPaths();
+                              if (d != null) {
+                                for (final p in d.allPaths) {
+                                  if (p.toLowerCase().endsWith('.temperature') &&
+                                      !excludedTempAlarmPaths.contains(p)) {
+                                    tempTargets.add(p);
+                                  }
+                                }
+                              }
+                              setSt(() => discoveringTemps = false);
+                            },
                     ),
                   ],
                   const SizedBox(height: 8),
@@ -524,6 +604,8 @@ class _DashboardState extends State<Dashboard> {
     // Re-render periodically so nav/wind cards flip to "--" once stale, even
     // without a new Signal K message arriving to trigger a rebuild.
     _staleWatchdog = Timer.periodic(const Duration(seconds: 2), (_) {
+      _checkCorredera();
+      unawaited(_syncAlarmSound());
       if (mounted) setState(() {});
     });
   }
@@ -643,6 +725,13 @@ class _DashboardState extends State<Dashboard> {
         prefs.getBool('phoneAttitudeInvertRoll') ??
         settings.phoneAttitudeInvertRoll;
     settings.navGridColumns = prefs.getInt('navGridColumns') ?? settings.navGridColumns;
+    settings.aisCpaMaxNm = prefs.getDouble('aisCpaMaxNm') ?? settings.aisCpaMaxNm;
+    settings.aisTcpaMaxMin =
+        prefs.getDouble('aisTcpaMaxMin') ?? settings.aisTcpaMaxMin;
+    settings.alarmCorrederaEnabled =
+        prefs.getBool('alarmCorrederaEnabled') ?? settings.alarmCorrederaEnabled;
+    settings.alarmCorrederaSound =
+        prefs.getBool('alarmCorrederaSound') ?? settings.alarmCorrederaSound;
     settings.alarmsUseSkZones =
         prefs.getBool('alarmsUseSkZones') ?? settings.alarmsUseSkZones;
     final skZoneJson = prefs.getString('skZoneAlarmsJson');
@@ -686,8 +775,29 @@ class _DashboardState extends State<Dashboard> {
         /* keep defaults if corrupted */
       }
     }
+    _migrateLegacyTempAlarmTargets();
     _applyWakelock();
     _applyPhoneHeelSetting();
+  }
+
+  // Pre-1.4.15 'tempAbove' alarms stored a fixed key ('fridge1', 'battery'...)
+  // instead of a real Signal K path — resolve those against the current
+  // sensor config now that it's loaded, so the alarm keeps working under
+  // the new (any-discovered-sensor) targeting scheme.
+  void _migrateLegacyTempAlarmTargets() {
+    final c = settings.sensorConfig;
+    for (final rule in settings.customAlarms) {
+      if (rule.type != 'tempAbove' || rule.target == null) continue;
+      final resolved = switch (rule.target) {
+        'fridge1' => c.fridge1Path ?? 'environment.fridge_1.temperature',
+        'fridge2' => c.fridge2Path ?? 'environment.fridge_2.temperature',
+        'battery' => 'electrical.batteries.${c.batteryHouseId}.temperature',
+        'cpu' => 'environment.rpi.cpu.temperature',
+        'bowthruster' => 'electrical.batteries.bowthruster.temperature',
+        _ => rule.target!, // already a real path
+      };
+      rule.target = resolved;
+    }
   }
 
   Future<void> _saveSettings() async {
@@ -709,6 +819,10 @@ class _DashboardState extends State<Dashboard> {
     );
     await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
     await prefs.setInt('navGridColumns', settings.navGridColumns);
+    await prefs.setDouble('aisCpaMaxNm', settings.aisCpaMaxNm);
+    await prefs.setDouble('aisTcpaMaxMin', settings.aisTcpaMaxMin);
+    await prefs.setBool('alarmCorrederaEnabled', settings.alarmCorrederaEnabled);
+    await prefs.setBool('alarmCorrederaSound', settings.alarmCorrederaSound);
     await prefs.setBool('alarmsUseSkZones', settings.alarmsUseSkZones);
     await prefs.setString(
       'skZoneAlarmsJson',
@@ -892,6 +1006,8 @@ class _DashboardState extends State<Dashboard> {
       'electrical.venus.dcPower',
       'notifications.*',
       ..._dynamicHandlers.keys,
+      for (final rule in settings.customAlarms)
+        if (rule.type == 'tempAbove' && rule.target != null) rule.target!,
     ];
     channel?.sink.add(
       jsonEncode({
@@ -1042,6 +1158,9 @@ class _DashboardState extends State<Dashboard> {
   }
 
   bool _routeValue(String path, dynamic value, DateTime? dataTime) {
+    if (path.endsWith('.temperature')) {
+      _customTempValues[path] = _num(value);
+    }
     final dynamicHandler = _dynamicHandlers[path];
     if (dynamicHandler != null) {
       dynamicHandler(value);
@@ -1810,10 +1929,6 @@ class _DashboardState extends State<Dashboard> {
   // Below this CPA, the NAV cards switch to a stronger alert color — this is
   // "about to matter" territory, not just "closer than most".
   static const _cpaCriticalNm = 0.5;
-  // Targets whose closest approach is further out than this aren't shown as
-  // "the" CPA/TCPA target — a very close CPA that's still 40 minutes away
-  // isn't actionable yet.
-  static const _cpaRelevantTcpaMin = 20.0;
   bool get _navFresh {
     final u = signalK.navUpdate;
     return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
@@ -2085,7 +2200,7 @@ class _DashboardState extends State<Dashboard> {
           title: 'SOG',
           value: fmt(sog, 1, ''),
           unit: 'kt',
-          color: cGreen,
+          color: _isCardAlarming('sog') ? cRed : cGreen,
           graphMetrics: const [mSog],
         );
       case 'stw':
@@ -2094,7 +2209,7 @@ class _DashboardState extends State<Dashboard> {
           title: 'STW',
           value: fmt(stw, 1, ''),
           unit: 'kt',
-          color: cGreen,
+          color: _isCardAlarming('stw') ? cRed : cGreen,
         );
       case 'heading':
         return NavCardData(
@@ -2163,18 +2278,21 @@ class _DashboardState extends State<Dashboard> {
         final tcpaStr = closest?.tcpaMin != null
             ? '${closest!.tcpaMin!.round()} min'
             : '--';
-        final subtitle = closest == null
-            ? 'Sin AIS'
-            : [
+        // "Sin AIS" should mean exactly that — no targets at all — not "no
+        // target happens to have a crossing predicted right now", which is
+        // the far more common case out at sea and reads as broken/no-data.
+        final subtitle = closest != null
+            ? [
                 _aisTargetName(closest.target),
                 if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
                 if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
-              ].join(' · ');
+              ].join(' · ')
+            : (_aisTargets.isEmpty ? 'Sin AIS' : 'Sin cruce previsto');
         return NavCardData(
           id: id,
           title: 'AIS',
           value: cpaStr,
-          bigLines: ['CPA $cpaStr', 'TCPA $tcpaStr'],
+          bigLines: ['TCPA $tcpaStr', 'CPA $cpaStr'],
           subtitle: subtitle,
           color: closest == null
               ? cMuted
@@ -2214,6 +2332,19 @@ class _DashboardState extends State<Dashboard> {
           unit: 'kt',
           subtitle: vmgRoute == null ? 'Sin ruta' : null,
           color: vmgRoute == null ? cMuted : cGreen,
+        );
+      case 'appWind':
+        final aws = _freshWind(_dAws);
+        final awa = _freshWind(_dAwa);
+        return NavCardData(
+          id: id,
+          title: 'Viento aparente',
+          value: fmt(aws, 1, ''),
+          bigLines: [
+            'AWS ${fmt(aws, 1, '')} kt',
+            'AWA ${awa != null ? '${awa.round()}°' : '--'}',
+          ],
+          color: aws == null ? cMuted : cGreen,
         );
       default:
         return _navCardData(defaultNavCardIds.first);
@@ -2409,126 +2540,38 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
+  // Same "ficha" the AIS tab itself shows on tap — full data, not just the
+  // CPA/TCPA summary this dialog used to have on its own.
   void _showCpaDetail(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSt) {
-          // Refreshes every 2s while open so, per the same rule the NAV
-          // card itself follows, a target that becomes the new closest
-          // approach takes over the dialog instead of it staying stuck on
-          // whichever target was closest at the moment it was opened.
-          Timer(const Duration(seconds: 2), () {
-            if (ctx.mounted) setSt(() {});
-          });
-          final closest = _closestApproachTarget();
-          final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
-          final rows = closest == null
-              ? const [('Estado', 'Sin objetivos AIS con rumbo de colisión', cText)]
-              : <(String, String, Color)>[
-                  ('Objetivo', _aisTargetName(closest.target), cText),
-                  (
-                    'Demora',
-                    closest.bearingDeg != null
-                        ? '${closest.bearingDeg!.round()}°'
-                        : '--',
-                    cText,
-                  ),
-                  (
-                    'Distancia',
-                    closest.distNm != null
-                        ? '${closest.distNm!.toStringAsFixed(1)} NM'
-                        : '--',
-                    cText,
-                  ),
-                  (
-                    'CPA',
-                    closest.cpaNm != null
-                        ? '${closest.cpaNm!.toStringAsFixed(1)} NM'
-                        : '--',
-                    cpaCritical ? cRed : cText,
-                  ),
-                  (
-                    'TCPA',
-                    closest.tcpaMin != null
-                        ? '${closest.tcpaMin!.round()} min'
-                        : '--',
-                    cpaCritical ? cRed : cText,
-                  ),
-                  (
-                    'Cruce',
-                    closest.crossing ?? 'Sin cruce claro',
-                    cpaCritical ? cRed : cText,
-                  ),
-                ];
-          return Dialog(
-            backgroundColor: cBg,
-            insetPadding: const EdgeInsets.all(24),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
+    final closest = _closestApproachTarget();
+    if (closest == null) {
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: cPanel,
+          title: const Text('AIS', style: TextStyle(color: cText)),
+          content: const Text(
+            'Sin objetivos AIS con rumbo de colisión',
+            style: TextStyle(color: cMuted),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cerrar'),
             ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            'AIS',
-                            style: TextStyle(
-                              color: cText,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.close, color: cMuted),
-                          onPressed: () => Navigator.of(ctx).pop(),
-                        ),
-                      ],
-                    ),
-                    for (final row in rows)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(
-                              width: 110,
-                              child: Text(
-                                row.$1,
-                                style: const TextStyle(
-                                  color: cMuted,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: Text(
-                                row.$2,
-                                style: TextStyle(
-                                  color: row.$3,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
+          ],
+        ),
+      );
+      return;
+    }
+    showAisTargetDetail(
+      context,
+      target: closest.target,
+      distNm: closest.distNm ?? 0,
+      bearingDeg: closest.bearingDeg ?? 0,
+      cpaNm: closest.cpaNm,
+      tcpaMin: closest.tcpaMin,
+      crossing: closest.crossing,
     );
   }
 
@@ -2616,8 +2659,12 @@ class _DashboardState extends State<Dashboard> {
       if (cpaNm == null && tcpaMin == null) continue;
       // A target 40 minutes out at its current CPA isn't a collision risk
       // yet — don't let it steal the "closest approach" slot from something
-      // that's actually about to happen.
-      if (tcpaMin != null && tcpaMin > _cpaRelevantTcpaMin) continue;
+      // that's actually about to happen. Both thresholds are user-configurable
+      // (CFG → Pantalla → AIS).
+      if (tcpaMin != null && tcpaMin > settings.aisTcpaMaxMin) continue;
+      // A target that will pass 6 NM off isn't "the" closest approach either,
+      // even if it happens to be the only one with a computed CPA right now.
+      if (cpaNm != null && cpaNm > settings.aisCpaMaxNm) continue;
       final candidate = (
         target: target,
         cpaNm: cpaNm,
@@ -4012,6 +4059,67 @@ class _DashboardState extends State<Dashboard> {
                               ),
                         ],
                         const SizedBox(height: 16),
+                        const Text('ALARMA DE CORREDERA', style: lbl),
+                        gap,
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          value: settings.alarmCorrederaEnabled,
+                          onChanged: (v) {
+                            setSt(() => settings.alarmCorrederaEnabled = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                            unawaited(_syncAlarmSound());
+                          },
+                          title: const Text(
+                            'Corredera (SOG sin STW)',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          subtitle: const Text(
+                            'Salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled/parada',
+                            style: TextStyle(fontSize: 11, color: cMuted),
+                          ),
+                        ),
+                        if (settings.alarmCorrederaEnabled)
+                          SwitchListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            value: settings.alarmCorrederaSound,
+                            onChanged: (v) {
+                              setSt(() => settings.alarmCorrederaSound = v);
+                              setState(() {});
+                              unawaited(_saveSettings());
+                              unawaited(_syncAlarmSound());
+                            },
+                            title: const Text(
+                              'Aviso sonoro',
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        const SizedBox(height: 16),
+                        const Text('AIS — UMBRALES', style: lbl),
+                        gap,
+                        _ThresholdRow(
+                          label: 'CPA máximo relevante',
+                          unit: 'NM',
+                          value: settings.aisCpaMaxNm,
+                          onChanged: (v) {
+                            setSt(() => settings.aisCpaMaxNm = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                          },
+                        ),
+                        _ThresholdRow(
+                          label: 'TCPA máximo relevante',
+                          unit: 'min',
+                          value: settings.aisTcpaMaxMin,
+                          onChanged: (v) {
+                            setSt(() => settings.aisTcpaMaxMin = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                          },
+                        ),
+                        const SizedBox(height: 16),
                         Row(
                           children: [
                             const Text('ALARMAS PERSONALIZADAS', style: lbl),
@@ -4140,11 +4248,95 @@ class _DashboardState extends State<Dashboard> {
                               signalK.depthM != null ? cOrange : cMuted,
                               path: sc.depthPath ?? '(sin configurar)',
                             ),
+                            _diagRow(
+                              'COG',
+                              signalK.cogTrueDeg != null
+                                  ? '${signalK.cogTrueDeg!.round()}°'
+                                  : '--',
+                              signalK.cogTrueDeg != null ? cText : cMuted,
+                              path: 'navigation.courseOverGroundTrue',
+                            ),
+                            _diagRow(
+                              'TWD',
+                              _dTwd != null
+                                  ? '${_dTwd!.toStringAsFixed(0)}°'
+                                  : '--',
+                              _dTwd != null ? cCyan : cMuted,
+                              path: 'environment.wind.directionTrue',
+                            ),
+                            _diagRow(
+                              'VMG viento',
+                              () {
+                                final twaForVmg = _freshWind(_dTwa);
+                                final speedForVmg =
+                                    _fresh(signalK.stwKn) ??
+                                    _fresh(signalK.sogKn);
+                                final v = (twaForVmg != null &&
+                                        speedForVmg != null)
+                                    ? speedForVmg *
+                                          math.cos(
+                                            twaForVmg * math.pi / 180,
+                                          )
+                                    : null;
+                                return v != null
+                                    ? '${v.toStringAsFixed(1)} kt'
+                                    : '--';
+                              }(),
+                              cGreen,
+                              path: '(calculado)',
+                            ),
+                            _diagRow(
+                              'VMG ruta',
+                              signalK.courseVmgKn != null
+                                  ? '${signalK.courseVmgKn!.toStringAsFixed(1)} kt'
+                                  : '--',
+                              signalK.courseVmgKn != null ? cGreen : cMuted,
+                              path:
+                                  'navigation.course.calcValues.velocityMadeGood',
+                            ),
+                            _diagRow(
+                              'GNSS sats',
+                              signalK.gnssSatellites?.toString() ?? '--',
+                              signalK.gnssSatellites != null
+                                  ? cGreen
+                                  : cMuted,
+                              path: 'navigation.gnss.satellites',
+                            ),
+                            _diagRow(
+                              'GNSS HDOP',
+                              signalK.gnssHdop != null
+                                  ? signalK.gnssHdop!.toStringAsFixed(1)
+                                  : '--',
+                              signalK.gnssHdop != null ? cGreen : cMuted,
+                              path: 'navigation.gnss.horizontalDilution',
+                            ),
+                            _diagRow(
+                              'GNSS fix',
+                              signalK.gnssMethodQuality ??
+                                  signalK.gnssFixType ??
+                                  '--',
+                              (signalK.gnssMethodQuality ??
+                                          signalK.gnssFixType) !=
+                                      null
+                                  ? cGreen
+                                  : cMuted,
+                              path: 'navigation.gnss.methodQuality',
+                            ),
+                            _diagRow(
+                              'Altitud antena',
+                              signalK.gnssAntennaAltitudeM != null
+                                  ? '${signalK.gnssAntennaAltitudeM!.toStringAsFixed(1)} m'
+                                  : '--',
+                              signalK.gnssAntennaAltitudeM != null
+                                  ? cGreen
+                                  : cMuted,
+                              path: 'navigation.gnss.antennaAltitude',
+                            ),
                             const SizedBox(height: 12),
                             const Text('ENERGÍA', style: lbl),
                             const SizedBox(height: 4),
                             _diagRow(
-                              'Batería casa V',
+                              'Batería de servicio V',
                               signalK.houseV != null
                                   ? '${signalK.houseV!.toStringAsFixed(2)} V'
                                   : '--',
@@ -4153,7 +4345,7 @@ class _DashboardState extends State<Dashboard> {
                                   'electrical.batteries.${sc.batteryHouseId}.voltage',
                             ),
                             _diagRow(
-                              'Batería casa A',
+                              'Batería de servicio A',
                               signalK.houseA != null
                                   ? '${signalK.houseA!.toStringAsFixed(1)} A'
                                   : '--',
@@ -4162,7 +4354,7 @@ class _DashboardState extends State<Dashboard> {
                                   'electrical.batteries.${sc.batteryHouseId}.current',
                             ),
                             _diagRow(
-                              'Batería casa SoC',
+                              'Batería de servicio SoC',
                               signalK.houseSoc != null
                                   ? '${signalK.houseSoc!.round()}%'
                                   : '--',
@@ -4187,6 +4379,14 @@ class _DashboardState extends State<Dashboard> {
                               signalK.solarW != null ? cOrange : cMuted,
                               path: sc.solarPath ?? '(sin configurar)',
                             ),
+                            _diagRow(
+                              'Bowthruster V',
+                              signalK.bowthrusterV != null
+                                  ? '${signalK.bowthrusterV!.toStringAsFixed(2)} V'
+                                  : '--',
+                              signalK.bowthrusterV != null ? cCyan : cMuted,
+                              path: 'electrical.batteries.bowthruster.voltage',
+                            ),
                             const SizedBox(height: 12),
                             const Text('TEMPERATURAS', style: lbl),
                             const SizedBox(height: 4),
@@ -4205,6 +4405,17 @@ class _DashboardState extends State<Dashboard> {
                                   : '--',
                               signalK.fridge2TempK != null ? cCyan : cMuted,
                               path: sc.fridge2Path ?? '(sin configurar)',
+                            ),
+                            _diagRow(
+                              'Bowthruster',
+                              signalK.bowthrusterTempK != null
+                                  ? '${(signalK.bowthrusterTempK! - 273.15).toStringAsFixed(1)} °C'
+                                  : '--',
+                              signalK.bowthrusterTempK != null
+                                  ? cCyan
+                                  : cMuted,
+                              path:
+                                  'electrical.batteries.bowthruster.temperature',
                             ),
                             const SizedBox(height: 12),
                             const Text('TANQUES', style: lbl),
@@ -4956,7 +5167,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     }
 
     check(
-      'Batería casa',
+      'Batería de servicio',
       'electrical.batteries.${_cfg.batteryHouseId}.',
       prefix: true,
     );
@@ -8241,6 +8452,65 @@ class WeatherIcon extends StatelessWidget {
 }
 
 // ─── Alarms (CFG tab) ──────────────────────────────────────────────────────
+class _ThresholdRow extends StatefulWidget {
+  const _ThresholdRow({
+    required this.label,
+    required this.unit,
+    required this.value,
+    required this.onChanged,
+  });
+  final String label;
+  final String unit;
+  final double value;
+  final ValueChanged<double> onChanged;
+
+  @override
+  State<_ThresholdRow> createState() => _ThresholdRowState();
+}
+
+class _ThresholdRowState extends State<_ThresholdRow> {
+  late final _controller = TextEditingController(
+    text: widget.value == widget.value.roundToDouble()
+        ? widget.value.toStringAsFixed(0)
+        : widget.value.toString(),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              widget.label,
+              style: const TextStyle(color: cText, fontSize: 13),
+            ),
+          ),
+          SizedBox(
+            width: 70,
+            child: TextField(
+              controller: _controller,
+              textAlign: TextAlign.right,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              style: const TextStyle(color: cText, fontSize: 13),
+              decoration: const InputDecoration(isDense: true),
+              onSubmitted: (v) {
+                final n = double.tryParse(v.replaceAll(',', '.'));
+                if (n != null) widget.onChanged(n);
+              },
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(widget.unit, style: const TextStyle(color: cMuted, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
 class _SkZoneAlarmRow extends StatelessWidget {
   const _SkZoneAlarmRow({
     required this.path,

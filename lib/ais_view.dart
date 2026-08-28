@@ -291,11 +291,6 @@ _AisPlot? _hitTestAis(List<_AisPlot> plots, Offset p) {
 Color _aisColor(_AisPlot p) =>
     p.stale ? const Color(0xffff00dc) : _aisTypeStyle(p.target.shipTypeId).fill;
 
-/// Only worth telling the sailor about when the target is actually closing
-/// (TCPA within 30 min) and the proa/popa crossing is geometrically well-defined.
-bool _aisHasMeaningfulCpa(_AisPlot p) =>
-    p.tcpaMin != null && p.tcpaMin! <= 30 && p.crossing != null;
-
 /// List view rule: only call proa/popa when the target will actually pass
 /// close (CPA < 3 nm) and is moving — a stopped/anchored target has no
 /// meaningful "crossing" even if the geometry technically resolves one.
@@ -586,8 +581,21 @@ class _AisRadarPainter extends CustomPainter {
   bool shouldRepaint(covariant _AisRadarPainter oldDelegate) => true;
 }
 
-void _showAisDetail(BuildContext context, _AisPlot p) {
-  final t = p.target;
+/// Shows the full AIS target detail dialog — same "ficha" whether opened
+/// from the AIS tab's radar/list or from the merged AIS card elsewhere in
+/// the app, so both entry points show identical, complete data.
+void showAisTargetDetail(
+  BuildContext context, {
+  required AisTarget target,
+  required double distNm,
+  required double bearingDeg,
+  double? cpaNm,
+  double? tcpaMin,
+  String? crossing,
+}) {
+  final t = target;
+  final hasMeaningfulCpa =
+      tcpaMin != null && tcpaMin <= 30 && crossing != null;
   Widget row(String k, String v) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 3),
     child: Row(
@@ -634,7 +642,7 @@ void _showAisDetail(BuildContext context, _AisPlot p) {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (t.mmsi != null) _AisTargetPhoto(mmsi: t.mmsi!),
+                if (t.mmsi != null) AisTargetPhoto(mmsi: t.mmsi!),
                 row('MMSI', t.mmsi ?? '--'),
                 row(
                   'Posición',
@@ -652,19 +660,19 @@ void _showAisDetail(BuildContext context, _AisPlot p) {
                 ),
                 row(
                   'Distancia',
-                  '${p.distNm.toStringAsFixed(2)} nm · ${p.bearingDeg.round()}°',
+                  '${distNm.toStringAsFixed(2)} nm · ${bearingDeg.round()}°',
                 ),
                 row(
                   'CPA',
-                  p.cpaNm != null ? '${p.cpaNm!.toStringAsFixed(2)} nm' : '--',
+                  cpaNm != null ? '${cpaNm.toStringAsFixed(2)} nm' : '--',
                 ),
                 row(
                   'TCPA',
-                  p.tcpaMin != null
-                      ? '${p.tcpaMin!.toStringAsFixed(0)} min'
+                  tcpaMin != null
+                      ? '${tcpaMin.toStringAsFixed(0)} min'
                       : '--',
                 ),
-                if (_aisHasMeaningfulCpa(p)) row('Cruce', p.crossing!),
+                if (hasMeaningfulCpa) row('Cruce', crossing),
                 row(
                   'Actualizado',
                   t.lastUpdate != null
@@ -691,8 +699,8 @@ void _showAisDetail(BuildContext context, _AisPlot p) {
 /// OpenCPN's AIS plugin) use for a "show target photo" button. Not every
 /// MMSI has a submitted photo, so failures are just hidden rather than
 /// shown as an error.
-class _AisTargetPhoto extends StatelessWidget {
-  const _AisTargetPhoto({required this.mmsi});
+class AisTargetPhoto extends StatelessWidget {
+  const AisTargetPhoto({super.key, required this.mmsi});
   final String mmsi;
 
   @override
@@ -1140,7 +1148,17 @@ class _AisRelativeViewState extends State<AisRelativeView>
       },
       onTapUp: (d) {
         final hit = _hitTestAis(plots, d.localPosition);
-        if (hit != null) _showAisDetail(context, hit);
+        if (hit != null) {
+          showAisTargetDetail(
+            context,
+            target: hit.target,
+            distNm: hit.distNm,
+            bearingDeg: hit.bearingDeg,
+            cpaNm: hit.cpaNm,
+            tcpaMin: hit.tcpaMin,
+            crossing: hit.crossing,
+          );
+        }
       },
       child: CustomPaint(
         painter: _AisRadarPainter(
@@ -1259,7 +1277,15 @@ class _AisRelativeViewState extends State<AisRelativeView>
                 final color = _aisColor(p);
                 final crosses = _aisShowsCrossing(p);
                 return InkWell(
-                  onTap: () => _showAisDetail(ctx, p),
+                  onTap: () => showAisTargetDetail(
+                    ctx,
+                    target: p.target,
+                    distNm: p.distNm,
+                    bearingDeg: p.bearingDeg,
+                    cpaNm: p.cpaNm,
+                    tcpaMin: p.tcpaMin,
+                    crossing: p.crossing,
+                  ),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(vertical: 9),
                     child: Row(

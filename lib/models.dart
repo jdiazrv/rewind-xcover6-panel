@@ -139,6 +139,7 @@ const allNavCardIds = [
   'time',
   'vmgWind',
   'vmgRoute',
+  'appWind',
 ];
 
 class NavCardData {
@@ -216,19 +217,41 @@ String customAlarmTypeUnit(String type) => switch (type) {
   _ => '',
 };
 
-// 'tempAbove' needs to know *which* temperature sensor — exterior, interior
-// and sea temperature are deliberately excluded (already have their own
-// display and aren't the kind of thing you'd want an audible alarm for).
-const tempAlarmTargets = ['fridge1', 'fridge2', 'battery', 'cpu', 'bowthruster'];
-
-String tempAlarmTargetLabel(String target) => switch (target) {
-  'fridge1' => 'Nevera 1',
-  'fridge2' => 'Nevera 2',
-  'battery' => 'Batería',
-  'cpu' => 'CPU (Raspberry Pi)',
-  'bowthruster' => 'Motor de proa',
-  _ => target,
+// Signal K paths that 'tempAbove' deliberately never offers — exterior,
+// interior and sea temperature already have their own display and aren't
+// the kind of thing you'd want an audible alarm for.
+const excludedTempAlarmPaths = {
+  'environment.outside.temperature',
+  'environment.interior.temperature',
+  'environment.water.temperature',
 };
+
+// 'tempAbove' targets are real Signal K paths (e.g.
+// "environment.fridge_1.temperature", "electrical.batteries.house.temperature")
+// discovered live per boat, not a fixed list — this turns one into a
+// readable label without needing any settings/discovery context, by
+// pattern-matching the path text itself.
+String tempAlarmTargetLabel(String path) {
+  final p = path.toLowerCase();
+  if (p == 'environment.rpi.cpu.temperature') return 'CPU (Raspberry Pi)';
+  if (p.contains('bowthruster')) return 'Motor de proa';
+  final battMatch = RegExp(
+    r'^electrical\.batteries\.([^.]+)\.temperature$',
+  ).firstMatch(path);
+  if (battMatch != null) return 'Batería (${battMatch.group(1)})';
+  final fridgeNum = RegExp(r'fridge\D*(\d+)').firstMatch(p);
+  if (fridgeNum != null) return 'Nevera ${fridgeNum.group(1)}';
+  if (p.contains('fridge') || p.contains('nevera') || p.contains('freezer')) {
+    return 'Nevera';
+  }
+  // Generic fallback: turn "environment.engine.temperature" into "Engine".
+  final segs = path.split('.');
+  final middle = segs.length > 2 ? segs.sublist(1, segs.length - 1) : segs;
+  final words = middle.join(' ').replaceAll('_', ' ').split(' ');
+  return words
+      .map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1))
+      .join(' ');
+}
 
 class CustomAlarmRule {
   CustomAlarmRule({
@@ -693,6 +716,18 @@ class SettingsModel {
   // to enabled+sound so a brand new zone alarm is on by default.
   Map<String, SkZoneAlarmSetting> skZoneAlarms = {};
   List<CustomAlarmRule> customAlarms = [];
+  // AIS "closest approach" filters — a target further than this at CPA, or
+  // further out in time than this at TCPA, isn't shown as the closest
+  // approach target (see _closestApproachTarget in main.dart).
+  double aisCpaMaxNm = 5.0;
+  double aisTcpaMaxMin = 20.0;
+  // Corredera (log/speedo) stall alarm: SOG moving but STW reads zero for a
+  // sustained period usually means the paddle wheel is fouled/stuck rather
+  // than the boat actually being stopped in the water — a standalone alarm
+  // outside the customAlarms list since it isn't threshold-configurable by
+  // the user, just on/off + sound.
+  bool alarmCorrederaEnabled = false;
+  bool alarmCorrederaSound = true;
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted
