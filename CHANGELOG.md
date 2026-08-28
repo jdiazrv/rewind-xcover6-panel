@@ -2,6 +2,12 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.17] - 2026-08-28
+
+### Arreglado
+- **NAV → "Viento aparente"**: AWS y AWA ahora se alinean a la izquierda en vez de centrarse cada línea por separado.
+- **NAV → catálogo de cartas no seleccionadas** (al desplazarse hacia abajo en NAV): ya no se recorta ninguna carta si no caben todas en la altura de una pantalla — ahora esa sección se puede desplazar.
+
 ## [1.4.16] - 2026-08-28
 
 ### Añadido

@@ -2134,8 +2134,11 @@ class _DashboardState extends State<Dashboard> {
                   height: pageHeight,
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    // Scrollable (not NeverScrollable) so a growing card
+                    // catalog never gets cards silently clipped off the
+                    // bottom of this fixed-height "page" — it just scrolls.
                     child: GridView.builder(
-                      physics: const NeverScrollableScrollPhysics(),
+                      physics: const AlwaysScrollableScrollPhysics(),
                       itemCount: remaining.length,
                       gridDelegate:
                           const SliverGridDelegateWithFixedCrossAxisCount(
@@ -6789,7 +6792,7 @@ class MetricCard extends StatelessWidget {
                         fit: BoxFit.contain,
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             for (final line in bigLines!)
                               Text(
