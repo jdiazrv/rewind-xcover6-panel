@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
@@ -94,6 +95,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
+  List<({double lat, double lon})> _track = [];
+
   Future<void> _fetch() async {
     setState(() {
       _loading = true;
@@ -110,6 +113,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'heel': demoGraphSeries(mHeel, r.flux, r.agg),
           'twa': demoGraphSeries(mTwa, r.flux, r.agg),
         };
+        _track = []; // No plausible synthetic track worth drawing.
       } else {
         final results = await Future.wait([
           _query(mSog),
@@ -127,6 +131,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'heel': results[4],
           'twa': results[5],
         };
+        _track = await _fetchTrackPoints();
       }
       if (mounted) setState(() => _loading = false);
     } catch (e) {
@@ -136,6 +141,56 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           _loading = false;
         });
       }
+    }
+  }
+
+  // GPS position is a compound value (lat+lon), so it doesn't fit the plain
+  // scalar MetricDef/GraphPoint path the other metrics use — most
+  // Signal-K-to-InfluxDB plugins flatten it into two separate fields
+  // instead, which is what this queries as two ordinary series and then
+  // joins by nearest timestamp (same technique as _realPolar).
+  Future<List<({double lat, double lon})>> _fetchTrackPoints() async {
+    try {
+      final results = await Future.wait([
+        _query(
+          const MetricDef('navigation.position.latitude', 'Lat', 'deg'),
+        ),
+        _query(
+          const MetricDef('navigation.position.longitude', 'Lon', 'deg'),
+        ),
+      ]);
+      final lats = results[0];
+      final lons = results[1];
+      if (lats.isEmpty || lons.isEmpty) return [];
+      final tol = Duration(
+        seconds: math.max(
+          30,
+          lats.length > 1
+              ? lats[1].time.difference(lats[0].time).inSeconds ~/ 2
+              : 60,
+        ),
+      );
+      final out = <({double lat, double lon})>[];
+      for (final lp in lats) {
+        GraphPoint? best;
+        Duration? bestDiff;
+        for (final p in lons) {
+          final diff = p.time.difference(lp.time).abs();
+          if (diff > tol) continue;
+          if (bestDiff == null || diff < bestDiff) {
+            best = p;
+            bestDiff = diff;
+          }
+        }
+        if (best != null &&
+            lp.value.abs() <= 90 &&
+            best.value.abs() <= 180) {
+          out.add((lat: lp.value, lon: best.value));
+        }
+      }
+      return out;
+    } catch (_) {
+      return [];
     }
   }
 
@@ -334,6 +389,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
     final doc = pw.Document();
     final canvasFont = PdfFont.helvetica(doc.document);
+    final trackMap = await _fetchTrackMapTiles(_track);
+
+    String fmtDateTime(DateTime d) =>
+        '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    final periodStart = now.subtract(rangeDur);
 
     pw.Widget header() => pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -347,8 +407,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ),
         ),
         pw.Text(
-          'Periodo: ${r.label} - generado ${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+          'Periodo: ${r.label} - del ${fmtDateTime(periodStart)} al ${fmtDateTime(now)}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+        ),
+        pw.Text(
+          'Generado ${fmtDateTime(now)}',
+          style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
         ),
         pw.SizedBox(height: 6),
         pw.Divider(color: pdfGrid, height: 1, thickness: 0.6),
@@ -522,6 +586,17 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         build: (ctx) => [
           header(),
           pw.Text(
+            'Traza GPS del periodo',
+            style: const pw.TextStyle(
+              color: pdfText,
+              fontSize: 12,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
+          pw.SizedBox(height: 8),
+          pdfTrackMap(map: trackMap, points: _track, width: contentWidth),
+          pw.SizedBox(height: 16),
+          pw.Text(
             'Polar de datos reales - STW media (kt)',
             style: const pw.TextStyle(
               color: pdfText,
@@ -538,7 +613,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             child: pdfPolarChart(
               font: canvasFont,
               polar: polar,
-              width: math.min(contentWidth, 340),
+              width: math.min(contentWidth, 300),
+              height: math.min(contentWidth, 300),
             ),
           ),
           pw.SizedBox(height: 16),
@@ -666,6 +742,223 @@ const _polarPalette = [
   pdfDarkRed,
 ];
 
+/// A fetched grid of OSM tiles covering a track's bounding box, plus enough
+/// to re-project any (lat, lon) back onto that grid for overlay drawing.
+class TrackMapResult {
+  final List<Uint8List> tiles; // row-major, length == cols * rows
+  final int cols, rows, z, startX, startY;
+  TrackMapResult({
+    required this.tiles,
+    required this.cols,
+    required this.rows,
+    required this.z,
+    required this.startX,
+    required this.startY,
+  });
+
+  /// Top-down fractions (0,0 = top-left of the grid image) for a point.
+  (double, double) project(double lat, double lon) {
+    final n = math.pow(2, z).toDouble();
+    final latRad = lat * math.pi / 180;
+    final x = (lon + 180) / 360 * n;
+    final y =
+        (1 - math.log(math.tan(latRad) + 1 / math.cos(latRad)) / math.pi) /
+        2 *
+        n;
+    return (
+      ((x - startX) / cols).clamp(0.0, 1.0),
+      ((y - startY) / rows).clamp(0.0, 1.0),
+    );
+  }
+}
+
+/// Fetches the smallest-area / highest-zoom grid of free OSM tiles (no API
+/// key) whose combined area fully covers the track's padded bounding box,
+/// capped at [maxCols] x [maxRows] tiles so the request stays bounded.
+Future<TrackMapResult?> _fetchTrackMapTiles(
+  List<({double lat, double lon})> points, {
+  int maxCols = 6,
+  int maxRows = 5,
+}) async {
+  if (points.length < 2) return null;
+  try {
+    var minLat = points.first.lat, maxLat = points.first.lat;
+    var minLon = points.first.lon, maxLon = points.first.lon;
+    for (final p in points) {
+      if (p.lat < minLat) minLat = p.lat;
+      if (p.lat > maxLat) maxLat = p.lat;
+      if (p.lon < minLon) minLon = p.lon;
+      if (p.lon > maxLon) maxLon = p.lon;
+    }
+    // Pad so the track doesn't touch the tile grid's edges.
+    final latPad = math.max((maxLat - minLat) * 0.12, 0.002);
+    final lonPad = math.max((maxLon - minLon) * 0.12, 0.002);
+    minLat -= latPad;
+    maxLat += latPad;
+    minLon -= lonPad;
+    maxLon += lonPad;
+
+    (double, double) proj(int z, double lat, double lon) {
+      final n = math.pow(2, z).toDouble();
+      final latRad = lat * math.pi / 180;
+      final x = (lon + 180) / 360 * n;
+      final y =
+          (1 - math.log(math.tan(latRad) + 1 / math.cos(latRad)) / math.pi) /
+          2 *
+          n;
+      return (x, y);
+    }
+
+    for (var z = 16; z >= 2; z--) {
+      final tl = proj(z, maxLat, minLon);
+      final br = proj(z, minLat, maxLon);
+      final startX = tl.$1.floor();
+      final startY = tl.$2.floor();
+      final cols = br.$1.ceil() - startX;
+      final rows = br.$2.ceil() - startY;
+      if (cols < 1 || rows < 1) continue;
+      if (cols > maxCols || rows > maxRows) continue;
+
+      final maxTile = math.pow(2, z).toInt();
+      if (startY < 0 || startY + rows > maxTile) return null;
+      final tiles = <Uint8List>[];
+      for (var ty = startY; ty < startY + rows; ty++) {
+        for (var tx = startX; tx < startX + cols; tx++) {
+          final wrappedX = ((tx % maxTile) + maxTile) % maxTile;
+          final uri = Uri.parse(
+            'https://tile.openstreetmap.org/$z/$wrappedX/$ty.png',
+          );
+          final response = await http
+              .get(uri, headers: {'User-Agent': 'REWIND-XCover6-panel/1.0'})
+              .timeout(const Duration(seconds: 8));
+          final type = response.headers['content-type'] ?? '';
+          if (response.statusCode != 200 || !type.startsWith('image/')) {
+            return null;
+          }
+          tiles.add(response.bodyBytes);
+        }
+      }
+      return TrackMapResult(
+        tiles: tiles,
+        cols: cols,
+        rows: rows,
+        z: z,
+        startX: startX,
+        startY: startY,
+      );
+    }
+    return null;
+  } catch (_) {
+    // A real map is useful, but not mandatory for the report.
+  }
+  return null;
+}
+
+/// Full-width GPS track over an OSM tile background, with start (green) and
+/// end (red) markers. Falls back to a plain muted note — never an "API key"
+/// message, since the OSM tiles behind it need none — when there isn't
+/// enough position data to draw a track.
+pw.Widget pdfTrackMap({
+  required TrackMapResult? map,
+  required List<({double lat, double lon})> points,
+  required double width,
+  double height = 220,
+}) {
+  if (map == null || points.length < 2) {
+    return pw.Container(
+      width: width,
+      height: height,
+      alignment: pw.Alignment.center,
+      decoration: pw.BoxDecoration(
+        color: const PdfColor.fromInt(0xffe8f5f8),
+        borderRadius: pw.BorderRadius.circular(5),
+      ),
+      child: pw.Text(
+        'Sin datos de posición suficientes para trazar el mapa.',
+        style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+      ),
+    );
+  }
+
+  final projected = points.map((p) => map.project(p.lat, p.lon)).toList();
+
+  return pw.Container(
+    width: width,
+    height: height,
+    padding: const pw.EdgeInsets.all(4),
+    decoration: pw.BoxDecoration(
+      color: const PdfColor.fromInt(0xffe8f5f8),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Stack(
+      children: [
+        pw.Positioned.fill(
+          child: pw.ClipRRect(
+            horizontalRadius: 4,
+            verticalRadius: 4,
+            child: pw.Column(
+              children: List.generate(
+                map.rows,
+                (row) => pw.Expanded(
+                  child: pw.Row(
+                    children: List.generate(
+                      map.cols,
+                      (col) => pw.Expanded(
+                        child: pw.Image(
+                          pw.MemoryImage(map.tiles[row * map.cols + col]),
+                          fit: pw.BoxFit.cover,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        pw.Positioned.fill(
+          child: pw.CustomPaint(
+            painter: (canvas, size) {
+              // Tile fractions above are top-down, but `package:pdf`
+              // canvases are y-up (origin bottom-left) — same flip as the
+              // polar chart: canvasY = size.y * (1 - yFracTopDown).
+              canvas.setStrokeColor(pdfCyan);
+              canvas.setLineWidth(1.6);
+              for (var i = 0; i < projected.length; i++) {
+                final (xf, yf) = projected[i];
+                final x = size.x * xf;
+                final y = size.y * (1 - yf);
+                if (i == 0) {
+                  canvas.moveTo(x, y);
+                } else {
+                  canvas.lineTo(x, y);
+                }
+              }
+              canvas.strokePath();
+
+              void marker((double, double) frac, PdfColor color) {
+                final x = size.x * frac.$1;
+                final y = size.y * (1 - frac.$2);
+                canvas
+                  ..setFillColor(color)
+                  ..drawEllipse(x - 3, y - 3, 6, 6)
+                  ..fillPath()
+                  ..setStrokeColor(PdfColors.white)
+                  ..setLineWidth(1)
+                  ..drawEllipse(x - 4.5, y - 4.5, 9, 9)
+                  ..strokePath();
+              }
+
+              marker(projected.first, pdfGreen);
+              marker(projected.last, pdfRed);
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 /// Radial "how fast does the boat actually go" chart — one line per TWS
 /// band, plotted STW (radius) against TWA (angle from bow, mirrored
 /// port/starboard since the underlying data doesn't distinguish tack).
@@ -686,9 +979,16 @@ pw.Widget pdfPolarChart({
               if (v != null && v > maxStw) maxStw = v;
             }
           }
+          // A polar rose is centered in its box like a compass, not hinged
+          // to an edge — and note `package:pdf`'s canvas is PDF-native
+          // (origin bottom-left, y grows UPWARD), the opposite of screen/
+          // canvas coordinates. A previous version placed the center near
+          // `size.y` (meant to be "near the bottom" in screen terms) which
+          // in this y-up space is near the TOP of the box, so the rose
+          // immediately overflowed off the top of the page.
           final cx = size.x / 2;
-          final cy = size.y - 20;
-          final maxR = math.min(size.x / 2 - 16, size.y - 34);
+          final cy = size.y / 2;
+          final maxR = math.min(size.x, size.y) / 2 - 24;
           if (maxStw <= 0 || maxR <= 0) {
             canvas
               ..setFillColor(pdfMuted)

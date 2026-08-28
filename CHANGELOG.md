@@ -2,6 +2,15 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.28] - 2026-08-28
+
+### Arreglado
+- **Informe de rendimiento → Polar de datos reales**: el gráfico se salía por la parte de arriba de la página y se superponía con el resto del contenido — el centro del dibujo estaba mal calculado (el lienzo PDF usa coordenadas con el origen abajo y el eje Y creciendo hacia arriba, al revés que en pantalla). Recalculado para quedar centrado en su caja, como una rosa de compás.
+
+### Añadido
+- **Informe de rendimiento**: la cabecera ahora indica la fecha y hora exactas de inicio y fin del periodo cubierto, no solo la etiqueta ("Última semana", etc.).
+- **Informe de rendimiento**: nuevo mapa de la traza GPS del periodo, a todo el ancho de página y al máximo zoom que permite ver toda la traza, con fondo de mapa real (OpenStreetMap, sin necesitar clave de API) e inicio/fin marcados — colocado justo antes de la polar.
+
 ## [1.4.27] - 2026-08-28
 
 ### Arreglado
