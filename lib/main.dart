@@ -938,6 +938,12 @@ class _DashboardState extends State<Dashboard> {
         _depthTrend.add(n);
       };
     }
+    if (c.enginePath != null && c.enginePath!.isNotEmpty) {
+      h[c.enginePath!] = (v) {
+        final n = _num(v);
+        signalK.engineHours = n == null ? null : n / 3600.0;
+      };
+    }
     for (final t in c.tanks.where((t) => t.enabled)) {
       h[t.skPath] = (v) => signalK.tanks[t.tankKey] = _pct(v);
     }
@@ -1538,6 +1544,12 @@ class _DashboardState extends State<Dashboard> {
           caseSensitive: false,
         ).firstMatch(path);
         if (fridgeMatch != null) result.fridgePaths.add(path);
+        // Standard Signal K engine hours: propulsion.<id>.runTime, seconds.
+        if (RegExp(
+          r'^propulsion\.[^.]+\.runTime$',
+        ).hasMatch(path)) {
+          result.enginePaths.add(path);
+        }
         final tankMatch = RegExp(r'^tanks\.([^.]+)\.([^.]+)\.currentLevel$')
             .firstMatch(path);
         if (tankMatch != null) {
@@ -1565,6 +1577,132 @@ class _DashboardState extends State<Dashboard> {
     } catch (_) {
       return null;
     }
+  }
+
+  // Fetches and shows every leaf value Signal K publishes under a given dot
+  // path (e.g. "tanks.freshWater.0") — for a tank, that's whatever the
+  // server actually has (name, capacity, voltage, currentLevel...) beyond
+  // the single value Diagnóstico normally shows, so a raw-vs-app-shown
+  // mismatch (like an odd currentLevel) can be checked directly.
+  Future<void> _showRawSkNode(BuildContext context, String path) async {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cPanel,
+        title: Text(path, style: const TextStyle(color: cText, fontSize: 15)),
+        content: SizedBox(
+          width: 340,
+          child: FutureBuilder<Map<String, dynamic>>(
+            future: _fetchRawSkNode(path),
+            builder: (ctx, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const SizedBox(
+                  height: 80,
+                  child: Center(
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                );
+              }
+              final leaves = snap.data;
+              if (snap.hasError || leaves == null || leaves.isEmpty) {
+                return const Text(
+                  'Sin datos (o el servidor no responde) para este path.',
+                  style: TextStyle(color: cMuted, fontSize: 13),
+                );
+              }
+              return SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final entry in leaves.entries)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: 110,
+                              child: Text(
+                                entry.key,
+                                style: const TextStyle(
+                                  color: cMuted,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: Text(
+                                '${entry.value}',
+                                style: const TextStyle(
+                                  color: cText,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cerrar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> _fetchRawSkNode(String path) async {
+    final uri = Uri.parse(
+      'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self/${path.replaceAll('.', '/')}',
+    );
+    final response = await http
+        .get(
+          uri,
+          headers: settings.authBase64.isEmpty
+              ? {}
+              : {'Authorization': 'Basic ${settings.authBase64}'},
+        )
+        .timeout(const Duration(seconds: 8));
+    if (response.statusCode != 200) {
+      throw Exception('HTTP ${response.statusCode}');
+    }
+    final root = jsonDecode(response.body);
+    final leaves = <String, dynamic>{};
+    void walk(dynamic node, String prefix) {
+      if (node is Map && node.containsKey('value')) {
+        leaves[prefix.isEmpty ? 'value' : prefix] = node['value'];
+        return;
+      }
+      if (node is! Map) {
+        if (prefix.isNotEmpty) leaves[prefix] = node;
+        return;
+      }
+      for (final entry in node.entries) {
+        if (entry.key is! String) continue;
+        final key = entry.key as String;
+        if (key.startsWith(r'$') ||
+            key == 'meta' ||
+            key == 'timestamp' ||
+            key == 'source' ||
+            key == 'sentence' ||
+            key == 'pgn') {
+          continue;
+        }
+        walk(entry.value, prefix.isEmpty ? key : '$prefix.$key');
+      }
+    }
+
+    walk(root, '');
+    return leaves;
   }
 
   Future<void> _loadWeatherCache() async {
@@ -2415,6 +2553,15 @@ class _DashboardState extends State<Dashboard> {
             'AWA ${awa != null ? '${awa.round()}°' : '--'}',
           ],
           color: aws == null ? cMuted : cGreen,
+        );
+      case 'engineHours':
+        final h = signalK.engineHours;
+        return NavCardData(
+          id: id,
+          title: 'Horas motor',
+          value: h != null ? h.toStringAsFixed(1) : '--',
+          unit: h != null ? 'h' : null,
+          color: h == null ? cMuted : cText,
         );
       default:
         return _navCardData(defaultNavCardIds.first);
@@ -4325,6 +4472,14 @@ class _DashboardState extends State<Dashboard> {
                               path: sc.depthPath ?? '(sin configurar)',
                             ),
                             _diagRow(
+                              'Horas motor',
+                              signalK.engineHours != null
+                                  ? '${signalK.engineHours!.toStringAsFixed(1)} h'
+                                  : '--',
+                              signalK.engineHours != null ? cText : cMuted,
+                              path: sc.enginePath ?? '(sin configurar)',
+                            ),
+                            _diagRow(
                               'COG',
                               signalK.cogTrueDeg != null
                                   ? '${signalK.cogTrueDeg!.round()}°'
@@ -4497,15 +4652,21 @@ class _DashboardState extends State<Dashboard> {
                             const Text('TANQUES', style: lbl),
                             const SizedBox(height: 4),
                             for (final t in sc.tanks.where((t) => t.enabled))
-                              _diagRow(
-                                t.groupLabel,
-                                signalK.tanks[t.tankKey] != null
-                                    ? '${signalK.tanks[t.tankKey]!.round()}%'
-                                    : '--',
-                                signalK.tanks[t.tankKey] != null
-                                    ? cCyan
-                                    : cMuted,
-                                path: t.skPath,
+                              InkWell(
+                                onTap: () => _showRawSkNode(
+                                  context,
+                                  'tanks.${t.type}.${t.id}',
+                                ),
+                                child: _diagRow(
+                                  t.groupLabel,
+                                  signalK.tanks[t.tankKey] != null
+                                      ? '${signalK.tanks[t.tankKey]!.round()}%'
+                                      : '--',
+                                  signalK.tanks[t.tankKey] != null
+                                      ? cCyan
+                                      : cMuted,
+                                  path: '${t.skPath}  (toca para ver todo)',
+                                ),
                               ),
                             const SizedBox(height: 10),
                             const Divider(color: Color(0xff1e3040), height: 1),
@@ -5175,6 +5336,11 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     ...?_discovery?.depthPaths,
     if (_cfg.depthPath != null) _cfg.depthPath,
   ];
+  List<String?> get _engineOptions => [
+    null,
+    ...?_discovery?.enginePaths,
+    if (_cfg.enginePath != null) _cfg.enginePath,
+  ];
 
   bool _showAllPaths = false;
 
@@ -5313,6 +5479,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     check('Nevera 1', _cfg.fridge1Path);
     check('Nevera 2', _cfg.fridge2Path);
     check('Profundidad', _cfg.depthPath);
+    check('Horas motor', _cfg.enginePath);
     for (final t in _cfg.tanks.where((t) => t.enabled)) {
       check(t.groupLabel, t.skPath);
     }
@@ -5690,6 +5857,28 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               ],
                               onChanged: (v) =>
                                   setState(() => _cfg.depthPath = v),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text('HORAS DE MOTOR', style: lbl),
+                            const SizedBox(height: 4),
+                            DropdownButtonFormField<String?>(
+                              initialValue: _cfg.enginePath,
+                              decoration: const InputDecoration(
+                                labelText: 'Path de horas de motor (runTime)',
+                                isDense: true,
+                              ),
+                              items: [
+                                for (final p in _engineOptions)
+                                  DropdownMenuItem(
+                                    value: p,
+                                    child: Text(
+                                      p ?? 'Ninguno',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (v) =>
+                                  setState(() => _cfg.enginePath = v),
                             ),
                             const SizedBox(height: 12),
                             const Text('NEVERAS', style: lbl),

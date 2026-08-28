@@ -147,6 +147,7 @@ const allNavCardIds = [
   'vmgWind',
   'vmgRoute',
   'appWind',
+  'engineHours',
 ];
 
 class NavCardData {
@@ -377,6 +378,7 @@ class SignalKModel {
   double? dcW;
   double? startV;
   double? bowthrusterV;
+  double? engineHours; // hours, from propulsion.<id>.runTime (seconds)
   double? bowthrusterTempK;
   // Tanks (key = "type.id", e.g. "freshWater.24")
   final tanks = <String, double?>{};
@@ -422,6 +424,9 @@ class SensorConfig {
   String? fridge1Path = 'environment.fridge_1.temperature';
   String? fridge2Path = 'environment.fridge_2.temperature';
   String? depthPath = 'environment.depth.belowKeel';
+  // Signal K's standard cumulative engine run time, e.g.
+  // "propulsion.main.runTime" — seconds since the engine's counter started.
+  String? enginePath;
   bool hasOutsideTemp = true;
   bool hasOutsidePressure = true;
   List<TankSlot> tanks = [
@@ -460,6 +465,7 @@ class SensorConfig {
     'fridge1Path': fridge1Path,
     'fridge2Path': fridge2Path,
     'depthPath': depthPath,
+    'enginePath': enginePath,
     'hasOutsideTemp': hasOutsideTemp,
     'hasOutsidePressure': hasOutsidePressure,
     'tanks': [for (final t in tanks) t.toJson()],
@@ -473,6 +479,7 @@ class SensorConfig {
     c.fridge1Path = j['fridge1Path'] as String?;
     c.fridge2Path = j['fridge2Path'] as String?;
     c.depthPath = j['depthPath'] as String?;
+    c.enginePath = j['enginePath'] as String?;
     c.hasOutsideTemp = j['hasOutsideTemp'] as bool? ?? true;
     c.hasOutsidePressure = j['hasOutsidePressure'] as bool? ?? true;
     final rawTanks = j['tanks'];
@@ -498,6 +505,7 @@ class SkDiscovery {
   final List<String> solarPaths = [];
   final List<String> fridgePaths = [];
   final List<String> depthPaths = [];
+  final List<String> enginePaths = [];
   final List<TankCandidate> tanks = [];
   final List<String> allPaths = [];
   bool hasOutsideTemp = false;

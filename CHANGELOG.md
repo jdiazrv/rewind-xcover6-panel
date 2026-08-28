@@ -2,6 +2,12 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.24] - 2026-08-28
+
+### Añadido
+- **Horas de motor**: nueva carta NAV. Se configura en CFG → Configurar sensores → "Horas de motor", buscando automáticamente paths tipo `propulsion.<id>.runTime` (el estándar de Signal K para el contador de horas del motor).
+- **CFG → Diagnóstico**: tocar la fila de un tanque abre un panel con todos los valores que Signal K publica para ese tanque (nombre, capacidad, voltaje del sensor, etc.), no solo el nivel — útil cuando el nivel mostrado no cuadra con lo que se ve en otras herramientas.
+
 ## [1.4.23] - 2026-08-28
 
 ### Cambiado
