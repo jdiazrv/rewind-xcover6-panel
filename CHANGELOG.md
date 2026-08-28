@@ -2,6 +2,11 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.25] - 2026-08-28
+
+### Añadido
+- **Webapp → CFG → Conexión**: nueva sección "Sesión web" con usuario/contraseña para hacer login real en Signal K (no solo Basic Auth para la propia app) — así el navegador queda con sesión y Freeboard-SK/la alarma de fondeo embebidos (que necesitan estar logeados para acciones como arrastrar para fijar el ancla) funcionan sin pedir login aparte. Se intenta automáticamente al arrancar si hay usuario/contraseña guardados; hay un botón para repetirlo a mano.
+
 ## [1.4.24] - 2026-08-28
 
 ### Añadido

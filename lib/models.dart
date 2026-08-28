@@ -709,6 +709,14 @@ class SettingsModel {
   String host = 'lysmarine.local';
   int port = 3000;
   String authBase64 = ''; // Basic auth for the Signal K connection (WebSocket + REST) — not InfluxDB.
+  // Separate from authBase64 above: a real Signal K session login (POST
+  // /signalk/v1/auth/login). Only meaningful running as the Signal K
+  // webapp — the browser then holds the session cookie itself, so
+  // same-origin embedded pages (Freeboard-SK, the anchor alarm plugin)
+  // that need write access (e.g. dragging to set the anchor) are
+  // authenticated too, without the app having to touch their iframes.
+  String skUsername = '';
+  String skPassword = '';
   bool keepAwake = true;
   String brightnessMode = 'dia'; // 'dia', 'noche', 'auto'
   // Historical-chart data source: 'auto' tries InfluxDB first and falls back

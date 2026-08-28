@@ -117,6 +117,8 @@ class _DashboardState extends State<Dashboard> {
   TextEditingController? _hostController;
   TextEditingController? _portController;
   TextEditingController? _authController;
+  TextEditingController? _skUsernameController;
+  TextEditingController? _skPasswordController;
   TextEditingController? _bucketController;
   TextEditingController? _influxHostController;
   TextEditingController? _influxOrgController;
@@ -621,6 +623,8 @@ class _DashboardState extends State<Dashboard> {
     _hostController?.text = settings.host;
     _portController?.text = '${settings.port}';
     _authController?.text = settings.authBase64;
+    _skUsernameController?.text = settings.skUsername;
+    _skPasswordController?.text = settings.skPassword;
     _bucketController?.text = settings.influxBucket;
     _influxHostController?.text = settings.influxHost;
     _influxOrgController?.text = settings.influxOrg;
@@ -631,6 +635,7 @@ class _DashboardState extends State<Dashboard> {
     } else {
       _connectSignalK();
       Timer(const Duration(seconds: 12), _maybePromptDemoMode);
+      if (_isSignalKWebapp) unawaited(_loginToSignalK());
     }
     weatherTimer = Timer.periodic(
       const Duration(minutes: 20),
@@ -693,6 +698,8 @@ class _DashboardState extends State<Dashboard> {
           (kIsWeb && Uri.base.hasPort ? Uri.base.port : settings.port);
     }
     settings.authBase64 = prefs.getString('auth') ?? settings.authBase64;
+    settings.skUsername = prefs.getString('skUsername') ?? settings.skUsername;
+    settings.skPassword = prefs.getString('skPassword') ?? settings.skPassword;
     settings.keepAwake = prefs.getBool('keepAwake') ?? settings.keepAwake;
     settings.brightnessMode =
         prefs.getString('brightnessMode') ??
@@ -806,6 +813,8 @@ class _DashboardState extends State<Dashboard> {
     await prefs.setString('host', settings.host);
     await prefs.setInt('port', settings.port);
     await prefs.setString('auth', settings.authBase64);
+    await prefs.setString('skUsername', settings.skUsername);
+    await prefs.setString('skPassword', settings.skPassword);
     await prefs.setBool('keepAwake', settings.keepAwake);
     await prefs.setString('brightnessMode', settings.brightnessMode);
     await prefs.setString('historySource', settings.historySource);
@@ -1660,6 +1669,41 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
+  // Only meaningful running as the Signal K webapp (kIsWeb + same origin):
+  // a plain HTTP Basic Auth header (authBase64 above) authenticates OUR
+  // OWN REST/WS calls, but Freeboard-SK/the anchor alarm plugin load as
+  // independent same-origin page loads inside their <iframe>, so they only
+  // see whatever session cookie the browser already holds for this origin
+  // — which is exactly what a real Signal K login sets. This POST is a
+  // normal fetch from the page itself, so the browser stores that cookie
+  // automatically; nothing else needs to be done for the iframes to pick
+  // it up on their own next load.
+  Future<void> _loginToSignalK() async {
+    if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return;
+    try {
+      final uri = Uri.parse(
+        'http://${settings.host}:${settings.port}/signalk/v1/auth/login',
+      );
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'username': settings.skUsername,
+              'password': settings.skPassword,
+            }),
+          )
+          .timeout(const Duration(seconds: 8));
+      if (mounted) {
+        setState(() => _skLoginOk = response.statusCode == 200);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _skLoginOk = false);
+    }
+  }
+
+  bool? _skLoginOk; // null = not attempted, true/false = last attempt result
+
   Future<Map<String, dynamic>> _fetchRawSkNode(String path) async {
     final uri = Uri.parse(
       'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self/${path.replaceAll('.', '/')}',
@@ -2032,6 +2076,8 @@ class _DashboardState extends State<Dashboard> {
     _hostController?.dispose();
     _portController?.dispose();
     _authController?.dispose();
+    _skUsernameController?.dispose();
+    _skPasswordController?.dispose();
     _bucketController?.dispose();
     _influxHostController?.dispose();
     _influxOrgController?.dispose();
@@ -3715,6 +3761,12 @@ class _DashboardState extends State<Dashboard> {
     final authController = _authController ??= TextEditingController(
       text: settings.authBase64,
     );
+    final skUsernameController = _skUsernameController ??= TextEditingController(
+      text: settings.skUsername,
+    );
+    final skPasswordController = _skPasswordController ??= TextEditingController(
+      text: settings.skPassword,
+    );
     final bucketController = _bucketController ??= TextEditingController(
       text: settings.influxBucket,
     );
@@ -3962,6 +4014,68 @@ class _DashboardState extends State<Dashboard> {
                             label: const Text('Guardar y reconectar'),
                             onPressed: () => doSave(),
                           ),
+                          if (_isSignalKWebapp) ...[
+                            const SizedBox(height: 16),
+                            const Text('SESIÓN WEB (Freeboard / Anclaje)', style: lbl),
+                            gap,
+                            const Text(
+                              'Distinto del campo de arriba: hace login real en Signal K para que el navegador quede con sesión — así Freeboard-SK y la alarma de fondeo (embebidos) también funcionan (p.ej. arrastrar para fijar el ancla), sin volver a pedir login.',
+                              style: TextStyle(color: cMuted, fontSize: 11),
+                            ),
+                            gap,
+                            TextField(
+                              controller: skUsernameController,
+                              decoration: const InputDecoration(
+                                labelText: 'Usuario Signal K',
+                                isDense: true,
+                              ),
+                            ),
+                            gap,
+                            TextField(
+                              controller: skPasswordController,
+                              decoration: const InputDecoration(
+                                labelText: 'Contraseña Signal K',
+                                isDense: true,
+                              ),
+                              obscureText: true,
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: [
+                                OutlinedButton.icon(
+                                  icon: const Icon(Icons.login, size: 16),
+                                  label: const Text('Iniciar sesión'),
+                                  onPressed: () async {
+                                    settings.skUsername = skUsernameController
+                                        .text
+                                        .trim();
+                                    settings.skPassword =
+                                        skPasswordController.text;
+                                    await _saveSettings();
+                                    await _loginToSignalK();
+                                    if (mounted) setState(() {});
+                                  },
+                                ),
+                                const SizedBox(width: 10),
+                                if (_skLoginOk == true)
+                                  const Text(
+                                    'Sesión iniciada ✓',
+                                    style: TextStyle(
+                                      color: cGreen,
+                                      fontSize: 12,
+                                    ),
+                                  )
+                                else if (_skLoginOk == false)
+                                  const Text(
+                                    'No se pudo iniciar sesión',
+                                    style: TextStyle(
+                                      color: cRed,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
                         ],
                       ],
                     ),
