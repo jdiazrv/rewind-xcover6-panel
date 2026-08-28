@@ -151,6 +151,7 @@ class NavCardData {
     this.subtitle,
     this.graphMetrics,
     this.trend,
+    this.bigLines,
   });
 
   final String id;
@@ -161,6 +162,10 @@ class NavCardData {
   final String? subtitle;
   final List<MetricDef>? graphMetrics;
   final int? trend; // -1 down, 0 flat, 1 up — confirmed trend, not noise
+  // When set, the card shows these as 2+ equal-size stacked lines instead
+  // of the usual single giant `value` — for cards like AIS where CPA and
+  // TCPA are equally important and neither should dominate the other.
+  final List<String>? bigLines;
 }
 
 // ─── Alarms ─────────────────────────────────────────────────────────────────
@@ -184,7 +189,7 @@ const customAlarmTypes = [
   'windAbove',
   'batteryVoltageBelow',
   'socBelow',
-  'fridgeTempAbove',
+  'tempAbove',
   'tankBelow',
   'windForecastAbove',
 ];
@@ -192,9 +197,9 @@ const customAlarmTypes = [
 String customAlarmTypeLabel(String type) => switch (type) {
   'depthBelow' => 'Profundidad menor de',
   'windAbove' => 'Viento (aparente) mayor de',
-  'batteryVoltageBelow' => 'Batería (casa) menor de',
-  'socBelow' => 'Batería SOC menor de',
-  'fridgeTempAbove' => 'Nevera mayor de',
+  'batteryVoltageBelow' => 'Batería menor de',
+  'socBelow' => 'Batería (SOC) menor de',
+  'tempAbove' => 'Temperatura mayor de',
   'tankBelow' => 'Algún tanque menor de',
   'windForecastAbove' => 'Viento previsto (6h) mayor de',
   _ => type,
@@ -205,10 +210,24 @@ String customAlarmTypeUnit(String type) => switch (type) {
   'windAbove' => 'kt',
   'batteryVoltageBelow' => 'V',
   'socBelow' => '%',
-  'fridgeTempAbove' => '°C',
+  'tempAbove' => '°C',
   'tankBelow' => '%',
   'windForecastAbove' => 'kt',
   _ => '',
+};
+
+// 'tempAbove' needs to know *which* temperature sensor — exterior, interior
+// and sea temperature are deliberately excluded (already have their own
+// display and aren't the kind of thing you'd want an audible alarm for).
+const tempAlarmTargets = ['fridge1', 'fridge2', 'battery', 'cpu', 'bowthruster'];
+
+String tempAlarmTargetLabel(String target) => switch (target) {
+  'fridge1' => 'Nevera 1',
+  'fridge2' => 'Nevera 2',
+  'battery' => 'Batería',
+  'cpu' => 'CPU (Raspberry Pi)',
+  'bowthruster' => 'Motor de proa',
+  _ => target,
 };
 
 class CustomAlarmRule {
@@ -216,22 +235,30 @@ class CustomAlarmRule {
     required this.id,
     required this.type,
     required this.threshold,
+    this.target,
     this.enabled = true,
     this.sound = true,
   });
   final String id;
   String type;
   double threshold;
+  String? target; // only meaningful for multi-sensor types like 'tempAbove'
   bool enabled;
   bool sound;
 
-  String get label =>
-      '${customAlarmTypeLabel(type)} $threshold ${customAlarmTypeUnit(type)}';
+  String get label {
+    final base =
+        '${customAlarmTypeLabel(type)} $threshold ${customAlarmTypeUnit(type)}';
+    return (type == 'tempAbove' && target != null)
+        ? '${tempAlarmTargetLabel(target!)}: $base'
+        : base;
+  }
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'type': type,
     'threshold': threshold,
+    'target': target,
     'enabled': enabled,
     'sound': sound,
   };
@@ -239,6 +266,7 @@ class CustomAlarmRule {
     id: j['id'] as String,
     type: j['type'] as String,
     threshold: (j['threshold'] as num).toDouble(),
+    target: j['target'] as String?,
     enabled: j['enabled'] as bool? ?? true,
     sound: j['sound'] as bool? ?? true,
   );

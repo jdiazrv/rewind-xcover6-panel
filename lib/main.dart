@@ -197,10 +197,16 @@ class _DashboardState extends State<Dashboard> {
       case 'socBelow':
         final s = signalK.houseSoc;
         return s != null && s < rule.threshold;
-      case 'fridgeTempAbove':
-        bool over(double? kelvin) =>
-            kelvin != null && (kelvin - 273.15) > rule.threshold;
-        return over(signalK.fridge1TempK) || over(signalK.fridge2TempK);
+      case 'tempAbove':
+        final kelvin = switch (rule.target) {
+          'fridge1' => signalK.fridge1TempK,
+          'fridge2' => signalK.fridge2TempK,
+          'battery' => signalK.houseTempK,
+          'cpu' => signalK.cpuTempK,
+          'bowthruster' => signalK.bowthrusterTempK,
+          _ => null,
+        };
+        return kelvin != null && (kelvin - 273.15) > rule.threshold;
       case 'tankBelow':
         return signalK.tanks.values.any(
           (v) => v != null && v < rule.threshold,
@@ -294,7 +300,10 @@ class _DashboardState extends State<Dashboard> {
   };
 
   Future<CustomAlarmRule?> _showAddCustomAlarmDialog(BuildContext context) {
-    var type = customAlarmTypes.first;
+    final sortedTypes = [...customAlarmTypes]
+      ..sort((a, b) => customAlarmTypeLabel(a).compareTo(customAlarmTypeLabel(b)));
+    var type = sortedTypes.first;
+    var target = tempAlarmTargets.first;
     final thresholdController = TextEditingController(text: '5');
     return showDialog<CustomAlarmRule>(
       context: context,
@@ -328,7 +337,7 @@ class _DashboardState extends State<Dashboard> {
                     dropdownColor: cPanel,
                     style: const TextStyle(color: cText),
                     items: [
-                      for (final t in customAlarmTypes)
+                      for (final t in sortedTypes)
                         DropdownMenuItem(
                           value: t,
                           child: Text(customAlarmTypeLabel(t)),
@@ -336,6 +345,23 @@ class _DashboardState extends State<Dashboard> {
                     ],
                     onChanged: (v) => setSt(() => type = v ?? type),
                   ),
+                  if (type == 'tempAbove') ...[
+                    const SizedBox(height: 8),
+                    DropdownButton<String>(
+                      value: target,
+                      isExpanded: true,
+                      dropdownColor: cPanel,
+                      style: const TextStyle(color: cText),
+                      items: [
+                        for (final t in tempAlarmTargets)
+                          DropdownMenuItem(
+                            value: t,
+                            child: Text(tempAlarmTargetLabel(t)),
+                          ),
+                      ],
+                      onChanged: (v) => setSt(() => target = v ?? target),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   TextField(
                     controller: thresholdController,
@@ -367,6 +393,7 @@ class _DashboardState extends State<Dashboard> {
                               id: DateTime.now().millisecondsSinceEpoch.toString(),
                               type: type,
                               threshold: threshold,
+                              target: type == 'tempAbove' ? target : null,
                             ),
                           );
                         },
@@ -2027,6 +2054,7 @@ class _DashboardState extends State<Dashboard> {
         zoom: _showZoom,
         graphMetrics: data.graphMetrics,
         trend: data.trend,
+        bigLines: data.bigLines,
         onTap: data.id == 'heel'
             ? () => _showAttitudeGauges(context)
             : data.id == 'gps'
@@ -2124,26 +2152,29 @@ class _DashboardState extends State<Dashboard> {
           color: positionFresh ? cGreen : cMuted,
         );
       case 'ais':
-        // One compact card for the closest-approach AIS target — CPA is the
-        // headline number. Name goes on its own line, demora/distancia/TCPA
-        // on the second (the subtitle now wraps to 2 lines) so nothing gets
-        // cut off by the ellipsis.
+        // CPA and TCPA are the two numbers that actually matter for
+        // "should I worry" at a glance, so they're the two big equal-size
+        // lines; name/distancia/demora are secondary context and go below
+        // in the smaller muted subtitle.
         final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
+        final cpaStr = closest?.cpaNm != null
+            ? '${closest!.cpaNm!.toStringAsFixed(1)} NM'
+            : '--';
+        final tcpaStr = closest?.tcpaMin != null
+            ? '${closest!.tcpaMin!.round()} min'
+            : '--';
         final subtitle = closest == null
             ? 'Sin AIS'
-            : '${_aisTargetName(closest.target)}\n'
-                  '${[
-                    if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
-                    if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
-                    if (closest.tcpaMin != null) '${closest.tcpaMin!.round()}min',
-                  ].join(' · ')}';
+            : [
+                _aisTargetName(closest.target),
+                if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
+                if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
+              ].join(' · ');
         return NavCardData(
           id: id,
           title: 'AIS',
-          value: closest == null || closest.cpaNm == null
-              ? '--'
-              : closest.cpaNm!.toStringAsFixed(1),
-          unit: 'NM',
+          value: cpaStr,
+          bigLines: ['CPA $cpaStr', 'TCPA $tcpaStr'],
           subtitle: subtitle,
           color: closest == null
               ? cMuted
@@ -3339,13 +3370,38 @@ class _DashboardState extends State<Dashboard> {
     return '${days[l.weekday - 1]} ${l.day} ${months[l.month - 1]}';
   }
 
+  // Fixed height instead of _grid3x2's full-page Expanded stretch — these
+  // cards don't need (or look good at) the whole screen's height just
+  // because there are only 3 of them in one row. PageView gives each page
+  // *tight* (exact-size) constraints, so a plain SizedBox alone can't
+  // shrink below that — Align (loose constraints for its child) is what
+  // actually lets the fixed height take effect instead of being
+  // overridden back up to the full page height.
   Widget _marinePage() => weather.marine.isEmpty
       ? _weatherEmptyState('MAR')
-      : _grid3x2(
-          children: [
-            for (final p in weather.marine)
-              MarineCard(title: _marineDate(p.time), point: p, zoom: _showZoom),
-          ],
+      : Align(
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: SizedBox(
+              height: 260,
+              width: double.infinity,
+              child: Row(
+                children: [
+                  for (var i = 0; i < weather.marine.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    Expanded(
+                      child: MarineCard(
+                        title: _marineDate(weather.marine[i].time),
+                        point: weather.marine[i],
+                        zoom: _showZoom,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
         );
 
   // ─── Anchor page (WebView) ──────────────────────────────────────────────────
@@ -6431,6 +6487,7 @@ class MetricCard extends StatelessWidget {
     this.onSecondaryTap,
     this.graphMetrics,
     this.trend,
+    this.bigLines,
   });
 
   final String title;
@@ -6439,6 +6496,7 @@ class MetricCard extends StatelessWidget {
   final String? subtitle;
   final Color color;
   final int? trend; // -1 down, 0 flat, 1 up
+  final List<String>? bigLines;
   final void Function(
     String title,
     String value,
@@ -6515,18 +6573,38 @@ class MetricCard extends StatelessWidget {
             ),
             Expanded(
               child: Center(
-                child: FittedBox(
-                  fit: BoxFit.contain,
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      fontSize: 300,
-                      fontWeight: FontWeight.w900,
-                      color: color,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
+                child: bigLines != null
+                    ? FittedBox(
+                        fit: BoxFit.contain,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            for (final line in bigLines!)
+                              Text(
+                                line,
+                                style: TextStyle(
+                                  fontSize: 90,
+                                  fontWeight: FontWeight.w900,
+                                  color: color,
+                                  height: 1.15,
+                                ),
+                              ),
+                          ],
+                        ),
+                      )
+                    : FittedBox(
+                        fit: BoxFit.contain,
+                        child: Text(
+                          value,
+                          style: TextStyle(
+                            fontSize: 300,
+                            fontWeight: FontWeight.w900,
+                            color: color,
+                            height: 1.0,
+                          ),
+                        ),
+                      ),
               ),
             ),
             if (subtitle != null)

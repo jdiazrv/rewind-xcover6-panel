@@ -2,6 +2,13 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.13] - 2026-08-28
+
+### Cambiado
+- **Alarmas personalizadas**: etiquetas más claras ("Batería menor de", "Temperatura mayor de" en vez de "Nevera mayor de"), lista desplegable ordenada alfabéticamente, y la alarma de temperatura ahora deja elegir el sensor (nevera 1/2, batería, CPU, motor de proa) — no solo las neveras.
+- **Tarjeta AIS**: rediseñada — CPA y TCPA como las dos líneas grandes de igual tamaño (los datos que de verdad importan de un vistazo), y nombre/distancia/demora debajo en gris.
+- **MAR**: las tarjetas ya no se estiran verticalmente para ocupar toda la pantalla.
+
 ## [1.4.12] - 2026-08-27
 
 ### Añadido
