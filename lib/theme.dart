@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-const kAppVersion = 'v1.4.34 · 2026-08-28';
+const kAppVersion = 'v1.4.35 · 2026-08-29';
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 const cBg = Color(0xff071015);

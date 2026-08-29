@@ -131,6 +131,13 @@ const mStw = MetricDef(
   scale: 1.94384,
   color: cCyan,
 );
+const mHeading = MetricDef(
+  'navigation.headingTrue',
+  'Rumbo',
+  '°',
+  scale: 57.2957795,
+  color: cText,
+);
 
 const defaultNavCardIds = ['sog', 'stw', 'heading', 'cog', 'depth', 'heel'];
 const allNavCardIds = [
@@ -161,6 +168,8 @@ class NavCardData {
     this.graphMetrics,
     this.trend,
     this.bigLines,
+    this.aisName,
+    this.aisCrossing,
   });
 
   final String id;
@@ -175,6 +184,11 @@ class NavCardData {
   // of the usual single giant `value` — for cards like AIS where CPA and
   // TCPA are equally important and neither should dominate the other.
   final List<String>? bigLines;
+  // AIS only, used by the Premium card (the classic card ignores these):
+  // kept separate from `subtitle` so a long vessel name truncates on its
+  // own and never eats into the distance/bearing or crossing side text.
+  final String? aisName;
+  final String? aisCrossing; // 'POR PROA' | 'POR POPA' | null
 }
 
 // ─── Alarms ─────────────────────────────────────────────────────────────────
@@ -243,9 +257,8 @@ String tempAlarmTargetLabel(String path) {
   final p = path.toLowerCase();
   if (p == 'environment.rpi.cpu.temperature') return 'CPU (Raspberry Pi)';
   if (p.contains('bowthruster')) return 'Motor de proa';
-  final battMatch = RegExp(
-    r'^electrical\.batteries\.([^.]+)\.temperature$',
-  ).firstMatch(path);
+  final battMatch = RegExp(r'^electrical\.batteries\.([^.]+)\.temperature$')
+      .firstMatch(path);
   if (battMatch != null) return 'Batería (${battMatch.group(1)})';
   final fridgeNum = RegExp(r'fridge\D*(\d+)').firstMatch(p);
   if (fridgeNum != null) return 'Nevera ${fridgeNum.group(1)}';
@@ -319,6 +332,10 @@ class SignalKModel {
   bool connected = false;
   String status = 'Sin conectar';
   DateTime? lastUpdate;
+  // The vessel's own name, straight from Signal K (`vessels.self.name`) —
+  // used anywhere the boat's name is shown (report headers, etc.) instead
+  // of a hardcoded product name.
+  String? vesselName;
   // Navigation/wind data must be recent to be trusted (unlike e.g. temperatures,
   // which change slowly and stay useful even a bit stale). Kept separate —
   // the wind instrument can die while GPS/compass keep updating, or vice versa,
@@ -382,6 +399,15 @@ class SignalKModel {
   double? bowthrusterTempK;
   // Tanks (key = "type.id", e.g. "freshWater.24")
   final tanks = <String, double?>{};
+
+  // Anchor watch (hoekens-anchor-alarm plugin) — armed state and live
+  // geometry for the native Premium "Fondeado" anchor card, as opposed to
+  // embedding the plugin's own webapp.
+  String? anchorState; // navigation.anchor.state: "on" | "off"
+  double? anchorCurrentRadiusM;
+  double? anchorMaxRadiusM;
+  double? anchorApparentBearingDeg; // relative to the bow, not true north
+  bool get anchorArmed => anchorState == 'on';
 }
 
 // ─── Per-boat sensor configuration (paths vary boat to boat) ─────────────────
@@ -729,6 +755,7 @@ class SettingsModel {
   String influxBucket = influxBucketDefault;
   String influxArchiveBucket = influxBucketDefault; // bucket for 7d / 1mes
   SensorConfig sensorConfig = SensorConfig();
+  String navLayoutMode = 'premium'; // 'classic', 'premium', or 'both'
   List<String> navCardIds = List<String>.of(defaultNavCardIds);
   int navGridColumns = 3; // 3 -> 3x2 (6 cards), 4 -> 4x2 (8 cards)
   // Alarms — see AlarmEngine in main.dart for how these drive live state.
@@ -739,11 +766,22 @@ class SettingsModel {
   // to enabled+sound so a brand new zone alarm is on by default.
   Map<String, SkZoneAlarmSetting> skZoneAlarms = {};
   List<CustomAlarmRule> customAlarms = [];
-  // AIS "closest approach" filters — a target further than this at CPA, or
-  // further out in time than this at TCPA, isn't shown as the closest
-  // approach target (see _closestApproachTarget in main.dart).
+  // AIS "closest approach" DISPLAY filter — not an alarm. A target further
+  // than this at CPA, or further out in time than this at TCPA, just isn't
+  // shown as the closest-approach target on the NAV AIS card (see
+  // _closestApproachTarget in main.dart). See alarmAis* below for the
+  // actual collision alarm, which uses much tighter thresholds.
   double aisCpaMaxNm = 5.0;
   double aisTcpaMaxMin = 20.0;
+  // AIS collision alarm — genuinely alerts (card highlight + header bell +
+  // optional sound) when the closest AIS target's CPA/TCPA both come in
+  // under these, tighter than the aisCpaMaxNm/aisTcpaMaxMin display filter
+  // above on purpose: "worth showing on NAV" and "worth alerting for" are
+  // different bars. Same on/off + sound shape as alarmCorrederaEnabled.
+  bool alarmAisEnabled = false;
+  bool alarmAisSound = true;
+  double alarmAisCpaNm = 1.0;
+  double alarmAisTcpaMin = 10.0;
   // Corredera (log/speedo) stall alarm: SOG moving but STW reads zero for a
   // sustained period usually means the paddle wheel is fouled/stuck rather
   // than the boat actually being stopped in the water — a standalone alarm

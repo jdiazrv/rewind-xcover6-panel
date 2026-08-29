@@ -36,6 +36,18 @@ import 'models.dart';
 import 'performance_report.dart';
 import 'theme.dart';
 
+part 'utils/format_helpers.dart';
+part 'widgets/anchor_webview.dart';
+part 'widgets/config_dialogs.dart';
+part 'widgets/header.dart';
+part 'widgets/attitude_dialogs.dart';
+part 'widgets/painters.dart';
+part 'widgets/metric_card.dart';
+part 'widgets/graph_dialog.dart';
+part 'widgets/misc_cards.dart';
+part 'widgets/alarm_and_shell.dart';
+part 'utils/trackers.dart';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([
@@ -98,6 +110,14 @@ class _DashboardState extends State<Dashboard> {
   PhoneHeelTracker? _phoneHeelTracker;
 
   int page = 0;
+  double _marineHorizonHours = 1;
+  // See the enginePath dynamic handler — set to "now + 20s" every time
+  // engine hours is observed to increase, so a short gap after the engine
+  // stops still reads as running rather than flickering off between deltas.
+  DateTime? _engineRunningUntil;
+  bool get _engineRunning =>
+      _engineRunningUntil != null &&
+      DateTime.now().isBefore(_engineRunningUntil!);
   bool loadingWeather = false;
   // Manual pick from the PRON map picker overrides the boat's own GPS position
   // for weather queries only — null means "use signalK's position" (default).
@@ -137,7 +157,8 @@ class _DashboardState extends State<Dashboard> {
   static const _activeAlertStates = {'alert', 'warn', 'alarm', 'emergency'};
   AudioPlayer? _alarmPlayer;
   bool _alarmSoundPlaying = false;
-  final _mutedAlarms = <String>{}; // acknowledged-until-it-clears, no auto-unmute
+  final _mutedAlarms =
+      <String>{}; // acknowledged-until-it-clears, no auto-unmute
   // Generic "last value by Signal K path" cache for any *.temperature path
   // we're subscribed to — lets a 'tempAbove' custom alarm target *any*
   // discovered temperature sensor, not just a hardcoded handful, without
@@ -222,6 +243,27 @@ class _DashboardState extends State<Dashboard> {
         muted: _mutedAlarms.contains(key),
       ));
     }
+    if (settings.alarmAisEnabled) {
+      final closest = _closestApproachTarget();
+      final cpa = closest?.cpaNm;
+      final tcpa = closest?.tcpaMin;
+      // tcpa > 0 — a negative TCPA means the target's already at its
+      // closest point and opening again, not actually converging.
+      if (cpa != null &&
+          tcpa != null &&
+          tcpa > 0 &&
+          cpa <= settings.alarmAisCpaNm &&
+          tcpa <= settings.alarmAisTcpaMin) {
+        const key = 'ais';
+        out.add((
+          key: key,
+          label:
+              'AIS: ${_aisTargetName(closest!.target)} — CPA ${cpa.toStringAsFixed(1)} NM / TCPA ${tcpa.round()} min',
+          sound: settings.alarmAisSound,
+          muted: _mutedAlarms.contains(key),
+        ));
+      }
+    }
     return out;
   }
 
@@ -249,9 +291,7 @@ class _DashboardState extends State<Dashboard> {
             : _customTempValues[rule.target];
         return kelvin != null && (kelvin - 273.15) > rule.threshold;
       case 'tankBelow':
-        return signalK.tanks.values.any(
-          (v) => v != null && v < rule.threshold,
-        );
+        return signalK.tanks.values.any((v) => v != null && v < rule.threshold);
       case 'windForecastAbove':
         final now = DateTime.now();
         final cutoff = now.add(const Duration(hours: 6));
@@ -346,7 +386,9 @@ class _DashboardState extends State<Dashboard> {
 
   Future<CustomAlarmRule?> _showAddCustomAlarmDialog(BuildContext context) {
     final sortedTypes = [...customAlarmTypes]
-      ..sort((a, b) => customAlarmTypeLabel(a).compareTo(customAlarmTypeLabel(b)));
+      ..sort(
+        (a, b) => customAlarmTypeLabel(a).compareTo(customAlarmTypeLabel(b)),
+      );
     var type = sortedTypes.first;
     // Seeded with the sensors this app already knows the paths for; "Buscar
     // más sensores" below adds any other *.temperature path Signal K is
@@ -435,7 +477,9 @@ class _DashboardState extends State<Dashboard> {
                               final d = await discoverSkPaths();
                               if (d != null) {
                                 for (final p in d.allPaths) {
-                                  if (p.toLowerCase().endsWith('.temperature') &&
+                                  if (p.toLowerCase().endsWith(
+                                        '.temperature',
+                                      ) &&
                                       !excludedTempAlarmPaths.contains(p)) {
                                     tempTargets.add(p);
                                   }
@@ -468,12 +512,16 @@ class _DashboardState extends State<Dashboard> {
                       FilledButton(
                         onPressed: () {
                           final threshold = double.tryParse(
-                            thresholdController.text.trim().replaceAll(',', '.'),
+                            thresholdController.text.trim().replaceAll(
+                              ',',
+                              '.',
+                            ),
                           );
                           if (threshold == null) return;
                           Navigator.of(ctx).pop(
                             CustomAlarmRule(
-                              id: DateTime.now().millisecondsSinceEpoch.toString(),
+                              id: DateTime.now().millisecondsSinceEpoch
+                                  .toString(),
                               type: type,
                               threshold: threshold,
                               target: type == 'tempAbove' ? target : null,
@@ -598,11 +646,21 @@ class _DashboardState extends State<Dashboard> {
   // 30-min rolling history for wind trend + gusts (raw, undamped values)
   final _twsHistory = _WindHistory();
   final _awsHistory = _WindHistory();
+  final _pressureHistory = _PressureHistory();
+  bool _pressureTrendFromInflux = false;
+  bool _loadingPressureTrend = false;
   final _depthTrend = _DepthTrendTracker();
+  // Same top-down artwork/loader as the AIS radar (ais_view.dart), reused
+  // here so the Fondeado anchor ring shows the real hull instead of a
+  // generic triangle.
+  ui.Image? _shipIcon;
 
   @override
   void initState() {
     super.initState();
+    loadShipIcon().then((img) {
+      if (mounted) setState(() => _shipIcon = img);
+    });
     unawaited(_boot());
     // Re-render periodically so nav/wind cards flip to "--" once stale, even
     // without a new Signal K message arriving to trigger a rebuild.
@@ -636,6 +694,7 @@ class _DashboardState extends State<Dashboard> {
       _connectSignalK();
       Timer(const Duration(seconds: 12), _maybePromptDemoMode);
       if (_isSignalKWebapp) unawaited(_loginToSignalK());
+      unawaited(_fetchVesselName());
     }
     weatherTimer = Timer.periodic(
       const Duration(minutes: 20),
@@ -732,14 +791,32 @@ class _DashboardState extends State<Dashboard> {
     settings.phoneAttitudeInvertRoll =
         prefs.getBool('phoneAttitudeInvertRoll') ??
         settings.phoneAttitudeInvertRoll;
-    settings.navGridColumns = prefs.getInt('navGridColumns') ?? settings.navGridColumns;
-    settings.aisCpaMaxNm = prefs.getDouble('aisCpaMaxNm') ?? settings.aisCpaMaxNm;
+    settings.navLayoutMode =
+        prefs.getString('navLayoutMode') ?? settings.navLayoutMode;
+    if (settings.navLayoutMode != 'classic' &&
+        settings.navLayoutMode != 'premium' &&
+        settings.navLayoutMode != 'both') {
+      settings.navLayoutMode = 'classic';
+    }
+    settings.navGridColumns =
+        prefs.getInt('navGridColumns') ?? settings.navGridColumns;
+    settings.aisCpaMaxNm =
+        prefs.getDouble('aisCpaMaxNm') ?? settings.aisCpaMaxNm;
     settings.aisTcpaMaxMin =
         prefs.getDouble('aisTcpaMaxMin') ?? settings.aisTcpaMaxMin;
     settings.alarmCorrederaEnabled =
-        prefs.getBool('alarmCorrederaEnabled') ?? settings.alarmCorrederaEnabled;
+        prefs.getBool('alarmCorrederaEnabled') ??
+        settings.alarmCorrederaEnabled;
     settings.alarmCorrederaSound =
         prefs.getBool('alarmCorrederaSound') ?? settings.alarmCorrederaSound;
+    settings.alarmAisEnabled =
+        prefs.getBool('alarmAisEnabled') ?? settings.alarmAisEnabled;
+    settings.alarmAisSound =
+        prefs.getBool('alarmAisSound') ?? settings.alarmAisSound;
+    settings.alarmAisCpaNm =
+        prefs.getDouble('alarmAisCpaNm') ?? settings.alarmAisCpaNm;
+    settings.alarmAisTcpaMin =
+        prefs.getDouble('alarmAisTcpaMin') ?? settings.alarmAisTcpaMin;
     settings.alarmsUseSkZones =
         prefs.getBool('alarmsUseSkZones') ?? settings.alarmsUseSkZones;
     final skZoneJson = prefs.getString('skZoneAlarmsJson');
@@ -747,7 +824,10 @@ class _DashboardState extends State<Dashboard> {
       try {
         final map = jsonDecode(skZoneJson) as Map<String, dynamic>;
         settings.skZoneAlarms = map.map(
-          (k, v) => MapEntry(k, SkZoneAlarmSetting.fromJson(v as Map<String, dynamic>)),
+          (k, v) => MapEntry(
+            k,
+            SkZoneAlarmSetting.fromJson(v as Map<String, dynamic>),
+          ),
         );
       } catch (_) {
         /* keep defaults if corrupted */
@@ -786,6 +866,7 @@ class _DashboardState extends State<Dashboard> {
     _migrateLegacyTempAlarmTargets();
     _applyWakelock();
     _applyPhoneHeelSetting();
+    unawaited(_refreshPressureTrendFromInflux());
   }
 
   // Pre-1.4.15 'tempAbove' alarms stored a fixed key ('fridge1', 'battery'...)
@@ -828,11 +909,19 @@ class _DashboardState extends State<Dashboard> {
       jsonEncode(settings.sensorConfig.toJson()),
     );
     await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
+    await prefs.setString('navLayoutMode', settings.navLayoutMode);
     await prefs.setInt('navGridColumns', settings.navGridColumns);
     await prefs.setDouble('aisCpaMaxNm', settings.aisCpaMaxNm);
     await prefs.setDouble('aisTcpaMaxMin', settings.aisTcpaMaxMin);
-    await prefs.setBool('alarmCorrederaEnabled', settings.alarmCorrederaEnabled);
+    await prefs.setBool(
+      'alarmCorrederaEnabled',
+      settings.alarmCorrederaEnabled,
+    );
     await prefs.setBool('alarmCorrederaSound', settings.alarmCorrederaSound);
+    await prefs.setBool('alarmAisEnabled', settings.alarmAisEnabled);
+    await prefs.setBool('alarmAisSound', settings.alarmAisSound);
+    await prefs.setDouble('alarmAisCpaNm', settings.alarmAisCpaNm);
+    await prefs.setDouble('alarmAisTcpaMin', settings.alarmAisTcpaMin);
     await prefs.setBool('alarmsUseSkZones', settings.alarmsUseSkZones);
     await prefs.setString(
       'skZoneAlarmsJson',
@@ -950,7 +1039,16 @@ class _DashboardState extends State<Dashboard> {
     if (c.enginePath != null && c.enginePath!.isNotEmpty) {
       h[c.enginePath!] = (v) {
         final n = _num(v);
-        signalK.engineHours = n == null ? null : n / 3600.0;
+        final hours = n == null ? null : n / 3600.0;
+        // propulsion.*.runTime is a lifetime counter, not an "is it on"
+        // flag — the engine reads as running for a short grace window
+        // after each observed increase, and as stopped once those
+        // increases stop arriving (see _engineRunning).
+        final prev = signalK.engineHours;
+        if (prev != null && hours != null && hours > prev) {
+          _engineRunningUntil = DateTime.now().add(const Duration(seconds: 20));
+        }
+        signalK.engineHours = hours;
       };
     }
     for (final t in c.tanks.where((t) => t.enabled)) {
@@ -959,7 +1057,38 @@ class _DashboardState extends State<Dashboard> {
     _dynamicHandlers = h;
   }
 
+  // The vessel's own name isn't published as a delta over the websocket
+  // stream — it's static metadata, fetched once over REST instead.
+  Future<void> _fetchVesselName() async {
+    try {
+      final uri = Uri.parse(
+        'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self/name',
+      );
+      final response = await http
+          .get(
+            uri,
+            headers: settings.authBase64.isEmpty
+                ? {}
+                : {'Authorization': 'Basic ${settings.authBase64}'},
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return;
+      final name = jsonDecode(response.body);
+      if (name is String && name.isNotEmpty && mounted) {
+        setState(() => signalK.vesselName = name);
+      }
+    } catch (_) {
+      // Not critical — callers fall back to a generic label.
+    }
+  }
+
   void _connectSignalK() {
+    // Several call sites (reconnect button, sensor config save, boot)
+    // used to call this unconditionally — if DEMO mode was on, that opened
+    // a real websocket alongside the demo timer, so both real and
+    // simulated data landed on the same model at once and flickered.
+    // Guarding here once covers all of them instead of patching each.
+    if (settings.demoMode) return;
     channel?.sink.close();
     signalK.tanks.clear();
     _buildDynamicHandlers();
@@ -1020,6 +1149,10 @@ class _DashboardState extends State<Dashboard> {
       'electrical.batteries.bowthruster.voltage',
       'electrical.batteries.bowthruster.temperature',
       'electrical.venus.dcPower',
+      'navigation.anchor.state',
+      'navigation.anchor.currentRadius',
+      'navigation.anchor.maxRadius',
+      'navigation.anchor.apparentBearing',
       'notifications.*',
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
@@ -1140,7 +1273,15 @@ class _DashboardState extends State<Dashboard> {
   // Whether the AIS page is open, or the merged AIS NAV card needs live AIS
   // targets to compute "closest approach" — either one keeps the (otherwise
   // on-demand, to save bandwidth) vessels.* subscription alive.
-  bool get _navWantsAis => settings.navCardIds.contains('ais');
+  // Premium's Vela screen always shows the AIS card too, regardless of
+  // what's in the classic grid's own selection — without this, Premium
+  // users (who often have no reason to also select AIS in the classic
+  // picker) never got live AIS data, so the card always read "Sin AIS"
+  // even with real traffic and a closest-approach target.
+  bool get _navWantsAis =>
+      settings.navCardIds.contains('ais') ||
+      settings.navLayoutMode == 'premium' ||
+      settings.navLayoutMode == 'both';
 
   void _syncAisSubscription() {
     final ids = _pageIds;
@@ -1248,6 +1389,14 @@ class _DashboardState extends State<Dashboard> {
       case 'navigation.attitude.pitch':
         if (settings.usePhoneHeel) return true;
         signalK.pitchDeg = n == null ? null : n * 57.2957795;
+      case 'navigation.anchor.state':
+        signalK.anchorState = value?.toString();
+      case 'navigation.anchor.currentRadius':
+        signalK.anchorCurrentRadiusM = n;
+      case 'navigation.anchor.maxRadius':
+        signalK.anchorMaxRadiusM = n;
+      case 'navigation.anchor.apparentBearing':
+        signalK.anchorApparentBearingDeg = n == null ? null : n * 57.2957795;
       case 'environment.wind.speedApparent':
         signalK.awsKn = n == null ? null : n * 1.94384;
         _dAws = _awsDamp.linear(signalK.awsKn);
@@ -1274,6 +1423,7 @@ class _DashboardState extends State<Dashboard> {
         signalK.outsideHumidity = n == null ? null : n * 100;
       case 'environment.outside.pressure':
         signalK.outsidePressureHpa = n;
+        _pressureHistory.add(signalK.outsidePressureHpa);
       case 'environment.interior.temperature':
         signalK.indoorTempK = n;
       case 'environment.interior.humidity':
@@ -1395,6 +1545,7 @@ class _DashboardState extends State<Dashboard> {
       signalK.outsideTempK = 298 + osc(3600, 3, 1);
       signalK.outsideHumidity = (55 + osc(1800, 12, 0)).clamp(20, 95);
       signalK.outsidePressureHpa = 1015 + osc(2400, 4, 0.5);
+      _pressureHistory.add(signalK.outsidePressureHpa);
       signalK.indoorTempK = 300 + osc(3600, 1.2, 0.6);
       signalK.indoorHumidity = (50 + osc(1800, 8, 1)).clamp(20, 90);
       signalK.cpuTempK = 318 + osc(300, 3, 0) + jitter(0.3);
@@ -1554,9 +1705,7 @@ class _DashboardState extends State<Dashboard> {
         ).firstMatch(path);
         if (fridgeMatch != null) result.fridgePaths.add(path);
         // Standard Signal K engine hours: propulsion.<id>.runTime, seconds.
-        if (RegExp(
-          r'^propulsion\.[^.]+\.runTime$',
-        ).hasMatch(path)) {
+        if (RegExp(r'^propulsion\.[^.]+\.runTime$').hasMatch(path)) {
           result.enginePaths.add(path);
         }
         final tankMatch = RegExp(r'^tanks\.([^.]+)\.([^.]+)\.currentLevel$')
@@ -1765,13 +1914,45 @@ class _DashboardState extends State<Dashboard> {
     await prefs.setString('weatherCacheJson', jsonEncode(weather.toJson()));
   }
 
+  Future<void> _refreshPressureTrendFromInflux() async {
+    if (_loadingPressureTrend || settings.demoMode) {
+      return;
+    }
+    _loadingPressureTrend = true;
+    try {
+      final points = await influxQuery(
+        host: settings.effectiveInfluxHost,
+        org: settings.influxOrg,
+        token: settings.influxToken,
+        def: mPressure,
+        fluxRange: '-6h',
+        aggEvery: '10m',
+        bucket: settings.influxBucket,
+      );
+      if (!mounted) return;
+      if (points.length >= 2) {
+        setState(() {
+          _pressureHistory.replaceWithGraphPoints(points);
+          _pressureTrendFromInflux = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _pressureTrendFromInflux = false);
+    } finally {
+      _loadingPressureTrend = false;
+    }
+  }
+
   Future<void> _loadWeather({bool force = false}) async {
     if (loadingWeather) return;
     // Reuse the last successful fetch (possibly restored from disk on a fresh
     // app launch) if it's under 30 min old — avoids re-hitting Open-Meteo's
     // rate limit every time the app restarts.
     if (!force && weather.updated != null && weather.error == null) {
-      if (DateTime.now().difference(weather.updated!).inMinutes < 30) return;
+      final cacheFresh =
+          DateTime.now().difference(weather.updated!).inMinutes < 30;
+      final marineRangeOk = weather.marine.length >= _marineMaxHour.round();
+      if (cacheFresh && marineRangeOk) return;
     }
     final lat = _weatherLat ?? (kIsWeb ? kDefaultWeatherLat : null);
     final lon = _weatherLon ?? (kIsWeb ? kDefaultWeatherLon : null);
@@ -2026,12 +2207,16 @@ class _DashboardState extends State<Dashboard> {
     final hourly = doc['hourly'] as Map<String, dynamic>?;
     final times = (hourly?['time'] as List?)?.cast<num>() ?? const [];
     final out = <MarinePoint>[];
-    if (current != null) out.add(_marineFromMap(current));
-    final base = out.isEmpty ? DateTime.now().toUtc() : out.first.time;
-    for (final hours in [24, 48]) {
+    final base = current == null
+        ? DateTime.now().toUtc()
+        : _marineFromMap(current).time;
+    for (var hours = _marineMinHour.round(); hours <= _marineMaxHour; hours++) {
       final idx = _closestIndex(times, base.add(Duration(hours: hours)));
-      if (idx >= 0 && hourly != null) out.add(_marineFromHourly(hourly, idx));
+      if (idx >= 0 && hourly != null) {
+        out.add(_marineFromHourly(hourly, idx));
+      }
     }
+    if (out.isEmpty && current != null) out.add(_marineFromMap(current));
     return out;
   }
 
@@ -2067,6 +2252,7 @@ class _DashboardState extends State<Dashboard> {
     reconnectTimer?.cancel();
     weatherTimer?.cancel();
     _navHideTimer?.cancel();
+    _navToastTimer?.cancel();
     _demoTimer?.cancel();
     _staleWatchdog?.cancel();
     _phoneHeelTracker?.stop();
@@ -2135,6 +2321,18 @@ class _DashboardState extends State<Dashboard> {
 
   double? _fresh(double? v) => _navFresh ? v : null;
   double? _freshWind(double? v) => _windFresh ? v : null;
+
+  // Used by the Premium anchor card to jump to the full ANC tab on tap.
+  void _goToTab(String id) {
+    final i = _pageIds.indexOf(id);
+    if (i < 0) return;
+    _onPageChange(i);
+    _pageController.animateToPage(
+      i,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+  }
 
   void _onPageChange(int i) {
     setState(() => page = i);
@@ -2284,6 +2482,21 @@ class _DashboardState extends State<Dashboard> {
 
   // ─── NAV page ───────────────────────────────────────────────────────────────
   int _navPageIndex = 0;
+  double _navDragOverscroll = 0;
+  // Briefly names the screen you just swiped to (e.g. "Fondeado"), then
+  // fades — otherwise which of several near-identical-looking Premium
+  // screens you landed on isn't obvious at a glance.
+  String? _navToast;
+  Timer? _navToastTimer;
+
+  void _flashNavToast(String label) {
+    _navToastTimer?.cancel();
+    setState(() => _navToast = label);
+    _navToastTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _navToast = null);
+    });
+  }
+
   final _navScrollController = ScrollController();
 
   Widget _navPage() {
@@ -2308,29 +2521,69 @@ class _DashboardState extends State<Dashboard> {
       );
     }
 
+    final screenSize = MediaQuery.sizeOf(context);
+    // Threshold lowered to fit the XCover6 tablet's actual landscape
+    // logical size (960×600) — it was gated at 1000×560, just above what
+    // this boat's hardware reports, so Premium silently never appeared.
+    final wantsPremium =
+        settings.navLayoutMode == 'premium' || settings.navLayoutMode == 'both';
+    final premiumEligible =
+        wantsPremium && screenSize.width >= 900 && screenSize.height >= 500;
+    // Classic pages show for 'classic'/'both', and also as a fallback for
+    // 'premium' when the screen doesn't qualify — never leave the cycle
+    // empty just because the tablet's too small for Premium right now.
+    final showClassicPages =
+        settings.navLayoutMode != 'premium' || !premiumEligible;
+
+    // Vela is always available (the default/fallback); Motor and Fondeado
+    // only join the swipeable set while they're actually relevant, so a
+    // screen for a context you're not in never shows up empty.
+    final premiumScreens = <Widget>[
+      _navPremiumSailPage(),
+      if (_engineRunning) _navPremiumMotorPage(),
+      if (signalK.anchorArmed) _navPremiumAnchorPage(),
+    ];
+    final premiumLabels = <String>[
+      'Vela',
+      if (_engineRunning) 'Motor',
+      if (signalK.anchorArmed) 'Fondeado',
+    ];
+
+    // Exactly two classic pages, fixed: "Clásica 1" is your selected grid,
+    // "Clásica 2" is the first page of everything else. Cards beyond that
+    // first overflow page simply don't appear in the swipe cycle — pick
+    // them into Clásica 1 if you want them on screen.
+    final classica2 = libraryPages.isEmpty ? null : libraryPages.first;
     final pages = <Widget>[
-      _grid3x2(
-        columns: settings.navGridColumns,
-        children: [
-          for (var i = 0; i < selected.length; i++)
-            _navMetricCard(selected[i], i),
-        ],
-      ),
-      for (final chunk in libraryPages)
+      if (premiumEligible) ...premiumScreens,
+      if (showClassicPages)
+        _grid3x2(
+          columns: settings.navGridColumns,
+          children: [
+            for (var i = 0; i < selected.length; i++)
+              _navMetricCard(selected[i], i),
+          ],
+        ),
+      if (showClassicPages && classica2 != null)
         Padding(
           padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           child: _grid3x2(
             columns: settings.navGridColumns,
             children: [
-              for (var i = 0; i < chunk.length; i++)
+              for (var i = 0; i < classica2.length; i++)
                 _navMetricCard(
-                  chunk[i],
+                  classica2[i],
                   selectedIds.length + i,
                   selectable: false,
                 ),
             ],
           ),
         ),
+    ];
+    final pageLabels = <String>[
+      if (premiumEligible) ...premiumLabels,
+      if (showClassicPages) 'Clásica 1',
+      if (showClassicPages && classica2 != null) 'Clásica 2',
     ];
 
     final totalPages = pages.length;
@@ -2359,27 +2612,46 @@ class _DashboardState extends State<Dashboard> {
         // nested inside this screen's outer horizontal PageView was
         // observed to silently swallow taps on the cards it contains (a
         // gesture-arena issue specific to that nesting), so paging is
-        // driven by a plain drag gesture + AnimatedSwitcher instead.
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onVerticalDragEnd: (details) {
-            final v = details.primaryVelocity ?? 0;
-            if (v.abs() < 200) return;
-            setState(() {
-              _navPageIndex = v < 0
-                  ? (_navPageIndex + 1) % totalPages // swipe up → next
-                  : (_navPageIndex - 1 + totalPages) %
-                        totalPages; // swipe down → previous
-            });
+        // driven by this screen's own ListView instead of a second PageView.
+        //
+        // That ListView is a real Scrollable (needed so taps reach the
+        // cards inside it — a bare SizedBox or NeverScrollableScrollPhysics
+        // was observed to swallow those taps under this nesting). But a
+        // real Scrollable also *wins* the vertical-drag gesture arena over
+        // any ancestor GestureDetector, even though there's nothing to
+        // actually scroll (content height == viewport height) — so a plain
+        // GestureDetector.onVerticalDragEnd wrapped around it never fired.
+        // Detecting the drag via the ListView's own overscroll instead
+        // sidesteps that arena conflict entirely. Accumulated *distance*
+        // rather than fling velocity, since a deliberate slower drag should
+        // page just as reliably as a fast flick — and unlike velocity
+        // (which needs several closely-timed samples to compute), distance
+        // is correct even from a single coarse touch sample.
+        return NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification is ScrollStartNotification) {
+              _navDragOverscroll = 0;
+            } else if (notification is OverscrollNotification) {
+              _navDragOverscroll += notification.overscroll;
+              if (_navDragOverscroll.abs() >= 60) {
+                final forward = _navDragOverscroll > 0;
+                _navDragOverscroll = 0;
+                setState(() {
+                  _navPageIndex = forward
+                      ? (_navPageIndex + 1) %
+                            totalPages // swipe up (scroll forward) → next
+                      : (_navPageIndex - 1 + totalPages) %
+                            totalPages; // swipe down → previous
+                });
+                if (_navPageIndex < pageLabels.length) {
+                  _flashNavToast(pageLabels[_navPageIndex]);
+                }
+              }
+            }
+            return false;
           },
           child: Stack(
             children: [
-              // Content always fills exactly `pageHeight` so this never
-              // actually has anything to scroll — kept as a real
-              // (AlwaysScrollableScrollPhysics, Scrollbar-wrapped) ListView
-              // rather than a bare SizedBox or a NeverScrollableScrollPhysics
-              // one, because both of those were observed to swallow taps on
-              // the cards inside, under this screen's nested-gesture setup.
               Scrollbar(
                 controller: _navScrollController,
                 thumbVisibility: true,
@@ -2403,6 +2675,51 @@ class _DashboardState extends State<Dashboard> {
                   child: _NavPageIndicator(
                     total: totalPages,
                     current: _navPageIndex,
+                  ),
+                ),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Center(
+                    child: AnimatedOpacity(
+                      opacity: _navToast == null ? 0 : 1,
+                      duration: const Duration(milliseconds: 250),
+                      curve: Curves.easeOut,
+                      child: AnimatedScale(
+                        scale: _navToast == null ? 0.9 : 1,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOut,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 36,
+                            vertical: 18,
+                          ),
+                          decoration: BoxDecoration(
+                            color: cBg.withValues(alpha: 0.82),
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: cCyan.withValues(alpha: 0.35),
+                              width: 1.4,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.4),
+                                blurRadius: 24,
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            _navToast ?? '',
+                            style: const TextStyle(
+                              color: cText,
+                              fontSize: 40,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -2435,6 +2752,37 @@ class _DashboardState extends State<Dashboard> {
         onDoubleTap: selectable ? () => _showNavCardPicker(slot) : null,
         onSecondaryTap: selectable ? () => _showNavCardPicker(slot) : null,
       );
+
+  // The exact same card PWR shows for the house battery (not a Premium
+  // gauge card) — battery SOC/V/A read better as plain numbers than as a
+  // 0-100 speedometer, and reusing MetricCard directly means this and the
+  // PWR page can never drift out of sync with each other.
+  Widget _premiumBatteryCard() => MetricCard(
+    title: 'Batería',
+    value: fmt(signalK.houseSoc, 0, ''),
+    unit: '%',
+    subtitle:
+        '${fmt(signalK.houseV, 1, 'V')} ${signalK.houseA != null ? (signalK.houseA! >= 0 ? '+' : '') : ''}${fmt(signalK.houseA, 1, 'A')}',
+    // Smaller than MetricCard's 28px default — the Premium card is
+    // narrower than PWR's, and at 28px "13.8V +0.3A" wrapped to 2 lines.
+    subtitleFontSize: 16,
+    color: socColor(signalK.houseSoc),
+    zoom: _showZoom,
+    graphMetrics: [_mHouseSoc, _mHouseCurrent, _mHouseVoltage],
+  );
+
+  // Fills the space next to Profundidad on the Fondeado screen — Depth on
+  // its own as a full-width card was mostly empty air; pairing it with
+  // date/time uses that width for something useful instead.
+  Widget _premiumDateTimeCard() {
+    final now = DateTime.now();
+    return MetricCard(
+      title: 'Hora',
+      value: hhmm(now),
+      subtitle: ddmmyyyy(now),
+      color: cText,
+    );
+  }
 
   NavCardData _navCardData(String id) {
     final sog = _fresh(signalK.sogKn);
@@ -2472,6 +2820,7 @@ class _DashboardState extends State<Dashboard> {
           value: directionDeg(heading),
           unit: '°',
           color: cText,
+          graphMetrics: const [mHeading],
         );
       case 'cog':
         return NavCardData(
@@ -2513,7 +2862,9 @@ class _DashboardState extends State<Dashboard> {
         return NavCardData(
           id: id,
           title: 'GPS',
-          value: signalK.gnssSatellites?.toString() ?? (positionFresh ? 'OK' : '--'),
+          value:
+              signalK.gnssSatellites?.toString() ??
+              (positionFresh ? 'OK' : '--'),
           unit: signalK.gnssSatellites != null ? 'sat' : null,
           subtitle:
               signalK.gnssMethodQuality ??
@@ -2525,7 +2876,8 @@ class _DashboardState extends State<Dashboard> {
         // "should I worry" at a glance, so they're the two big equal-size
         // lines; name/distancia/demora are secondary context and go below
         // in the smaller muted subtitle.
-        final cpaCritical = (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
+        final cpaCritical =
+            (closest?.cpaNm ?? double.infinity) < _cpaCriticalNm;
         final cpaStr = closest?.cpaNm != null
             ? '${closest!.cpaNm!.toStringAsFixed(1)} NM'
             : '--';
@@ -2535,11 +2887,18 @@ class _DashboardState extends State<Dashboard> {
         // "Sin AIS" should mean exactly that — no targets at all — not "no
         // target happens to have a crossing predicted right now", which is
         // the far more common case out at sea and reads as broken/no-data.
+        //
+        // Name kept separate from dist/bearing (aisName vs subtitle) so the
+        // Premium card can let a long name truncate on its own line without
+        // it eating into (or being fought over with) the distance/bearing
+        // text — a single combined+ellipsized string used to hide whichever
+        // came last depending on how long the name happened to be.
         final subtitle = closest != null
             ? [
-                _aisTargetName(closest.target),
-                if (closest.distNm != null) '${closest.distNm!.toStringAsFixed(1)}NM',
-                if (closest.bearingDeg != null) '${closest.bearingDeg!.round()}°',
+                if (closest.distNm != null)
+                  '${closest.distNm!.toStringAsFixed(1)}NM',
+                if (closest.bearingDeg != null)
+                  '${closest.bearingDeg!.round()}°',
               ].join(' · ')
             : (_aisTargets.isEmpty ? 'Sin AIS' : 'Sin cruce previsto');
         return NavCardData(
@@ -2548,9 +2907,9 @@ class _DashboardState extends State<Dashboard> {
           value: cpaStr,
           bigLines: ['TCPA $tcpaStr', 'CPA $cpaStr'],
           subtitle: subtitle,
-          color: closest == null
-              ? cMuted
-              : (cpaCritical ? cRed : cOrange),
+          aisName: closest != null ? _aisTargetName(closest.target) : null,
+          aisCrossing: closest?.crossing,
+          color: closest == null ? cMuted : (cpaCritical ? cRed : cOrange),
         );
       case 'time':
         final now = DateTime.now();
@@ -2740,9 +3099,7 @@ class _DashboardState extends State<Dashboard> {
       ('Altitud antena', alt != null ? '${alt.toStringAsFixed(0)} m' : '--'),
       (
         'Posición',
-        positionFresh
-            ? posLines(signalK.latitude, signalK.longitude)
-            : '--',
+        positionFresh ? posLines(signalK.latitude, signalK.longitude) : '--',
       ),
       (
         'Última actualización',
@@ -2885,7 +3242,10 @@ class _DashboardState extends State<Dashboard> {
       double? distNm;
       String? crossing;
 
-      if (ownLat != null && ownLon != null && target.lat != null && target.lon != null) {
+      if (ownLat != null &&
+          ownLon != null &&
+          target.lat != null &&
+          target.lon != null) {
         final rel = _bearingDistanceNm(
           ownLat,
           ownLon,
@@ -2931,15 +3291,19 @@ class _DashboardState extends State<Dashboard> {
         }
       }
 
-      if (cpaNm == null && tcpaMin == null) continue;
+      // Both CPA and TCPA must be known and within range at once — a
+      // target with only one of the two computed (e.g. distance known but
+      // no CPA yet) used to slip through on the other check alone, which
+      // is how a contact 30 NM out with a stray CPA reading could show up
+      // as "closest approach". Both thresholds are user-configurable
+      // (CFG → Pantalla → AIS).
+      if (cpaNm == null || tcpaMin == null) continue;
       // A target 40 minutes out at its current CPA isn't a collision risk
       // yet — don't let it steal the "closest approach" slot from something
-      // that's actually about to happen. Both thresholds are user-configurable
-      // (CFG → Pantalla → AIS).
-      if (tcpaMin != null && tcpaMin > settings.aisTcpaMaxMin) continue;
-      // A target that will pass 6 NM off isn't "the" closest approach either,
-      // even if it happens to be the only one with a computed CPA right now.
-      if (cpaNm != null && cpaNm > settings.aisCpaMaxNm) continue;
+      // that's actually about to happen.
+      if (tcpaMin > settings.aisTcpaMaxMin) continue;
+      // A target that will pass 6 NM off isn't "the" closest approach either.
+      if (cpaNm > settings.aisCpaMaxNm) continue;
       final candidate = (
         target: target,
         cpaNm: cpaNm,
@@ -3070,6 +3434,869 @@ class _DashboardState extends State<Dashboard> {
     return Padding(
       padding: const EdgeInsets.all(gap),
       child: Column(children: rows),
+    );
+  }
+
+  Widget _navPremiumSailPage() {
+    final sog = _navCardData('sog');
+    final stw = _navCardData('stw');
+    final vmg = _navCardData('vmgWind');
+    final ais = _navCardData('ais');
+    final depth = _navCardData('depth');
+    final wind = _navCardData('appWind');
+    const primaryFlex = 1;
+    const secondaryFlex = 1;
+    const tacticalFlex = 1;
+
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(
+                  flex: primaryFlex,
+                  child: _premiumSpeedCard(sog, maxValue: 12),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: secondaryFlex,
+                  child: _premiumSpeedCard(stw, maxValue: 12),
+                ),
+                const SizedBox(width: 8),
+                Expanded(flex: tacticalFlex, child: _premiumVmgCard(vmg)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(flex: primaryFlex, child: _premiumAisCard(ais)),
+                const SizedBox(width: 8),
+                Expanded(flex: secondaryFlex, child: _premiumDepthCard(depth)),
+                const SizedBox(width: 8),
+                Expanded(flex: tacticalFlex, child: _premiumWindCard(wind)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Swaps wind/VMG for engine health — the sailing screen's headline
+  // instruments stop mattering the moment the engine's turning.
+  Widget _navPremiumMotorPage() {
+    final sog = _navCardData('sog');
+    final cog = _navCardData('cog');
+    final engineHours = _navCardData('engineHours');
+    final depth = _navCardData('depth');
+
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(flex: 10, child: _premiumSpeedCard(sog, maxValue: 12)),
+                const SizedBox(width: 8),
+                Expanded(flex: 6, child: _premiumVmgCard(cog)),
+                const SizedBox(width: 8),
+                Expanded(flex: 10, child: _premiumSpeedCard(engineHours)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(flex: 9, child: _premiumDepthCard(depth)),
+                const SizedBox(width: 8),
+                Expanded(flex: 9, child: _premiumBatteryCard()),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // The one Premium screen without a matching NavCardData source — anchor
+  // watch geometry lives only in SignalKModel, drawn as a boat-centered
+  // "radar" (ring = maxRadius, marker = anchor at its live distance/bearing)
+  // instead of the numbers-only classic anchor alarm webview.
+  Widget _navPremiumAnchorPage() {
+    final wind = _navCardData('appWind');
+    final depth = _navCardData('depth');
+    // Heading, not COG — at anchor the boat isn't tracking a course over
+    // ground, it's swinging on the chain, so COG is just noise; heading
+    // (which way the bow is lying) is the useful number here.
+    final heading = _navCardData('heading');
+
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Row(
+        children: [
+          // Anchor card is intentionally small — the ANC tab already has a
+          // full map with anchor tracking, this is just a glance.
+          Expanded(flex: 7, child: _premiumAnchorCard()),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 13,
+            child: Column(
+              children: [
+                Expanded(child: _premiumWindCard(wind, showGauge: false)),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(child: _premiumBatteryCard()),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _premiumVmgCard(heading, unitNextToValue: true),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _premiumDepthCard(
+                          depth,
+                          alignWithSpeedGauge: false,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(child: _premiumDateTimeCard()),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _premiumPanel({required Widget child, VoidCallback? onTap}) =>
+      CardShell(
+        onTap: onTap,
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xff0d1a21), Color(0xff071015)],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: cCyan.withValues(alpha: 0.04),
+                blurRadius: 26,
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+          child: child,
+        ),
+      );
+
+  Widget _premiumTitle(String title, Color color, {String? unit}) => Row(
+    children: [
+      Text(
+        title,
+        style: const TextStyle(
+          color: cMuted,
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.8,
+        ),
+      ),
+      const Spacer(),
+      if (unit != null)
+        Text(
+          unit,
+          style: TextStyle(
+            color: color,
+            fontSize: 26,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+    ],
+  );
+
+  Widget _premiumSpeedCard(NavCardData data, {double maxValue = 30}) {
+    final value = double.tryParse(data.value);
+    return _premiumPanel(
+      onTap: () => _showZoom(
+        data.title,
+        data.value,
+        data.color,
+        subtitle: data.subtitle,
+        graphMetrics: data.graphMetrics,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumTitle(data.title, data.color, unit: data.unit),
+            Expanded(
+              child: Center(
+                child: FittedBox(
+                  fit: BoxFit.contain,
+                  child: Text(
+                    data.value,
+                    style: TextStyle(
+                      color: data.color,
+                      fontSize: 210,
+                      fontWeight: FontWeight.w900,
+                      height: 0.95,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(
+              height: 92,
+              child: CustomPaint(
+                painter: _PremiumSpeedScalePainter(
+                  value: value,
+                  color: data.color,
+                  maxValue: maxValue,
+                  unit: data.unit ?? 'kt',
+                ),
+                child: const SizedBox.expand(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // unitNextToValue: Rumbo on the Fondeado screen sits beside the same
+  // wind card that can't use a title-level unit (see _premiumWindCard) —
+  // so for visual consistency on that screen it gets the same treatment,
+  // the unit riding next to the number instead of top-right of the card.
+  Widget _premiumVmgCard(NavCardData data, {bool unitNextToValue = false}) {
+    final value = double.tryParse(data.value);
+    return _premiumPanel(
+      onTap: () => _showZoom(
+        data.title,
+        data.value,
+        data.color,
+        subtitle: data.subtitle,
+        graphMetrics: data.graphMetrics,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumTitle(
+              data.title,
+              data.color,
+              unit: unitNextToValue ? null : data.unit,
+            ),
+            Expanded(
+              child: Center(
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      CustomPaint(
+                        painter: _PremiumCompassPainter(
+                          value: value,
+                          color: data.color,
+                        ),
+                        child: const SizedBox.expand(),
+                      ),
+                      FractionallySizedBox(
+                        widthFactor: 0.72,
+                        child: FittedBox(
+                          fit: BoxFit.contain,
+                          child: unitNextToValue && data.unit != null
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      data.value,
+                                      style: TextStyle(
+                                        color: data.color,
+                                        fontSize: 120,
+                                        fontWeight: FontWeight.w900,
+                                        height: 0.95,
+                                      ),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 14),
+                                      child: Text(
+                                        data.unit!,
+                                        style: const TextStyle(
+                                          color: cMuted,
+                                          fontSize: 32,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : Text(
+                                  data.value,
+                                  style: TextStyle(
+                                    color: data.color,
+                                    fontSize: 120,
+                                    fontWeight: FontWeight.w900,
+                                    height: 0.95,
+                                  ),
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (data.subtitle != null)
+              Center(
+                child: Text(
+                  data.subtitle!,
+                  style: const TextStyle(
+                    color: cMuted,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _premiumAisCard(NavCardData data) {
+    final lines = data.bigLines ?? const <String>[];
+    final tcpa = lines.isNotEmpty ? lines[0].replaceFirst('TCPA ', '') : '--';
+    final cpa = lines.length > 1
+        ? lines[1].replaceFirst('CPA ', '')
+        : data.value;
+    return _premiumPanel(
+      onTap: () => _showCpaDetail(context),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumTitle('AIS', data.color),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(child: _premiumAisNumber('TCPA', tcpa, data.color)),
+                  Container(width: 1, color: cMuted.withValues(alpha: 0.22)),
+                  Expanded(child: _premiumAisNumber('CPA', cpa, data.color)),
+                ],
+              ),
+            ),
+            if (data.aisName != null || data.subtitle != null)
+              Row(
+                children: [
+                  // The name gets its own flexible, independently-truncating
+                  // slot — previously it shared one line+ellipsis with the
+                  // distance/bearing text, so a long name could hide
+                  // whichever of those happened to be typed after it.
+                  if (data.aisName != null)
+                    Expanded(
+                      child: Text(
+                        data.aisName!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: cMuted,
+                          fontSize: 25,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ),
+                  if (data.subtitle != null) ...[
+                    if (data.aisName != null) const SizedBox(width: 8),
+                    Text(
+                      data.subtitle!,
+                      style: const TextStyle(
+                        color: cMuted,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            // Whether the target's track crosses ahead of or behind us —
+            // its own row so it never competes for space with the name.
+            if (data.aisCrossing != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: data.color.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    data.aisCrossing!,
+                    style: TextStyle(
+                      color: data.color,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _premiumAisNumber(String label, String value, Color color) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 10),
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontSize: 24,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 6),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 74,
+              fontWeight: FontWeight.w900,
+              height: 0.98,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  // Same hysteresis device as the AWA dial's zone switching — tiers
+  // (10/20/50/100/200 m) instead of a fixed 0-10m scale, so anchoring in
+  // deeper water doesn't just pin the marker uselessly at the bottom.
+  double _depthScaleMax = 10;
+  double _depthScaleWithHysteresis(double? value) {
+    if (value == null) return _depthScaleMax;
+    const tiers = [10.0, 20.0, 50.0, 100.0, 200.0];
+    if (value > _depthScaleMax * 0.9) {
+      _depthScaleMax = tiers.firstWhere(
+        (t) => t > _depthScaleMax && value <= t * 0.9,
+        orElse: () => tiers.last,
+      );
+    } else {
+      final lower = tiers.lastWhere(
+        (t) => t < _depthScaleMax,
+        orElse: () => tiers.first,
+      );
+      if (value < lower * 0.5) _depthScaleMax = lower;
+    }
+    return _depthScaleMax;
+  }
+
+  // alignWithSpeedGauge: reserves the same bottom strip _premiumSpeedCard
+  // does, so a Depth card stacked directly under a speed card (Vela,
+  // Motor — the default) lines up with it. Must be turned off wherever
+  // Depth isn't stacked under one (Fondeado, sharing a much shorter row
+  // with Hora instead) — that reservation would just shrink the number
+  // pointlessly there.
+  Widget _premiumDepthCard(
+    NavCardData data, {
+    bool alignWithSpeedGauge = true,
+  }) {
+    final value = double.tryParse(data.value);
+    final depthMax = _depthScaleWithHysteresis(value);
+    return _premiumPanel(
+      onTap: () => _showZoom(
+        data.title,
+        data.value,
+        data.color,
+        subtitle: data.subtitle,
+        graphMetrics: data.graphMetrics,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumTitle(data.title, data.color, unit: data.unit),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    // A light lift keeps Depth visually related to the
+                    // speed cards above it, but the number should remain
+                    // mostly centered because its scale is vertical, not a
+                    // bottom dial like SOG/STW.
+                    child: Padding(
+                      padding: alignWithSpeedGauge
+                          ? const EdgeInsets.only(bottom: 42)
+                          : EdgeInsets.zero,
+                      child: Center(
+                        child: FittedBox(
+                          fit: BoxFit.contain,
+                          child: Text(
+                            data.value,
+                            style: TextStyle(
+                              color: data.color,
+                              fontSize: 210,
+                              fontWeight: FontWeight.w900,
+                              height: 0.95,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 42,
+                    child: CustomPaint(
+                      painter: _PremiumDepthScalePainter(
+                        value: value,
+                        color: data.color,
+                        maxValue: depthMax,
+                      ),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Which of the 2 dial zones is active — near the bow (±45°, drawn
+  // opening upward) or near the stern (135°..225°, the same shape just
+  // relabeled around 180° instead of 0°). The old middle 60°..120° window
+  // was dropped entirely (see _PremiumAwaPainter) so there's no longer a
+  // third shape to fight screen-aspect edge cases on. Kept as state (not
+  // recomputed fresh each paint) so the ~90° boundary has hysteresis —
+  // without it, AWA sitting right at that boundary would flicker back and
+  // forth on every small oscillation.
+  bool _awaFarZone = false;
+
+  bool _awaFarWithHysteresis(double? awa) {
+    if (awa == null) return _awaFarZone;
+    final absAwa = normalizeRelativeAngle(awa).abs();
+    const hysteresis = 5.0;
+    if (_awaFarZone) {
+      if (absAwa < 90 - hysteresis) _awaFarZone = false;
+    } else {
+      if (absAwa > 90 + hysteresis) _awaFarZone = true;
+    }
+    return _awaFarZone;
+  }
+
+  // showGauge: false on the Fondeado screen — at anchor there's no
+  // meaningful apparent-wind angle relative to travel, so the dial is
+  // dead space; only the AWS/AWA numbers are useful there.
+  Widget _premiumWindCard(NavCardData data, {bool showGauge = true}) {
+    final aws = _freshWind(_dAws);
+    final awa = _freshWind(_dAwa);
+    // Absolute value + side arrow (see _premiumWindNumber) instead of a
+    // signed angle — matches the VNT screen's AWA card. "°" goes through
+    // the same unit slot as AWS's "kt" now (was embedded in the value
+    // string before), so both get identical superscript styling.
+    final awaText = awa == null ? '--' : angleAbs(awa);
+    final awaSide = awa != null
+        ? (normalizeRelativeAngle(awa) < 0 ? -1 : 1)
+        : 0;
+    final farZone = _awaFarWithHysteresis(awa);
+    final numbersRow = Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(child: _premiumWindNumber('AWS', fmt(aws, 0, ''), 'kt')),
+        Container(width: 1, color: cMuted.withValues(alpha: 0.22)),
+        Expanded(
+          child: _premiumWindNumber(
+            'AWA',
+            awaText,
+            '°',
+            side: awaSide,
+            hasSideArrow: true,
+          ),
+        ),
+      ],
+    );
+    return _premiumPanel(
+      onTap: () => _showZoom(
+        data.title,
+        data.value,
+        data.color,
+        subtitle: data.subtitle,
+        graphMetrics: data.graphMetrics,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // No title-level unit — this card holds two metrics (AWS/AWA),
+            // so a single top-right unit slot doesn't make sense here the
+            // way it does on single-metric cards. "kt" instead sits next to
+            // the AWS number itself, same spot/scale as the ° next to AWA.
+            _premiumTitle(data.title, data.color),
+            // Numbers get a compact, fixed-height row (not Expanded) so
+            // they always land at the same height regardless of content —
+            // previously AWA's column carried extra height (its own number
+            // + the gauge below it) that AWS's column didn't, so the two
+            // numbers ended up misaligned with each other. Without a gauge
+            // below (Fondeado screen), let them fill the card instead so
+            // there's no dead space.
+            if (showGauge)
+              SizedBox(height: 108, child: numbersRow)
+            else
+              Expanded(child: Center(child: numbersRow)),
+            // The dial fills the whole remaining rectangle (not a centered
+            // square) so it can pick its own radius/vertical anchor per
+            // zone (see _PremiumAwaPainter) — a fixed square left it
+            // needlessly small whenever the card was wider than it was
+            // tall in this last strip.
+            if (showGauge)
+              Expanded(
+                // Small top gap pushes the whole dial down, away from the
+                // numbers row above it.
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: CustomPaint(
+                    painter: _PremiumAwaPainter(awa: awa, far: farZone),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // side: -1 port (red arrow, left), 0 none, 1 starboard (green arrow,
+  // right) — same device as the VNT screen's _WindTapCard: the number
+  // itself stays neutral white and only the side arrow carries color, so a
+  // green number never gets misread as "good"/starboard by itself.
+  // hasSideArrow: reserves both arrow slots (invisible on the inactive
+  // side) so the number sits on the true center regardless of which side
+  // is active — only needed for AWA (AWS never has a side). Skipping it
+  // for AWS frees up real width: with both slots always reserved, a
+  // 3-digit AWA ("133°") plus its arrow genuinely didn't fit the column
+  // and bled sideways over AWS's own number.
+  Widget _premiumWindNumber(
+    String label,
+    String value,
+    String? unit, {
+    int side = 0,
+    bool hasSideArrow = false,
+  }) {
+    const arrowSlot = 26.0;
+    Widget arrow(Color color, bool flip) => SizedBox(
+      width: arrowSlot,
+      child: Center(
+        child: Transform.flip(
+          flipX: flip,
+          child: Icon(Icons.play_arrow, color: color, size: 24),
+        ),
+      ),
+    );
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: cMuted,
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            if (hasSideArrow)
+              side < 0
+                  ? arrow(cRed, false)
+                  : const SizedBox(width: arrowSlot),
+            // Unit sits high next to the digits — a true superscript,
+            // riding above the number's cap-height — same spot/scale on
+            // both AWS's "kt" and AWA's "°" (a single card with two
+            // metrics has nowhere sensible for one card-level unit).
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: cText,
+                    fontSize: 52,
+                    fontWeight: FontWeight.w900,
+                    height: 0.95,
+                  ),
+                ),
+                if (unit != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      unit,
+                      style: const TextStyle(
+                        color: cMuted,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            if (hasSideArrow)
+              side > 0
+                  ? arrow(cGreen, true)
+                  : const SizedBox(width: arrowSlot),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // Boat-centered "radar" for the anchor watch: the outer ring is the
+  // configured swing limit (maxRadius), and the marker shows the anchor's
+  // live distance/bearing from the bow within it — reads at a glance
+  // whether it's centered or nearing the edge, instead of two bare numbers.
+  Widget _premiumAnchorCard() {
+    final current = signalK.anchorCurrentRadiusM;
+    final maxR = signalK.anchorMaxRadiusM;
+    final bearing = signalK.anchorApparentBearingDeg;
+    final frac = (current != null && maxR != null && maxR > 0)
+        ? (current / maxR).clamp(0.0, 1.3)
+        : null;
+    final color = frac == null
+        ? cMuted
+        : frac < 0.6
+        ? cGreen
+        : frac < 0.9
+        ? cOrange
+        : cRed;
+    return _premiumPanel(
+      onTap: () => _goToTab('ANC'),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumTitle('Ancla', color),
+            // Distance sits above the ring, not beside it — the card is
+            // taller than it is wide, so a side-by-side split squeezed the
+            // ring into a narrow column; stacking uses the full width.
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 2),
+              child: Column(
+                children: [
+                  const Text(
+                    'DISTANCIA',
+                    style: TextStyle(
+                      color: cMuted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          current != null ? current.toStringAsFixed(0) : '--',
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 64,
+                            fontWeight: FontWeight.w900,
+                            height: 0.95,
+                          ),
+                        ),
+                        if (current != null) ...[
+                          const SizedBox(width: 4),
+                          Text(
+                            'm',
+                            style: TextStyle(
+                              color: color,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Center(
+                child: AspectRatio(
+                  aspectRatio: 1,
+                  child: CustomPaint(
+                    painter: _PremiumAnchorPainter(
+                      radiusFraction: frac,
+                      bearingDeg: bearing,
+                      color: color,
+                      shipIcon: _shipIcon,
+                    ),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+            ),
+            Center(
+              child: Text(
+                maxR != null
+                    ? 'Radio máx. ${maxR.toStringAsFixed(0)} m'
+                    : 'Sin radio configurado',
+                style: const TextStyle(
+                  color: cMuted,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3268,6 +4495,15 @@ class _DashboardState extends State<Dashboard> {
         : MetricDef(p, 'Solar', 'W', color: cYellow);
   }
 
+  MetricDef _metricColor(MetricDef metric, Color color) => MetricDef(
+    metric.skPath,
+    metric.label,
+    metric.unit,
+    offset: metric.offset,
+    scale: metric.scale,
+    color: color,
+  );
+
   MetricDef? get _mFridge1 {
     final p = settings.sensorConfig.fridge1Path;
     return (p == null || p.isEmpty)
@@ -3282,60 +4518,157 @@ class _DashboardState extends State<Dashboard> {
         : MetricDef(p, 'T. Nevera 2', 'C', offset: -273.15, color: cGreen);
   }
 
-  Widget _powerPage() => _grid3x2(
-    children: [
-      MetricCard(
-        title: 'Batería',
-        value: fmt(signalK.houseSoc, 0, ''),
-        unit: '%',
-        subtitle:
-            '${fmt(signalK.houseV, 2, ' V')}  ${signalK.houseA != null ? (signalK.houseA! >= 0 ? '+' : '') : ''}${fmt(signalK.houseA, 1, ' A')}',
-        color: socColor(signalK.houseSoc),
-        zoom: _showZoom,
-        graphMetrics: [_mHouseSoc, _mHouseCurrent, _mHouseVoltage],
+  Widget _powerPage() {
+    final houseColor = socColor(signalK.houseSoc);
+    final currentColorValue = currentColor(signalK.houseA);
+    final startColor = voltageColor12V(signalK.startV);
+    final bowColor = voltageColor12V(signalK.bowthrusterV);
+    final currentPrefix = signalK.houseA != null && signalK.houseA! >= 0
+        ? '+'
+        : '';
+    final batterySubtitle =
+        '${fmt(signalK.houseV, 2, ' V')}  $currentPrefix${fmt(signalK.houseA, 1, ' A')}';
+    final dcReferenceWatts = ((signalK.houseV ?? 12.5) * 40).clamp(
+      420.0,
+      620.0,
+    );
+    final houseMetrics = [
+      _metricColor(_mHouseSoc, houseColor),
+      _metricColor(_mHouseCurrent, houseColor),
+      _metricColor(_mHouseVoltage, houseColor),
+    ];
+    final solarMetric = _mSolar;
+    final hasSolar =
+        settings.demoMode || (solarMetric != null && signalK.solarW != null);
+    final hasDcLoads = settings.demoMode || signalK.dcW != null;
+    final flowWidgets = <Widget>[];
+    if (hasSolar) {
+      flowWidgets.add(
+        Expanded(
+          flex: 10,
+          child: PowerFlowTile(
+            title: 'Solar',
+            value: fmt(signalK.solarW, 0, ''),
+            unit: 'W',
+            subtitle: 'solar',
+            color: cYellow,
+            icon: Icons.wb_sunny,
+            zoom: _showZoom,
+            graphMetrics: solarMetric == null ? null : [solarMetric],
+          ),
+        ),
+      );
+      flowWidgets.add(
+        PowerFlowConnector(
+          color: cYellow,
+          watts: signalK.solarW,
+          label: 'carga',
+          referenceWatts: 600,
+        ),
+      );
+    }
+    flowWidgets.add(
+      Expanded(
+        flex: hasSolar || hasDcLoads ? 12 : 16,
+        child: PowerFlowTile(
+          title: 'Batería servicio',
+          value: fmt(signalK.houseSoc, 0, ''),
+          unit: '%',
+          subtitle: batterySubtitle,
+          color: houseColor,
+          icon: Icons.battery_charging_full,
+          stateOfCharge: signalK.houseSoc,
+          zoom: _showZoom,
+          graphMetrics: houseMetrics,
+        ),
       ),
-      MetricCard(
-        title: 'Solar',
-        value: fmt(signalK.solarW, 0, ''),
-        unit: 'W',
-        color: cYellow,
-        zoom: _showZoom,
-        graphMetrics: _mSolar == null ? null : [_mSolar!],
+    );
+    if (hasDcLoads) {
+      flowWidgets.add(
+        PowerFlowConnector(
+          color: cOrange,
+          watts: signalK.dcW,
+          label: 'consumo',
+          referenceWatts: dcReferenceWatts,
+        ),
+      );
+      flowWidgets.add(
+        Expanded(
+          flex: 10,
+          child: PowerFlowTile(
+            title: 'DC Loads',
+            value: fmt(signalK.dcW, 0, ''),
+            unit: 'W',
+            subtitle: 'Consumos DC',
+            color: cOrange,
+            icon: Icons.power,
+            zoom: _showZoom,
+            graphMetrics: [_metricColor(mDcLoads, cOrange)],
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children: [
+          Expanded(flex: 7, child: Row(children: flowWidgets)),
+          const SizedBox(height: 8),
+          Expanded(
+            flex: 4,
+            child: Row(
+              children: [
+                Expanded(
+                  child: PowerAuxTile(
+                    title: 'Corriente servicio',
+                    value: fmt(signalK.houseA, 1, ''),
+                    unit: 'A',
+                    subtitle: signalK.houseA == null
+                        ? 'sin datos'
+                        : signalK.houseA! >= 0
+                        ? 'cargando batería'
+                        : 'descargando batería',
+                    color: currentColorValue,
+                    icon: Icons.swap_vert,
+                    zoom: _showZoom,
+                    graphMetrics: [
+                      _metricColor(_mHouseCurrent, currentColorValue),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: PowerAuxTile(
+                    title: 'Arranque',
+                    value: fmt(signalK.startV, 2, ''),
+                    unit: 'V',
+                    subtitle: settings.sensorConfig.batteryStartId,
+                    color: startColor,
+                    customIcon: StarterMotorGlyph(color: startColor),
+                    zoom: _showZoom,
+                    graphMetrics: [_metricColor(_mStartV, startColor)],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: PowerAuxTile(
+                    title: 'Bow thruster',
+                    value: fmt(signalK.bowthrusterV, 2, ''),
+                    unit: 'V',
+                    subtitle: 'batería proa',
+                    color: bowColor,
+                    customIcon: BowThrusterGlyph(color: bowColor),
+                    zoom: _showZoom,
+                    graphMetrics: [_metricColor(mBowV, bowColor)],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
-      MetricCard(
-        title: 'DC Loads',
-        value: fmt(signalK.dcW, 0, ''),
-        unit: 'W',
-        color: cOrange,
-        zoom: _showZoom,
-        graphMetrics: const [mDcLoads],
-      ),
-      MetricCard(
-        title: 'Corriente',
-        value: fmt(signalK.houseA, 1, ''),
-        unit: 'A',
-        color: currentColor(signalK.houseA),
-        zoom: _showZoom,
-        graphMetrics: [_mHouseCurrent],
-      ),
-      MetricCard(
-        title: 'Start',
-        value: fmt(signalK.startV, 2, ''),
-        unit: 'V',
-        color: voltageColor12V(signalK.startV),
-        zoom: _showZoom,
-        graphMetrics: [_mStartV],
-      ),
-      MetricCard(
-        title: 'Bowthruster',
-        value: fmt(signalK.bowthrusterV, 2, ''),
-        unit: 'V',
-        color: voltageColor12V(signalK.bowthrusterV),
-        zoom: _showZoom,
-        graphMetrics: const [mBowV],
-      ),
-    ],
-  );
+    );
+  }
 
   // ─── TEMP page ──────────────────────────────────────────────────────────────
   Widget _tempPage() {
@@ -3455,63 +4788,88 @@ class _DashboardState extends State<Dashboard> {
   // ─── MET page ───────────────────────────────────────────────────────────────
   Widget _metPage() {
     final forecast = elementAtOrNull(weather.summary, 0);
-    return _grid3x2(
-      children: [
-        MetricCard(
-          title: 'T. exterior',
-          value: tempNum(signalK.outsideTempK),
-          unit: '°C',
-          subtitle: signalK.outsideHumidity != null
-              ? 'HR ${fmt(signalK.outsideHumidity, 0, '%')}'
-              : null,
-          color: cCyan,
-          zoom: _showZoom,
-          graphMetrics: const [mOutdoorTemp],
-        ),
-        MetricCard(
-          title: 'Presión',
-          value: fmt(signalK.outsidePressureHpa, 0, ''),
-          unit: 'hPa',
-          color: cPurple,
-          zoom: _showZoom,
-          graphMetrics: const [mPressure],
-        ),
-        MetricCard(
-          title: 'TWS',
-          value: fmt(_freshWind(_dTws), 0, ''),
-          unit: 'kt',
-          subtitle: dir(_freshWind(_dTwd)),
-          color: windColor(_freshWind(_dTws)),
-          zoom: _showZoom,
-          graphMetrics: const [mTws],
-        ),
-        MetricCard(
-          title: 'T. interior',
-          value: tempNum(signalK.indoorTempK),
-          unit: '°C',
-          subtitle: signalK.indoorHumidity != null
-              ? 'HR ${fmt(signalK.indoorHumidity, 0, '%')}'
-              : null,
-          color: cCyan,
-          zoom: _showZoom,
-        ),
-        MetricCard(
-          title: 'Lugar',
-          value: forecast != null ? fmt(forecast.tempC, 0, '') : '--',
-          unit: '°C',
-          subtitle: weather.error ?? weather.place,
-          color: weather.error != null ? cOrange : cYellow,
-          zoom: _showZoom,
-        ),
-        MetricCard(
-          title: 'Viento modelo',
-          value: fmt(forecast?.windKn, 0, ''),
-          unit: 'kt',
-          subtitle: forecast != null ? dir(forecast.windDirDeg) : null,
-          color: windColor(forecast?.windKn),
-          zoom: _showZoom,
-        ),
-      ],
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 11,
+            child: PressureTrendCard(
+              value: signalK.outsidePressureHpa,
+              history: _pressureHistory,
+              fromInflux: _pressureTrendFromInflux,
+              zoom: _showZoom,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: 18,
+            child: Column(
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: MetricCard(
+                          title: 'T. exterior',
+                          value: tempNum(signalK.outsideTempK),
+                          unit: '°C',
+                          subtitle: signalK.outsideHumidity != null
+                              ? 'HR ${fmt(signalK.outsideHumidity, 0, '%')}'
+                              : null,
+                          color: cCyan,
+                          zoom: _showZoom,
+                          graphMetrics: const [mOutdoorTemp],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: MetricCard(
+                          title: 'T. interior',
+                          value: tempNum(signalK.indoorTempK),
+                          unit: '°C',
+                          subtitle: signalK.indoorHumidity != null
+                              ? 'HR ${fmt(signalK.indoorHumidity, 0, '%')}'
+                              : null,
+                          color: cCyan,
+                          zoom: _showZoom,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: ModelWindCompassCard(
+                          forecast: forecast,
+                          tws: _freshWind(_dTws),
+                          zoom: _showZoom,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: MetricCard(
+                          title: 'Lugar',
+                          value: forecast != null
+                              ? fmt(forecast.tempC, 0, '')
+                              : '--',
+                          unit: '°C',
+                          subtitle: weather.error ?? weather.place,
+                          color: weather.error != null ? cOrange : cYellow,
+                          zoom: _showZoom,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3677,7 +5035,10 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  // ─── Marine page (unchanged) ────────────────────────────────────────────────
+  // ─── Marine page ────────────────────────────────────────────────────────────
+  static const _marineMinHour = 1.0;
+  static const _marineMaxHour = 24.0;
+
   static String _marineDate(DateTime t) {
     const days = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
     const months = [
@@ -3698,38 +5059,245 @@ class _DashboardState extends State<Dashboard> {
     return '${days[l.weekday - 1]} ${l.day} ${months[l.month - 1]}';
   }
 
-  // Fixed height instead of _grid3x2's full-page Expanded stretch — these
-  // cards don't need (or look good at) the whole screen's height just
-  // because there are only 3 of them in one row. PageView gives each page
-  // *tight* (exact-size) constraints, so a plain SizedBox alone can't
-  // shrink below that — Align (loose constraints for its child) is what
-  // actually lets the fixed height take effect instead of being
-  // overridden back up to the full page height.
+  String _marineHorizonLabel(double hours) => '${hours.round()}h';
+
+  double? _lerpNullable(double? a, double? b, double t) {
+    if (a == null && b == null) return null;
+    if (a == null) return b;
+    if (b == null) return a;
+    return a + (b - a) * t;
+  }
+
+  double? _lerpDirection(double? a, double? b, double t) {
+    if (a == null && b == null) return null;
+    if (a == null) return b;
+    if (b == null) return a;
+    return normalize360(a + normalizeRelativeAngle(b - a) * t);
+  }
+
+  MarinePoint _marinePointAt(double hours) {
+    if (weather.marine.length < 2) return weather.marine.first;
+    final requested = hours.clamp(_marineMinHour, _marineMaxHour);
+    final clamped = requested.clamp(
+      _marineMinHour,
+      weather.marine.length.toDouble(),
+    );
+    final lowerHour = clamped.floor().clamp(1, weather.marine.length);
+    final upperHour = clamped.ceil().clamp(1, weather.marine.length);
+    final lower = weather.marine[lowerHour - 1];
+    final upper = weather.marine[upperHour - 1];
+    final t = upperHour == lowerHour
+        ? 0.0
+        : (clamped - lowerHour) / (upperHour - lowerHour);
+    final millis =
+        lower.time.millisecondsSinceEpoch +
+        ((upper.time.millisecondsSinceEpoch -
+                    lower.time.millisecondsSinceEpoch) *
+                t)
+            .round();
+    return MarinePoint(
+      time: DateTime.fromMillisecondsSinceEpoch(millis, isUtc: true),
+      waveM: _lerpNullable(lower.waveM, upper.waveM, t),
+      waveDir: _lerpDirection(lower.waveDir, upper.waveDir, t),
+      wavePeriod: _lerpNullable(lower.wavePeriod, upper.wavePeriod, t),
+      swellM: _lerpNullable(lower.swellM, upper.swellM, t),
+      swellDir: _lerpDirection(lower.swellDir, upper.swellDir, t),
+      swellPeriod: _lerpNullable(lower.swellPeriod, upper.swellPeriod, t),
+      seaTempC: _lerpNullable(lower.seaTempC, upper.seaTempC, t),
+      currentKmh: _lerpNullable(lower.currentKmh, upper.currentKmh, t),
+      currentDir: _lerpDirection(lower.currentDir, upper.currentDir, t),
+    );
+  }
+
+  (String, Color) _marineComfort(MarinePoint point) {
+    final wave = point.waveM;
+    if (wave == null) return ('--', cMuted);
+    if (wave < 1.0) return ('Cómodo', cGreen);
+    if (wave < 2.0) return ('Atención', cOrange);
+    return ('Duro', cRed);
+  }
+
   Widget _marinePage() => weather.marine.isEmpty
       ? _weatherEmptyState('MAR')
-      : Align(
-          alignment: Alignment.topCenter,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: SizedBox(
-              height: 260,
-              width: double.infinity,
-              child: Row(
+      : Builder(
+          builder: (context) {
+            if (weather.marine.length < _marineMaxHour.round() &&
+                !loadingWeather) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && !loadingWeather) {
+                  unawaited(_loadWeather(force: true));
+                }
+              });
+            }
+            const maxHour = _marineMaxHour;
+            final currentHours = _marineHorizonHours.clamp(
+              _marineMinHour,
+              maxHour,
+            );
+            final point = _marinePointAt(currentHours);
+            final (comfort, comfortColor) = _marineComfort(point);
+            final currentKn = point.currentKmh == null
+                ? null
+                : point.currentKmh! / 1.852;
+            return Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
                 children: [
-                  for (var i = 0; i < weather.marine.length; i++) ...[
-                    if (i > 0) const SizedBox(width: 8),
-                    Expanded(
-                      child: MarineCard(
-                        title: _marineDate(weather.marine[i].time),
-                        point: weather.marine[i],
-                        zoom: _showZoom,
-                      ),
+                  SizedBox(
+                    height: 58,
+                    child: Row(
+                      children: [
+                        Text(
+                          '${_marineHorizonLabel(currentHours)} · ${_marineDate(point.time)}',
+                          style: const TextStyle(
+                            color: cMuted,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              activeTrackColor: cCyan,
+                              inactiveTrackColor: cMuted.withValues(
+                                alpha: 0.25,
+                              ),
+                              thumbColor: cCyan,
+                              overlayColor: cCyan.withValues(alpha: 0.14),
+                              valueIndicatorColor: cPanel,
+                              valueIndicatorTextStyle: const TextStyle(
+                                color: cText,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            child: Slider(
+                              value: currentHours,
+                              min: _marineMinHour,
+                              max: maxHour,
+                              label: _marineHorizonLabel(currentHours),
+                              onChanged: maxHour <= _marineMinHour
+                                  ? null
+                                  : (v) =>
+                                        setState(() => _marineHorizonHours = v),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        for (final marker in const [1.0, 6.0, 12.0, 24.0])
+                          Padding(
+                            padding: const EdgeInsets.only(left: 10),
+                            child: Text(
+                              _marineHorizonLabel(marker),
+                              style: TextStyle(
+                                color: (currentHours - marker).abs() < 0.5
+                                    ? cCyan
+                                    : cMuted,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                  ],
+                  ),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 11,
+                          child: MarineGraphicCard(
+                            title: 'Ola significativa',
+                            value: point.waveM,
+                            unit: 'm',
+                            subtitle:
+                                'Periodo ${fmt(point.wavePeriod, 1, ' s')} · ${dir(point.waveDir)}',
+                            color: cCyan,
+                            directionDeg: point.waveDir,
+                            valueWidthFactor: 0.82,
+                            arrowSize: 68,
+                            arrowGap: 18,
+                            arrowLift: 22,
+                            zoom: _showZoom,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 18,
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: MarineGraphicCard(
+                                        title: 'Swell',
+                                        value: point.swellM,
+                                        unit: 'm',
+                                        subtitle:
+                                            '${dir(point.swellDir)} · ${fmt(point.swellPeriod, 1, ' s')}',
+                                        color: const Color(0xff69bdf7),
+                                        directionDeg: point.swellDir,
+                                        valueFontSize: 154,
+                                        valueWidthFactor: 0.72,
+                                        arrowSize: 56,
+                                        arrowGap: 18,
+                                        arrowLift: 20,
+                                        zoom: _showZoom,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: MetricCard(
+                                        title: 'Corriente',
+                                        value: fmt(currentKn, 1, ''),
+                                        unit: 'kt',
+                                        subtitle: dir(point.currentDir),
+                                        color: cGreen,
+                                        zoom: _showZoom,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Expanded(
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: MetricCard(
+                                        title: 'T. mar',
+                                        value: fmt(point.seaTempC, 0, ''),
+                                        unit: '°C',
+                                        subtitle: 'superficie',
+                                        color: cCyan,
+                                        zoom: _showZoom,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: MetricCard(
+                                        title: 'Resumen',
+                                        value: comfort,
+                                        subtitle:
+                                            'Ola ${fmt(point.waveM, 1, ' m')} · swell ${fmt(point.swellM, 1, ' m')}',
+                                        color: comfortColor,
+                                        zoom: _showZoom,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-            ),
-          ),
+            );
+          },
         );
 
   // ─── Anchor page (WebView) ──────────────────────────────────────────────────
@@ -3773,24 +5341,20 @@ class _DashboardState extends State<Dashboard> {
     final authController = _authController ??= TextEditingController(
       text: settings.authBase64,
     );
-    final skUsernameController = _skUsernameController ??= TextEditingController(
-      text: settings.skUsername,
-    );
-    final skPasswordController = _skPasswordController ??= TextEditingController(
-      text: settings.skPassword,
-    );
+    final skUsernameController = _skUsernameController ??=
+        TextEditingController(text: settings.skUsername);
+    final skPasswordController = _skPasswordController ??=
+        TextEditingController(text: settings.skPassword);
     final bucketController = _bucketController ??= TextEditingController(
       text: settings.influxBucket,
     );
-    final influxHostController = _influxHostController ??= TextEditingController(
-      text: settings.influxHost,
-    );
+    final influxHostController = _influxHostController ??=
+        TextEditingController(text: settings.influxHost);
     final influxOrgController = _influxOrgController ??= TextEditingController(
       text: settings.influxOrg,
     );
-    final influxTokenController = _influxTokenController ??= TextEditingController(
-      text: settings.influxToken,
-    );
+    final influxTokenController = _influxTokenController ??=
+        TextEditingController(text: settings.influxToken);
     var scanning = false;
     var scanChecked = 0, scanTotal = 0;
     List<String> scanResults = [];
@@ -4028,7 +5592,10 @@ class _DashboardState extends State<Dashboard> {
                           ),
                           if (_isSignalKWebapp) ...[
                             const SizedBox(height: 16),
-                            const Text('SESIÓN WEB (Freeboard / Anclaje)', style: lbl),
+                            const Text(
+                              'SESIÓN WEB (Freeboard / Anclaje)',
+                              style: lbl,
+                            ),
                             gap,
                             const Text(
                               'Distinto del campo de arriba: hace login real en Signal K para que el navegador quede con sesión — así Freeboard-SK y la alarma de fondeo (embebidos) también funcionan (p.ej. arrastrar para fijar el ancla), sin volver a pedir login.',
@@ -4080,10 +5647,7 @@ class _DashboardState extends State<Dashboard> {
                                 else if (_skLoginOk == false)
                                   const Text(
                                     'No se pudo iniciar sesión',
-                                    style: TextStyle(
-                                      color: cRed,
-                                      fontSize: 12,
-                                    ),
+                                    style: TextStyle(color: cRed, fontSize: 12),
                                   ),
                               ],
                             ),
@@ -4298,7 +5862,7 @@ class _DashboardState extends State<Dashboard> {
                           segments: const [
                             ButtonSegment(
                               value: 'dia',
-                              label: Text('Tema claro'),
+                              label: Text('Día'),
                               icon: Icon(Icons.wb_sunny_outlined, size: 14),
                             ),
                             ButtonSegment(
@@ -4308,7 +5872,7 @@ class _DashboardState extends State<Dashboard> {
                             ),
                             ButtonSegment(
                               value: 'noche',
-                              label: Text('Tema oscuro'),
+                              label: Text('Noche'),
                               icon: Icon(Icons.nightlight_outlined, size: 14),
                             ),
                           ],
@@ -4327,7 +5891,46 @@ class _DashboardState extends State<Dashboard> {
                         ),
                         const SizedBox(height: 10),
                         const Text(
-                          'PANTALLA NAV',
+                          'ESTILO NAV',
+                          style: TextStyle(
+                            color: cMuted,
+                            fontSize: 10,
+                            letterSpacing: 1.1,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(
+                              value: 'classic',
+                              label: Text('Clásica'),
+                            ),
+                            ButtonSegment(
+                              value: 'premium',
+                              label: Text('Premium'),
+                            ),
+                            ButtonSegment(value: 'both', label: Text('Ambas')),
+                          ],
+                          selected: {settings.navLayoutMode},
+                          onSelectionChanged: (v) {
+                            setState(() {
+                              settings.navLayoutMode = v.first;
+                              _navPageIndex = 0;
+                            });
+                            unawaited(_saveSettings());
+                          },
+                          style: const ButtonStyle(
+                            visualDensity: VisualDensity(
+                              horizontal: -2,
+                              vertical: -2,
+                            ),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        const Text(
+                          'REJILLA NAV CLÁSICA',
                           style: TextStyle(
                             color: cMuted,
                             fontSize: 10,
@@ -4338,8 +5941,14 @@ class _DashboardState extends State<Dashboard> {
                         const SizedBox(height: 6),
                         SegmentedButton<int>(
                           segments: const [
-                            ButtonSegment(value: 3, label: Text('3×2 (6 cartas)')),
-                            ButtonSegment(value: 4, label: Text('4×2 (8 cartas)')),
+                            ButtonSegment(
+                              value: 3,
+                              label: Text('3×2 (6 cartas)'),
+                            ),
+                            ButtonSegment(
+                              value: 4,
+                              label: Text('4×2 (8 cartas)'),
+                            ),
                           ],
                           selected: {settings.navGridColumns},
                           onSelectionChanged: (v) {
@@ -4353,6 +5962,33 @@ class _DashboardState extends State<Dashboard> {
                             ),
                             tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           ),
+                        ),
+                        const SizedBox(height: 16),
+                        // Just what shows on the NAV AIS card — not an
+                        // alarm (see CFG → Alarmas for the real collision
+                        // alarm, which has its own, much tighter
+                        // thresholds and actually alerts).
+                        const Text('AIS — MOSTRADO EN NAV', style: lbl),
+                        gap,
+                        _ThresholdRow(
+                          label: 'CPA máximo mostrado',
+                          unit: 'NM',
+                          value: settings.aisCpaMaxNm,
+                          onChanged: (v) {
+                            setSt(() => settings.aisCpaMaxNm = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                          },
+                        ),
+                        _ThresholdRow(
+                          label: 'TCPA máximo mostrado',
+                          unit: 'min',
+                          value: settings.aisTcpaMaxMin,
+                          onChanged: (v) {
+                            setSt(() => settings.aisTcpaMaxMin = v);
+                            setState(() {});
+                            unawaited(_saveSettings());
+                          },
                         ),
                       ],
                     ),
@@ -4400,7 +6036,9 @@ class _DashboardState extends State<Dashboard> {
                                 state: _notifications[path]!.state,
                                 setting: settings.skZoneAlarms[path],
                                 onChanged: (next) {
-                                  setSt(() => settings.skZoneAlarms[path] = next);
+                                  setSt(
+                                    () => settings.skZoneAlarms[path] = next,
+                                  );
                                   setState(() {});
                                   unawaited(_saveSettings());
                                   unawaited(_syncAlarmSound());
@@ -4446,37 +6084,76 @@ class _DashboardState extends State<Dashboard> {
                             ),
                           ),
                         const SizedBox(height: 16),
-                        const Text('AIS — UMBRALES', style: lbl),
-                        gap,
-                        _ThresholdRow(
-                          label: 'CPA máximo relevante',
-                          unit: 'NM',
-                          value: settings.aisCpaMaxNm,
+                        SwitchListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          value: settings.alarmAisEnabled,
                           onChanged: (v) {
-                            setSt(() => settings.aisCpaMaxNm = v);
+                            setSt(() => settings.alarmAisEnabled = v);
                             setState(() {});
                             unawaited(_saveSettings());
+                            unawaited(_syncAlarmSound());
                           },
+                          title: const Text(
+                            'Alarma de colisión AIS',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          subtitle: const Text(
+                            'Salta cuando CPA y TCPA del blanco más cercano bajan de estos umbrales a la vez',
+                            style: TextStyle(fontSize: 11, color: cMuted),
+                          ),
                         ),
-                        _ThresholdRow(
-                          label: 'TCPA máximo relevante',
-                          unit: 'min',
-                          value: settings.aisTcpaMaxMin,
-                          onChanged: (v) {
-                            setSt(() => settings.aisTcpaMaxMin = v);
-                            setState(() {});
-                            unawaited(_saveSettings());
-                          },
-                        ),
+                        if (settings.alarmAisEnabled) ...[
+                          SwitchListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            value: settings.alarmAisSound,
+                            onChanged: (v) {
+                              setSt(() => settings.alarmAisSound = v);
+                              setState(() {});
+                              unawaited(_saveSettings());
+                              unawaited(_syncAlarmSound());
+                            },
+                            title: const Text(
+                              'Aviso sonoro',
+                              style: TextStyle(fontSize: 13),
+                            ),
+                          ),
+                          _ThresholdRow(
+                            label: 'Alarma CPA',
+                            unit: 'NM',
+                            value: settings.alarmAisCpaNm,
+                            onChanged: (v) {
+                              setSt(() => settings.alarmAisCpaNm = v);
+                              setState(() {});
+                              unawaited(_saveSettings());
+                            },
+                          ),
+                          _ThresholdRow(
+                            label: 'Alarma TCPA',
+                            unit: 'min',
+                            value: settings.alarmAisTcpaMin,
+                            onChanged: (v) {
+                              setSt(() => settings.alarmAisTcpaMin = v);
+                              setState(() {});
+                              unawaited(_saveSettings());
+                            },
+                          ),
+                        ],
                         const SizedBox(height: 16),
                         Row(
                           children: [
                             const Text('ALARMAS PERSONALIZADAS', style: lbl),
                             const Spacer(),
                             IconButton(
-                              icon: const Icon(Icons.add_circle_outline, color: cCyan),
+                              icon: const Icon(
+                                Icons.add_circle_outline,
+                                color: cCyan,
+                              ),
                               onPressed: () async {
-                                final rule = await _showAddCustomAlarmDialog(context);
+                                final rule = await _showAddCustomAlarmDialog(
+                                  context,
+                                );
                                 if (rule == null) return;
                                 setSt(() => settings.customAlarms.add(rule));
                                 setState(() {});
@@ -4614,6 +6291,12 @@ class _DashboardState extends State<Dashboard> {
                               path: 'navigation.courseOverGroundTrue',
                             ),
                             _diagRow(
+                              'Ancla',
+                              signalK.anchorArmed ? 'Armada' : 'Sin armar',
+                              signalK.anchorArmed ? cGreen : cMuted,
+                              path: 'navigation.anchor.state',
+                            ),
+                            _diagRow(
                               'TWD',
                               _dTwd != null
                                   ? '${_dTwd!.toStringAsFixed(0)}°'
@@ -4628,12 +6311,10 @@ class _DashboardState extends State<Dashboard> {
                                 final speedForVmg =
                                     _fresh(signalK.stwKn) ??
                                     _fresh(signalK.sogKn);
-                                final v = (twaForVmg != null &&
-                                        speedForVmg != null)
+                                final v =
+                                    (twaForVmg != null && speedForVmg != null)
                                     ? speedForVmg *
-                                          math.cos(
-                                            twaForVmg * math.pi / 180,
-                                          )
+                                          math.cos(twaForVmg * math.pi / 180)
                                     : null;
                                 return v != null
                                     ? '${v.toStringAsFixed(1)} kt'
@@ -4648,15 +6329,12 @@ class _DashboardState extends State<Dashboard> {
                                   ? '${signalK.courseVmgKn!.toStringAsFixed(1)} kt'
                                   : '--',
                               signalK.courseVmgKn != null ? cGreen : cMuted,
-                              path:
-                                  'navigation.course.calcValues.velocityMadeGood',
+                              path: 'navigation.course.calcValues.velocityMadeGood',
                             ),
                             _diagRow(
                               'GNSS sats',
                               signalK.gnssSatellites?.toString() ?? '--',
-                              signalK.gnssSatellites != null
-                                  ? cGreen
-                                  : cMuted,
+                              signalK.gnssSatellites != null ? cGreen : cMuted,
                               path: 'navigation.gnss.satellites',
                             ),
                             _diagRow(
@@ -4768,11 +6446,8 @@ class _DashboardState extends State<Dashboard> {
                               signalK.bowthrusterTempK != null
                                   ? '${(signalK.bowthrusterTempK! - 273.15).toStringAsFixed(1)} °C'
                                   : '--',
-                              signalK.bowthrusterTempK != null
-                                  ? cCyan
-                                  : cMuted,
-                              path:
-                                  'electrical.batteries.bowthruster.temperature',
+                              signalK.bowthrusterTempK != null ? cCyan : cMuted,
+                              path: 'electrical.batteries.bowthruster.temperature',
                             ),
                             const SizedBox(height: 12),
                             const Text('TANQUES', style: lbl),
@@ -4831,40 +6506,50 @@ class _DashboardState extends State<Dashboard> {
     String value,
     Color color, {
     String? path,
-  }) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 3),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        SizedBox(
-          width: 130,
-          child: Text(
-            label,
-            style: const TextStyle(color: cMuted, fontSize: 11),
-          ),
-        ),
-        SizedBox(
-          width: 76,
-          child: Text(
-            value,
-            style: TextStyle(
-              color: color,
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        if (path != null)
-          Expanded(
+  }) {
+    // A row whose path is a real, in-use one (not the "(sin configurar)"
+    // placeholder some rows fall back to) but whose value still reads "--"
+    // means something the app actually depends on isn't coming through —
+    // that's worth flagging red rather than just muted-gray like an
+    // optional/unconfigured sensor that's expected to be empty.
+    final missingButUsed =
+        value == '--' && path != null && !path.contains('sin configurar');
+    final effectiveColor = missingButUsed ? cRed : color;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 130,
             child: Text(
-              path,
-              style: const TextStyle(color: cMuted, fontSize: 12),
-              overflow: TextOverflow.ellipsis,
+              label,
+              style: const TextStyle(color: cMuted, fontSize: 11),
             ),
           ),
-      ],
-    ),
-  );
+          SizedBox(
+            width: 76,
+            child: Text(
+              value,
+              style: TextStyle(
+                color: effectiveColor,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (path != null)
+            Expanded(
+              child: Text(
+                path,
+                style: const TextStyle(color: cMuted, fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   // ─── Zoom dialog (first tap → zoom, tap value → graph) ─────────────────────
   void _showZoom(
@@ -5094,4229 +6779,6 @@ class _DashboardState extends State<Dashboard> {
   // ─── Wind panel ─────────────────────────────────────────────────────────────
 }
 
-String friendlyApiError(Object e) {
-  final s = e.toString();
-  final match = RegExp(r'Exception: (.+)').firstMatch(s);
-  return match != null ? match.group(1)! : s;
-}
-
-// ─── Weather location picker (PRON > icono junto al lugar) ───────────────────
-class _LocationPickerDialog extends StatefulWidget {
-  const _LocationPickerDialog({
-    required this.initial,
-    required this.isOverridden,
-  });
-  final ll.LatLng? initial;
-  final bool isOverridden;
-
-  @override
-  State<_LocationPickerDialog> createState() => _LocationPickerDialogState();
-}
-
-class _LocationPickerDialogState extends State<_LocationPickerDialog> {
-  ll.LatLng? _picked;
-  final _mapController = fm.MapController();
-  bool _lookingUp = false;
-  String? _placeName;
-  String? _nearestTown;
-  int _lookupToken = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _picked = widget.initial;
-    if (widget.initial != null) _lookupPlace(widget.initial!);
-  }
-
-  @override
-  void dispose() {
-    _mapController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _lookupPlace(ll.LatLng point) async {
-    final token = ++_lookupToken;
-    setState(() {
-      _lookingUp = true;
-      _placeName = null;
-      _nearestTown = null;
-    });
-    try {
-      final results = await Future.wait([
-        reverseGeocode(point.latitude, point.longitude),
-        nearestPopulatedPlace(point.latitude, point.longitude),
-      ]);
-      if (!mounted || token != _lookupToken) return;
-      setState(() {
-        _lookingUp = false;
-        _placeName = results[0] as String;
-        _nearestTown = results[1];
-      });
-    } catch (_) {
-      if (!mounted || token != _lookupToken) return;
-      setState(() => _lookingUp = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final center = widget.initial ?? const ll.LatLng(37.75, 26.98);
-    return Dialog.fullscreen(
-      backgroundColor: cBg,
-      child: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 8, 6),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Elige un punto para el pronóstico',
-                      style: TextStyle(
-                        color: cText,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close, color: cText),
-                  ),
-                ],
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Toca el mapa para marcar un punto',
-                  style: TextStyle(color: cMuted, fontSize: 13),
-                ),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Expanded(
-              child: Stack(
-                children: [
-                  fm.FlutterMap(
-                    mapController: _mapController,
-                    options: fm.MapOptions(
-                      initialCenter: center,
-                      initialZoom: 8,
-                      onTap: (_, latlng) {
-                        setState(() => _picked = latlng);
-                        _lookupPlace(latlng);
-                      },
-                    ),
-                    children: [
-                      fm.TileLayer(
-                        urlTemplate:
-                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                        userAgentPackageName: 'com.rewind.xcover6panel',
-                      ),
-                      if (_picked != null)
-                        fm.MarkerLayer(
-                          markers: [
-                            fm.Marker(
-                              point: _picked!,
-                              width: 40,
-                              height: 40,
-                              child: const Icon(
-                                Icons.location_pin,
-                                color: cOrange,
-                                size: 40,
-                              ),
-                            ),
-                          ],
-                        ),
-                      const fm.RichAttributionWidget(
-                        attributions: [
-                          fm.TextSourceAttribution(
-                            'OpenStreetMap contributors',
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            if (_picked != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                child: _lookingUp
-                    ? const Row(
-                        children: [
-                          SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: cCyan,
-                            ),
-                          ),
-                          SizedBox(width: 8),
-                          Text(
-                            'Buscando lugar…',
-                            style: TextStyle(color: cMuted, fontSize: 12),
-                          ),
-                        ],
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (_placeName != null)
-                            Text(
-                              _placeName!,
-                              style: const TextStyle(
-                                color: cText,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          if (_nearestTown != null)
-                            Text(
-                              'Población más cercana: $_nearestTown',
-                              style: const TextStyle(
-                                color: cMuted,
-                                fontSize: 12,
-                              ),
-                            ),
-                        ],
-                      ),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-              child: Row(
-                children: [
-                  if (widget.isOverridden)
-                    TextButton.icon(
-                      icon: const Icon(Icons.my_location, color: cMuted),
-                      label: const Text(
-                        'Usar mi posición',
-                        style: TextStyle(color: cMuted),
-                      ),
-                      onPressed: () =>
-                          Navigator.of(context).pop((lat: null, lon: null)),
-                    ),
-                  const Spacer(),
-                  FilledButton.icon(
-                    icon: const Icon(Icons.check),
-                    label: const Text('Usar esta ubicación'),
-                    onPressed: _picked == null
-                        ? null
-                        : () => Navigator.of(context).pop((
-                            lat: _picked!.latitude,
-                            lon: _picked!.longitude,
-                          )),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Sensor configuration dialog (CFG > Configurar sensores) ─────────────────
-class _SensorConfigDialog extends StatefulWidget {
-  const _SensorConfigDialog({required this.initial, required this.discover});
-  final SensorConfig initial;
-  final Future<SkDiscovery?> Function() discover;
-
-  @override
-  State<_SensorConfigDialog> createState() => _SensorConfigDialogState();
-}
-
-class _SensorConfigDialogState extends State<_SensorConfigDialog> {
-  late SensorConfig _cfg;
-  SkDiscovery? _discovery;
-  bool _loading = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _cfg = SensorConfig.fromJson(widget.initial.toJson());
-  }
-
-  Future<void> _discoverNow() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    final d = await widget.discover();
-    if (!mounted) return;
-    setState(() {
-      _loading = false;
-      if (d == null) {
-        _error =
-            'No se pudo conectar a Signal K (${'revisa host/puerto en CFG'})';
-        return;
-      }
-      _discovery = d;
-      _cfg.hasOutsideTemp = d.hasOutsideTemp;
-      _cfg.hasOutsidePressure = d.hasOutsidePressure;
-      for (final tc in d.tanks) {
-        final idx = _cfg.tanks.indexWhere(
-          (t) => t.type == tc.type && t.id == tc.id,
-        );
-        if (idx < 0) {
-          _cfg.tanks.add(
-            TankSlot(
-              type: tc.type,
-              id: tc.id,
-              groupLabel: '${tc.type} ${tc.id}',
-              capacityL: tc.capacityL ?? 0,
-              enabled: false,
-            ),
-          );
-        } else if (tc.capacityL != null && _cfg.tanks[idx].capacityL == 0) {
-          _cfg.tanks[idx].capacityL = tc.capacityL!;
-        }
-      }
-    });
-  }
-
-  List<String> get _batteryIdOptions {
-    final ids = {
-      ...?_discovery?.batteryIds,
-      _cfg.batteryHouseId,
-      _cfg.batteryStartId,
-    };
-    return ids.toList()..sort();
-  }
-
-  List<String?> get _solarOptions => [
-    null,
-    ...?_discovery?.solarPaths,
-    if (_cfg.solarPath != null) _cfg.solarPath,
-  ];
-  List<String?> get _fridgeOptions => [
-    null,
-    ...?_discovery?.fridgePaths,
-    if (_cfg.fridge1Path != null) _cfg.fridge1Path,
-    if (_cfg.fridge2Path != null) _cfg.fridge2Path,
-  ];
-  List<String?> get _depthOptions => [
-    null,
-    ...?_discovery?.depthPaths,
-    if (_cfg.depthPath != null) _cfg.depthPath,
-  ];
-  List<String?> get _engineOptions => [
-    null,
-    ...?_discovery?.enginePaths,
-    if (_cfg.enginePath != null) _cfg.enginePath,
-  ];
-
-  bool _showAllPaths = false;
-
-  static final RegExp _fridgePathRe = RegExp(
-    r'^environment\.(\w*fridge\w*)\.temperature$',
-    caseSensitive: false,
-  );
-  static final RegExp _tankPathRe = RegExp(
-    r'^tanks\.[^.]+\.[^.]+\.currentLevel$',
-  );
-  static final RegExp _enginePathRe = RegExp(r'^propulsion\.[^.]+\.runTime$');
-  // Only the specific sub-fields the app actually reads — a battery exposes
-  // many more (design specs, alarms, time remaining…) that we never touch,
-  // so highlighting the whole electrical.batteries.* subtree would light up
-  // paths that are irrelevant noise for mapping AWS/AWA/baterías/solar.
-  static const _usefulBatterySuffixes = [
-    '.voltage',
-    '.current',
-    '.capacity.stateOfCharge',
-    '.temperature',
-  ];
-  static const _navPaths = {
-    'navigation.position',
-    'navigation.speedOverGround',
-    'navigation.speedThroughWater',
-    'navigation.headingTrue',
-    'navigation.courseOverGroundTrue',
-    'navigation.attitude',
-    'navigation.attitude.roll',
-  };
-  static const _windPaths = {
-    'environment.wind.speedApparent',
-    'environment.wind.angleApparent',
-    'environment.wind.angleTrueWater',
-    'environment.wind.angleTrueGround',
-    'environment.wind.directionTrue',
-    'environment.wind.speedTrue',
-  };
-  static const _envPaths = {
-    'environment.water.temperature',
-    'environment.outside.temperature',
-    'environment.outside.humidity',
-    'environment.outside.pressure',
-    'environment.interior.temperature',
-    'environment.interior.humidity',
-    'environment.rpi.cpu.temperature',
-  };
-
-  /// Category for a discovered path — used only to filter which paths count
-  /// as "usable" in "solo los que usa la app" mode. The on-screen highlight
-  /// itself is just two colours (en uso / candidato), not one per category —
-  /// nine legend colours ate most of the panel's height, leaving almost no
-  /// room to actually see the path list.
-  String? _pathHint(String path) {
-    if (_navPaths.contains(path)) return 'Navegación';
-    if (_windPaths.contains(path)) {
-      return path.contains('Apparent')
-          ? (path.contains('speed') ? 'AWS' : 'AWA')
-          : 'Viento';
-    }
-    if (_envPaths.contains(path)) return 'Ambiente';
-    if (path.startsWith('electrical.batteries.') &&
-        _usefulBatterySuffixes.any((s) => path.endsWith(s))) {
-      return 'Batería';
-    }
-    if (path.startsWith('electrical.venus.')) return 'Venus';
-    if (_fridgePathRe.hasMatch(path)) return 'Nevera';
-    if (_tankPathRe.hasMatch(path)) return 'Tanque';
-    if (_enginePathRe.hasMatch(path)) return 'Horas motor';
-    final lower = path.toLowerCase();
-    if (lower.contains('solar') || lower.contains('panel')) return 'Solar';
-    if (lower.contains('depth')) return 'Profundidad';
-    return null;
-  }
-
-  /// True when [path] is exactly what the app is already configured to
-  /// read right now (a selected battery id's useful sub-fields, the chosen
-  /// solar/nevera/profundidad/tanque paths, or one of the always-on
-  /// hardcoded paths) — as opposed to merely *looking* like a good
-  /// candidate for one of those roles.
-  bool _isInUse(String path) {
-    if (_navPaths.contains(path) ||
-        _windPaths.contains(path) ||
-        _envPaths.contains(path)) {
-      return true;
-    }
-    if (path == 'electrical.venus.dcPower') return true;
-    for (final id in [
-      _cfg.batteryHouseId,
-      _cfg.batteryStartId,
-      'bowthruster',
-    ]) {
-      if (path.startsWith('electrical.batteries.$id.') &&
-          _usefulBatterySuffixes.any((s) => path.endsWith(s))) {
-        return true;
-      }
-    }
-    if (path == _cfg.solarPath ||
-        path == _cfg.fridge1Path ||
-        path == _cfg.fridge2Path ||
-        path == _cfg.depthPath ||
-        path == _cfg.enginePath) {
-      return true;
-    }
-    for (final t in _cfg.tanks.where((t) => t.enabled)) {
-      if (path == t.skPath) return true;
-    }
-    return false;
-  }
-
-  /// Human-readable labels for every path currently configured that the
-  /// last discovery run did NOT see — a stale/broken mapping (e.g. the boat
-  /// changed a device id) shows up as "no encontrado" instead of silently
-  /// just not updating.
-  List<String> get _missingConfiguredPaths {
-    final d = _discovery;
-    if (d == null) return const [];
-    final all = d.allPaths;
-    final missing = <String>[];
-    void check(String? label, String? path, {bool prefix = false}) {
-      if (path == null || path.isEmpty) return;
-      final found = prefix
-          ? all.any((p) => p.startsWith(path))
-          : all.contains(path);
-      if (!found) missing.add('$label ($path)');
-    }
-
-    check(
-      'Batería de servicio',
-      'electrical.batteries.${_cfg.batteryHouseId}.',
-      prefix: true,
-    );
-    check(
-      'Batería arranque',
-      'electrical.batteries.${_cfg.batteryStartId}.',
-      prefix: true,
-    );
-    check('Solar', _cfg.solarPath);
-    check('Nevera 1', _cfg.fridge1Path);
-    check('Nevera 2', _cfg.fridge2Path);
-    check('Profundidad', _cfg.depthPath);
-    check('Horas motor', _cfg.enginePath);
-    for (final t in _cfg.tanks.where((t) => t.enabled)) {
-      check(t.groupLabel, t.skPath);
-    }
-    return missing;
-  }
-
-  Widget _pathsPanel() {
-    if (_discovery == null) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(16),
-          child: Text(
-            'Pulsa "Buscar sensores" para descubrir los paths disponibles en tu Signal K.',
-            style: TextStyle(color: cMuted, fontSize: 13),
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
-    }
-    if (_discovery!.allPaths.isEmpty) {
-      return const Center(
-        child: Text(
-          'No se encontró ningún path.',
-          style: TextStyle(color: cMuted, fontSize: 13),
-        ),
-      );
-    }
-    final missing = _missingConfiguredPaths;
-    final shown = _showAllPaths
-        ? _discovery!.allPaths
-        : [
-            for (final p in _discovery!.allPaths)
-              if (_pathHint(p) != null) p,
-          ];
-    // A candidate device (not yet configured) shows up once per field it
-    // reports — a battery has .voltage/.current/…, a solar charger has
-    // voltage/panelPower/…, tanks have currentLevel, etc. For a candidate
-    // that's noise: what the user needs to see is "this device exists",
-    // not every field it happens to report. Trim to the device — the last
-    // dot-segment for most categories, or the known field suffix for
-    // batteries specifically (their useful field is itself compound, e.g.
-    // .capacity.stateOfCharge) — and de-duplicate; paths already in use
-    // keep showing their exact full path since that IS the field we read.
-    final displaySeen = <String>{};
-    final displayEntries = <({String text, bool inUse, bool candidate})>[];
-    for (final p in shown) {
-      final inUse = _isInUse(p);
-      final hint = _pathHint(p);
-      var text = p;
-      if (!inUse && hint == 'Batería') {
-        for (final suf in _usefulBatterySuffixes) {
-          if (p.endsWith(suf)) {
-            text = p.substring(0, p.length - suf.length);
-            break;
-          }
-        }
-      } else if (!inUse && hint != null) {
-        final idx = p.lastIndexOf('.');
-        if (idx > 0) text = p.substring(0, idx);
-      }
-      if (!displaySeen.add(text)) continue;
-      displayEntries.add((text: text, inUse: inUse, candidate: hint != null));
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                '${displayEntries.length} de ${_discovery!.allPaths.length} paths',
-                style: const TextStyle(
-                  color: cMuted,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            TextButton.icon(
-              icon: Icon(
-                _showAllPaths ? Icons.filter_alt_off : Icons.filter_alt,
-                size: 16,
-              ),
-              label: Text(
-                _showAllPaths ? 'Mostrando todos' : 'Solo los que usa la app',
-                style: const TextStyle(fontSize: 11),
-              ),
-              onPressed: () => setState(() => _showAllPaths = !_showAllPaths),
-            ),
-          ],
-        ),
-        Padding(
-          padding: const EdgeInsets.only(top: 2, bottom: 6),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 9,
-                height: 9,
-                margin: const EdgeInsets.only(right: 4),
-                decoration: const BoxDecoration(
-                  color: cGreen,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const Text(
-                'En uso',
-                style: TextStyle(
-                  color: cGreen,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 14),
-              Container(
-                width: 9,
-                height: 9,
-                margin: const EdgeInsets.only(right: 4),
-                decoration: const BoxDecoration(
-                  color: cOrange,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const Text(
-                'Candidato',
-                style: TextStyle(
-                  color: cOrange,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (missing.isNotEmpty)
-          Container(
-            width: double.infinity,
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: cRed.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: cRed.withValues(alpha: 0.4)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Configurados pero no encontrados:',
-                  style: TextStyle(
-                    color: cRed,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                for (final m in missing)
-                  Text(
-                    '• $m',
-                    style: const TextStyle(color: cRed, fontSize: 11),
-                  ),
-              ],
-            ),
-          ),
-        Expanded(
-          child: Scrollbar(
-            child: SingleChildScrollView(
-              child: SelectableText.rich(
-                TextSpan(
-                  children: [
-                    for (final e in displayEntries) ...[
-                      TextSpan(
-                        text: e.text,
-                        style: TextStyle(
-                          color: e.inUse
-                              ? cGreen
-                              : (e.candidate ? cOrange : cText),
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          fontWeight: (e.inUse || e.candidate)
-                              ? FontWeight.w700
-                              : FontWeight.normal,
-                        ),
-                      ),
-                      const TextSpan(text: '\n'),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    const lbl = TextStyle(
-      color: cMuted,
-      fontSize: 10,
-      letterSpacing: 1.1,
-      fontWeight: FontWeight.w700,
-    );
-    return Dialog.fullscreen(
-      backgroundColor: cBg,
-      child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Configurar sensores',
-                      style: TextStyle(
-                        color: cText,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close, color: cMuted),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // ── Left: discovery + paths panel ────────────────────────────
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: cPanel,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            OutlinedButton.icon(
-                              icon: _loading
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.wifi_find, size: 18),
-                              label: Text(
-                                _loading
-                                    ? 'Buscando…'
-                                    : 'Buscar sensores en Signal K',
-                              ),
-                              onPressed: _loading ? null : _discoverNow,
-                            ),
-                            if (_error != null)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Text(
-                                  _error!,
-                                  style: const TextStyle(
-                                    color: cRed,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ),
-                            const SizedBox(height: 10),
-                            Expanded(child: _pathsPanel()),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    // ── Right: sensor mapping form ───────────────────────────────
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('BATERÍAS', style: lbl),
-                            const SizedBox(height: 4),
-                            // Stacked, not side-by-side — two dropdowns
-                            // sharing a Row in this narrower right-hand
-                            // column overlapped/clipped each other.
-                            DropdownButtonFormField<String>(
-                              initialValue: _cfg.batteryHouseId,
-                              decoration: const InputDecoration(
-                                labelText: 'Servicio',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final id in _batteryIdOptions)
-                                  DropdownMenuItem(
-                                    value: id,
-                                    child: Text(
-                                      id,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) => setState(
-                                () => _cfg.batteryHouseId =
-                                    v ?? _cfg.batteryHouseId,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String>(
-                              initialValue: _cfg.batteryStartId,
-                              decoration: const InputDecoration(
-                                labelText: 'Arranque',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final id in _batteryIdOptions)
-                                  DropdownMenuItem(
-                                    value: id,
-                                    child: Text(
-                                      id,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) => setState(
-                                () => _cfg.batteryStartId =
-                                    v ?? _cfg.batteryStartId,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('SOLAR', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.solarPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de potencia solar',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _solarOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.solarPath = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('PROFUNDIDAD', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.depthPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de profundidad',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _depthOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.depthPath = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('HORAS DE MOTOR', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.enginePath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de horas de motor (runTime)',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _engineOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.enginePath = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('NEVERAS', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.fridge1Path,
-                              decoration: const InputDecoration(
-                                labelText: 'Nevera 1',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _fridgeOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguna',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.fridge1Path = v),
-                            ),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.fridge2Path,
-                              decoration: const InputDecoration(
-                                labelText: 'Nevera 2',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _fridgeOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguna',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.fridge2Path = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('TANQUES', style: lbl),
-                            const SizedBox(height: 4),
-                            if (_cfg.tanks.isEmpty)
-                              const Text(
-                                'Ninguno encontrado todavía — pulsa "Buscar sensores".',
-                                style: TextStyle(color: cMuted, fontSize: 12),
-                              ),
-                            for (final t in _cfg.tanks)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 2,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Checkbox(
-                                      value: t.enabled,
-                                      onChanged: (v) => setState(
-                                        () => t.enabled = v ?? false,
-                                      ),
-                                    ),
-                                    Expanded(
-                                      flex: 2,
-                                      child: TextFormField(
-                                        initialValue: t.groupLabel,
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Nombre',
-                                        ),
-                                        onChanged: (v) => t.groupLabel = v,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      '${t.type}.${t.id}',
-                                      style: const TextStyle(
-                                        color: cMuted,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    SizedBox(
-                                      width: 80,
-                                      child: TextFormField(
-                                        initialValue: '${t.capacityL}',
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Litros',
-                                        ),
-                                        keyboardType: TextInputType.number,
-                                        onChanged: (v) => t.capacityL =
-                                            int.tryParse(v) ?? t.capacityL,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancelar'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: () => Navigator.of(context).pop(_cfg),
-                    child: const Text('Guardar'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Host preset chip ─────────────────────────────────────────────────────────
-class _HostPresetChip extends StatelessWidget {
-  const _HostPresetChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-        decoration: BoxDecoration(
-          color: selected ? cCyan : cPanel2,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: selected ? cCyan : const Color(0xff303030),
-            width: 1.5,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              selected
-                  ? Icons.radio_button_checked
-                  : Icons.radio_button_unchecked,
-              size: 18,
-              color: selected ? cBg : cMuted,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? cBg : cText,
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Collapsed header bar (web only) ──────────────────────────────────────────
-// Replaces the floating reveal-handle overlay on web: that overlay sits on
-// top of the WebView's <iframe> (MAP/ANC), and taps landing on an iframe's
-// rectangle are delivered straight to the iframe's own document by the
-// browser, never reaching Flutter's canvas — so the handle never registers
-// a tap there. This bar takes real space in the Column layout instead,
-// pushing the WebView down so the tap target never overlaps the iframe.
-class _CollapsedHeaderBar extends StatelessWidget {
-  const _CollapsedHeaderBar({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    height: 24,
-    width: double.infinity,
-    color: cBg,
-    alignment: Alignment.topCenter,
-    child: GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      onVerticalDragUpdate: (d) {
-        if (d.delta.dy > 0) onTap();
-      },
-      child: Container(
-        width: 80,
-        height: 24,
-        alignment: Alignment.topCenter,
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.45),
-          borderRadius: const BorderRadius.vertical(
-            bottom: Radius.circular(12),
-          ),
-        ),
-        child: Container(
-          width: 48,
-          height: 4,
-          margin: const EdgeInsets.only(top: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.7),
-            borderRadius: BorderRadius.circular(2),
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-// ─── Header ───────────────────────────────────────────────────────────────────
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.pages,
-    required this.selected,
-    required this.status,
-    required this.ok,
-    required this.onSelect,
-    this.alarmPageIds = const {},
-    this.alarmCount = 0,
-    this.onBellTap,
-  });
-  final List<(String, IconData, Widget)> pages;
-  final int selected;
-  final String status;
-  final bool ok;
-  final ValueChanged<int> onSelect;
-  final Set<String> alarmPageIds;
-  final int alarmCount;
-  final VoidCallback? onBellTap;
-
-  Widget _tab(int i) {
-    final active = selected == i;
-    final alarming = alarmPageIds.contains(pages[i].$1);
-    final color = alarming ? cRed : (active ? cCyan : cMuted);
-    return GestureDetector(
-      onTap: () => onSelect(i),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: active
-            ? BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(color: alarming ? cRed : cCyan, width: 3),
-                ),
-              )
-            : null,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(pages[i].$2, size: 18, color: color),
-            const SizedBox(height: 2),
-            Text(
-              pages[i].$1,
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: active || alarming
-                    ? FontWeight.w800
-                    : FontWeight.w500,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 54,
-      color: const Color(0xff0e1a21),
-      child: Row(
-        children: [
-          Expanded(
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [for (var i = 0; i < pages.length; i++) _tab(i)],
-            ),
-          ),
-          if (kIsWeb) const _FullscreenButton(),
-          if (kIsWeb) const SizedBox(width: 8),
-          if (alarmCount > 0) ...[
-            GestureDetector(
-              onTap: onBellTap,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  const Icon(Icons.notifications_active, color: cRed),
-                  Positioned(
-                    right: -4,
-                    top: -4,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      decoration: const BoxDecoration(
-                        color: cRed,
-                        shape: BoxShape.circle,
-                      ),
-                      constraints: const BoxConstraints(
-                        minWidth: 16,
-                        minHeight: 16,
-                      ),
-                      child: Text(
-                        '$alarmCount',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-          ],
-          Icon(ok ? Icons.link : Icons.link_off, color: ok ? cGreen : cOrange),
-          const SizedBox(width: 8),
-          Text(
-            status,
-            style: TextStyle(
-              color: ok ? cGreen : cOrange,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(width: 14),
-        ],
-      ),
-    );
-  }
-}
-
-class _FullscreenButton extends StatefulWidget {
-  const _FullscreenButton();
-
-  @override
-  State<_FullscreenButton> createState() => _FullscreenButtonState();
-}
-
-class _FullscreenButtonState extends State<_FullscreenButton> {
-  bool _active = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _active = app_fullscreen.fullscreenActive;
-  }
-
-  Future<void> _toggle() async {
-    await app_fullscreen.toggleFullscreen();
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    if (mounted) setState(() => _active = app_fullscreen.fullscreenActive);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!app_fullscreen.fullscreenSupported) return const SizedBox.shrink();
-    return Tooltip(
-      message: _active ? 'Salir de pantalla completa' : 'Pantalla completa',
-      child: IconButton(
-        visualDensity: VisualDensity.compact,
-        iconSize: 20,
-        onPressed: _toggle,
-        icon: Icon(
-          _active ? Icons.fullscreen_exit : Icons.fullscreen,
-          color: cMuted,
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Attitude gauge (escora/cabeceo) — mimics a boat's plastic dual-scale
-// clinometer: a fine arc on top, a coarse arc below, each with a bead that
-// slides along it to the current reading ──────────────────────────────────
-// Live-updating dialog (ticks every 300ms) so the gauges track the boat's
-// motion in real time while open — this gets checked constantly underway,
-// so the "Calibrar" button lives here rather than buried in CFG.
-class _AttitudeGaugesDialog extends StatefulWidget {
-  const _AttitudeGaugesDialog({
-    required this.signalK,
-    required this.settings,
-    required this.onSettingsChanged,
-    required this.onCalibrate,
-  });
-  final SignalKModel signalK;
-  final SettingsModel settings;
-  final VoidCallback onSettingsChanged;
-  final void Function(BuildContext) onCalibrate;
-
-  @override
-  State<_AttitudeGaugesDialog> createState() => _AttitudeGaugesDialogState();
-}
-
-class _AttitudeGaugesDialogState extends State<_AttitudeGaugesDialog> {
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer.periodic(const Duration(milliseconds: 300), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final s = widget.settings;
-    final showCalibration = !kIsWeb && s.usePhoneHeel;
-    // Wide, side-by-side layout (gauges left, calibration right) instead of
-    // stacking everything in one column — that used to overflow a compact
-    // screen's dialog height and need a scroll with no visible hint that
-    // there was more below "Cerrar".
-    final maxW = MediaQuery.of(context).size.width - 48;
-    return AlertDialog(
-      backgroundColor: cPanel,
-      title: const Text('Escora y cabeceo', style: TextStyle(color: cText)),
-      content: SizedBox(
-        width: math.min(showCalibration ? 640 : 340, maxW),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AttitudeGauge(
-                    label: 'ESCORA',
-                    valueDeg: widget.signalK.heelDeg,
-                    fineRange: 5,
-                    coarseRange: 45,
-                    positiveLabel: 'E',
-                    negativeLabel: 'B',
-                  ),
-                  const SizedBox(height: 18),
-                  AttitudeGauge(
-                    label: 'CABECEO',
-                    valueDeg: widget.signalK.pitchDeg,
-                    fineRange: 5,
-                    coarseRange: 30,
-                    positiveLabel: 'PROA ARRIBA',
-                    negativeLabel: 'PROA ABAJO',
-                  ),
-                ],
-              ),
-            ),
-            if (showCalibration) ...[
-              const SizedBox(width: 16),
-              const VerticalDivider(color: cPanel2, width: 1),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          s.phoneAttitudeCalibrated
-                              ? Icons.check_circle
-                              : Icons.error_outline,
-                          color: s.phoneAttitudeCalibrated ? cGreen : cOrange,
-                          size: 16,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            s.phoneAttitudeCalibrated
-                                ? 'Calibrado para esta posición del dispositivo'
-                                : 'Sin calibrar — el dispositivo puede estar montado en cualquier posición; calibra antes de fiarte de la lectura',
-                            style: TextStyle(
-                              color: s.phoneAttitudeCalibrated
-                                  ? cMuted
-                                  : cOrange,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      icon: const Icon(Icons.tune, size: 18),
-                      label: Text(
-                        s.phoneAttitudeCalibrated
-                            ? 'Recalibrar (2 pasos)'
-                            : 'Calibrar (2 pasos)',
-                      ),
-                      onPressed: () => widget.onCalibrate(context),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Necesario si el dispositivo cambia de sitio o de orientación en el barco.',
-                      style: TextStyle(color: cMuted, fontSize: 11),
-                    ),
-                    if (s.phoneAttitudeCalibrated) ...[
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Checkbox(
-                            value: s.phoneAttitudeInvertRoll,
-                            onChanged: (v) {
-                              setState(
-                                () => s.phoneAttitudeInvertRoll = v ?? false,
-                              );
-                              widget.onSettingsChanged();
-                            },
-                          ),
-                          const Expanded(
-                            child: Text(
-                              'Invertir E/B (si la escora sale al revés)',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cerrar'),
-        ),
-      ],
-    );
-  }
-}
-
-// ─── 2-point attitude calibration wizard ──────────────────────────────────
-// Gravity alone, from a single level reading, only fixes 2 of the 3 degrees
-// of freedom of the device's mounting orientation — rotation about the
-// down axis (i.e. which way the device is "facing") is left undetermined,
-// which is exactly the ambiguity a fixed "pick X or Y axis" UI could never
-// resolve for an arbitrarily-mounted tablet. Step 2 fixes it one of two
-// ways, chosen on screen: comparing the device's own tilt-compensated
-// compass heading against Signal K's boat heading (needs a fresh heading,
-// no maneuvering — but a phone's magnetometer can be biased), or comparing
-// the lateral acceleration felt during a real turn against how much Signal
-// K says the boat's heading actually changed (no magnetometer, but needs
-// an actual turn under way — can't be faked by hand at a dock).
-class _AttitudeCalibrationWizard extends StatefulWidget {
-  const _AttitudeCalibrationWizard({
-    required this.getBoatHeadingDeg,
-    required this.onDone,
-  });
-  final double? Function() getBoatHeadingDeg;
-  final void Function(AttitudeCalibration calibration, double detailDeg) onDone;
-
-  @override
-  State<_AttitudeCalibrationWizard> createState() =>
-      _AttitudeCalibrationWizardState();
-}
-
-class _AttitudeCalibrationWizardState
-    extends State<_AttitudeCalibrationWizard> {
-  String? _method; // null = not chosen yet, 'heading' or 'turn'
-  int _step = 0; // 0 = level; then method-specific (see _capture)
-  bool _capturing = false;
-  String? _error;
-  String? _warning;
-  Vec3? _downVec;
-  Vec3 _magBias = const Vec3(0, 0, 0);
-
-  String get _noHeadingError =>
-      'No hay rumbo de Signal K reciente (menos de 8s) — comprueba que el barco/piloto automático estén conectados y enviando rumbo antes de este paso.';
-
-  bool get _needsHeadingNow =>
-      (_method == 'turn' && _step == 1) || (_method == 'heading' && _step == 2);
-
-  Future<void> _capture() async {
-    if (_needsHeadingNow && widget.getBoatHeadingDeg() == null) {
-      setState(() => _error = _noHeadingError);
-      return;
-    }
-    setState(() {
-      _capturing = true;
-      _error = null;
-      _warning = null;
-    });
-    if (_step == 0) {
-      final v = await captureAveragedGravity(
-        duration: const Duration(seconds: 3),
-      );
-      if (!mounted) return;
-      _downVec = v;
-      setState(() {
-        _capturing = false;
-        _step = 1;
-      });
-      return;
-    }
-    if (_method == 'turn') {
-      await _captureTurn();
-      return;
-    }
-    if (_step == 1) {
-      final bias = await captureMagBias(duration: const Duration(seconds: 12));
-      if (!mounted) return;
-      _magBias = bias;
-      setState(() {
-        _capturing = false;
-        _step = 2;
-      });
-      return;
-    }
-    await _captureHeading();
-  }
-
-  Future<void> _captureHeading() async {
-    final sample = await captureAccelAndMag(
-      duration: const Duration(seconds: 10),
-    );
-    final boatHeading = widget.getBoatHeadingDeg();
-    if (!mounted) return;
-    if (boatHeading == null) {
-      setState(() {
-        _capturing = false;
-        _error = 'Se perdió el rumbo de Signal K durante la captura — vuelve a intentarlo.';
-      });
-      return;
-    }
-    final correctedMag = sample.mag - _magBias;
-    // Earth's field is roughly 25-65 µT; well outside that range usually
-    // means magnetic interference (engine, speakers, metal mount) skewing
-    // the reading — not blocked, since real thresholds are hard to know
-    // without in-the-field data, but flagged so a bad calibration doesn't
-    // look silently trustworthy.
-    final magMagnitude = correctedMag.length;
-    if (magMagnitude < 15 || magMagnitude > 120) {
-      _warning =
-          'El magnetómetro dio una lectura ${magMagnitude.toStringAsFixed(0)} µT tras corregir el sesgo, fuera de lo normal — puede haber interferencia magnética cerca (motor, altavoces, metal). Si la escora sale rara, aleja el dispositivo de esas fuentes y recalibra.';
-    }
-    final down = _downVec!;
-    final right = down.cross(
-      forwardFromHeading(down, correctedMag, boatHeading),
-    );
-    Navigator.of(context).pop();
-    widget.onDone(AttitudeCalibration(down: down, right: right), boatHeading);
-  }
-
-  Future<void> _captureTurn() async {
-    final startHeading = widget.getBoatHeadingDeg()!;
-    final avgAccel = await captureAveragedAccel(
-      duration: const Duration(seconds: 6),
-    );
-    final endHeading = widget.getBoatHeadingDeg();
-    if (!mounted) return;
-    if (endHeading == null) {
-      setState(() {
-        _capturing = false;
-        _error = 'Se perdió el rumbo de Signal K durante la captura — vuelve a intentarlo.';
-      });
-      return;
-    }
-    var turnDeg = endHeading - startHeading;
-    while (turnDeg > 180) {
-      turnDeg -= 360;
-    }
-    while (turnDeg < -180) {
-      turnDeg += 360;
-    }
-    if (turnDeg.abs() < 20) {
-      setState(() {
-        _capturing = false;
-        _error =
-            'El barco solo giró ${turnDeg.abs().toStringAsFixed(0)}° — vira al menos 20-30° sin parar, siempre hacia el mismo lado, y vuelve a intentarlo.';
-      });
-      return;
-    }
-    final down = _downVec!;
-    final lateral = avgAccel - down * avgAccel.dot(down);
-    if (lateral.length < 0.15) {
-      setState(() {
-        _capturing = false;
-        _error = 'No se detectó suficiente aceleración lateral del viraje — prueba un giro más cerrado o más rápido.';
-      });
-      return;
-    }
-    // The accelerometer measures specific force, which points *outward*
-    // from the turn's center — opposite to the turn direction (the same
-    // reason you feel pushed toward the outside of a turn). Turning to
-    // starboard (heading increasing) means the reading points to port, so
-    // starboard is the opposite direction.
-    final outward = lateral.normalized;
-    final right = turnDeg > 0 ? outward * -1 : outward;
-    Navigator.of(context).pop();
-    widget.onDone(AttitudeCalibration(down: down, right: right), turnDeg);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_method == null) return _buildMethodChooser();
-    final totalSteps = _method == 'turn' ? 2 : 3;
-    String title;
-    String instructions;
-    if (_step == 0) {
-      title = 'Paso 1 de $totalSteps — Nivelado';
-      instructions = 'Con el barco lo más nivelado posible (amarrado o en calma), pulsa Capturar y no muevas el dispositivo durante 3 segundos.';
-    } else if (_method == 'turn') {
-      title = 'Paso 2 de $totalSteps — Viraje';
-      instructions = 'Navegando, pulsa Capturar y luego haz un viraje sostenido de al menos 20-30° (siempre hacia el mismo lado, sin parar) durante los 6 segundos siguientes. No hace falta escorar el barco a propósito.';
-    } else if (_step == 1) {
-      title = 'Paso 2 de $totalSteps — Calibrar brújula';
-      instructions = 'El magnetómetro del dispositivo necesita esto antes de fiarse de él (como al calibrar la brújula del móvil). Pulsa Capturar y mueve el dispositivo libremente en el aire, dibujando un 8, durante 12 segundos. No hace falta estar en el barco para este paso.';
-    } else {
-      title = 'Paso 3 de $totalSteps — Rumbo estable';
-      instructions = 'Navegando en línea recta con rumbo estable (sin virar), pulsa Capturar y no muevas el dispositivo durante 10 segundos. No hace falta escorar el barco.';
-    }
-    return AlertDialog(
-      backgroundColor: cPanel,
-      title: Text(title, style: const TextStyle(color: cText, fontSize: 16)),
-      content: SizedBox(
-        width: 320,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              instructions,
-              style: const TextStyle(color: cMuted, fontSize: 13),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 10),
-              Text(_error!, style: const TextStyle(color: cRed, fontSize: 12)),
-            ],
-            if (_warning != null) ...[
-              const SizedBox(height: 10),
-              Text(
-                _warning!,
-                style: const TextStyle(color: cOrange, fontSize: 12),
-              ),
-            ],
-            const SizedBox(height: 16),
-            Center(
-              child: _capturing
-                  ? const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8),
-                      child: CircularProgressIndicator(color: cCyan),
-                    )
-                  : FilledButton(
-                      onPressed: _capture,
-                      child: Text(
-                        _step == 0
-                            ? 'Capturar (3 s)'
-                            : _method == 'turn'
-                            ? 'Capturar (6 s)'
-                            : _step == 1
-                            ? 'Capturar (12 s)'
-                            : 'Capturar (10 s)',
-                      ),
-                    ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _capturing
-              ? null
-              : () {
-                  if (_step >= 1) {
-                    setState(() {
-                      _step = 0;
-                      _method = null;
-                      _error = null;
-                      _warning = null;
-                    });
-                  } else {
-                    Navigator.of(context).pop();
-                  }
-                },
-          child: Text(_step >= 1 ? 'Cambiar método' : 'Cancelar'),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMethodChooser() {
-    Widget methodCard({
-      required String method,
-      required String title,
-      required String description,
-    }) => InkWell(
-      onTap: () => setState(() => _method = method),
-      borderRadius: BorderRadius.circular(10),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(12),
-        margin: const EdgeInsets.only(bottom: 10),
-        decoration: BoxDecoration(
-          color: cPanel2,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: cPanel2, width: 1.4),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                color: cCyan,
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              description,
-              style: const TextStyle(color: cMuted, fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-    );
-    return AlertDialog(
-      backgroundColor: cPanel,
-      title: const Text(
-        'Elige cómo calibrar',
-        style: TextStyle(color: cText, fontSize: 16),
-      ),
-      content: SizedBox(
-        width: 340,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            methodCard(
-              method: 'heading',
-              title: 'Rumbo estable (recomendado)',
-              description: 'Calibra la brújula del dispositivo (muévelo en el aire 12 s) y luego navega en línea recta 10 s. Puede fallar igualmente si hay mucha interferencia magnética cerca (motor, altavoces).',
-            ),
-            methodCard(
-              method: 'turn',
-              title: 'Viraje real',
-              description: 'Haz un viraje de 20-30° mientras navegas. No usa la brújula del dispositivo, pero solo funciona con el barco moviéndose de verdad — no se puede simular en el muelle.',
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancelar'),
-        ),
-      ],
-    );
-  }
-}
-
-class AttitudeGauge extends StatelessWidget {
-  const AttitudeGauge({
-    super.key,
-    required this.label,
-    required this.valueDeg,
-    required this.fineRange,
-    required this.coarseRange,
-    required this.positiveLabel,
-    required this.negativeLabel,
-  });
-  final String label;
-  final double? valueDeg;
-  final double fineRange;
-  final double coarseRange;
-  final String positiveLabel;
-  final String negativeLabel;
-
-  @override
-  Widget build(BuildContext context) {
-    final v = valueDeg;
-    return Column(
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: cMuted,
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.2,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          v != null ? '${v.abs().toStringAsFixed(1)}°' : '--°',
-          style: TextStyle(
-            color: v == null ? cMuted : (v >= 0 ? cGreen : cRed),
-            fontSize: 44,
-            fontWeight: FontWeight.w900,
-            height: 1.0,
-          ),
-        ),
-        Text(
-          v != null ? (v >= 0 ? positiveLabel : negativeLabel) : '',
-          style: const TextStyle(
-            color: cMuted,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 6),
-        SizedBox(
-          height: 128,
-          width: double.infinity,
-          child: CustomPaint(
-            painter: _DualArcPainter(
-              valueDeg: v,
-              fineRange: fineRange,
-              coarseRange: coarseRange,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _DualArcPainter extends CustomPainter {
-  _DualArcPainter({
-    required this.valueDeg,
-    required this.fineRange,
-    required this.coarseRange,
-  });
-  final double? valueDeg;
-  final double fineRange;
-  final double coarseRange;
-
-  Offset _pointAt(Size size, double top, double curveDepth, double t) {
-    final halfW = size.width / 2 - 22;
-    final x = size.width / 2 + t * halfW;
-    final y = top + curveDepth * (1 - t * t);
-    return Offset(x, y);
-  }
-
-  void _drawArc(
-    Canvas canvas,
-    Size size,
-    double top,
-    double curveDepth,
-    double range,
-    double majorStep,
-    double minorStep,
-  ) {
-    Offset point(double t) => _pointAt(size, top, curveDepth, t);
-
-    // The channel itself, as a stroked path following the curve — shaded to
-    // read as a concave groove (dark at the rim, lit in the middle) rather
-    // than a raised bar, so the bead can look like it's resting inside it.
-    final tubePath = Path();
-    const steps = 60;
-    for (var i = 0; i <= steps; i++) {
-      final t = -1.0 + 2.0 * i / steps;
-      final p = point(t);
-      if (i == 0) {
-        tubePath.moveTo(p.dx, p.dy);
-      } else {
-        tubePath.lineTo(p.dx, p.dy);
-      }
-    }
-    final tubeBounds = tubePath.getBounds();
-    canvas.drawPath(
-      tubePath,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 16
-        ..strokeCap = StrokeCap.round
-        ..color = const Color(0xff1c262b),
-    );
-    canvas.drawPath(
-      tubePath,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 10
-        ..strokeCap = StrokeCap.round
-        ..shader = ui.Gradient.linear(
-          Offset(tubeBounds.center.dx, tubeBounds.top),
-          Offset(tubeBounds.center.dx, tubeBounds.bottom + 8),
-          [
-            const Color(0xff35464e),
-            const Color(0xff5c7079),
-            const Color(0xff2c3b42),
-          ],
-          [0.0, 0.55, 1.0],
-        ),
-    );
-
-    // Ticks + labels, minor step first so major ticks/labels paint on top.
-    for (var deg = -range; deg <= range + 0.001; deg += minorStep) {
-      final isMajor =
-          (deg / majorStep - (deg / majorStep).round()).abs() < 1e-6;
-      final t = (deg / range).clamp(-1.0, 1.0);
-      final p = point(t);
-      final p1 = point((t - 0.01).clamp(-1.0, 1.0));
-      final p2 = point((t + 0.01).clamp(-1.0, 1.0));
-      final tangent = p2 - p1;
-      final tangentLen = tangent.distance;
-      final normal = tangentLen == 0
-          ? const Offset(0, 1)
-          : Offset(-tangent.dy, tangent.dx) / tangentLen;
-      final tickLen = isMajor ? 9.0 : 5.0;
-      final tickEnd = p + normal * tickLen;
-      canvas.drawLine(
-        p,
-        tickEnd,
-        Paint()
-          ..color = (isMajor ? cText : cMuted).withValues(
-            alpha: isMajor ? 0.85 : 0.5,
-          )
-          ..strokeWidth = isMajor ? 1.6 : 1.0,
-      );
-      if (isMajor) {
-        final tp = TextPainter(
-          text: TextSpan(
-            text: deg.abs().round().toString(),
-            style: const TextStyle(
-              color: cMuted,
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        final labelPos = p + normal * (tickLen + 3);
-        tp.paint(canvas, Offset(labelPos.dx - tp.width / 2, labelPos.dy));
-      }
-    }
-
-    // Bead marking the current reading, clamped to the ends of the scale —
-    // drawn to sit *inside* the channel (small contact shadow rather than a
-    // floating drop shadow, glossy radial fill) with the channel's near rim
-    // re-stroked on top so it visually overlaps the bead's upper edge.
-    if (valueDeg != null) {
-      final t = (valueDeg! / range).clamp(-1.0, 1.0);
-      final p = point(t);
-      const ballRadius = 5.0;
-      canvas.drawOval(
-        Rect.fromCenter(
-          center: p + const Offset(0, 1.5),
-          width: ballRadius * 1.8,
-          height: ballRadius * 0.9,
-        ),
-        Paint()..color = Colors.black.withValues(alpha: 0.4),
-      );
-      canvas.drawCircle(
-        p,
-        ballRadius,
-        Paint()
-          ..shader = ui.Gradient.radial(p + const Offset(-1.6, -1.8), 7, [
-            const Color(0xff3a3a3a),
-            const Color(0xff0c0c0c),
-          ]),
-      );
-      canvas.drawCircle(
-        p + const Offset(-1.4, -1.6),
-        1.3,
-        Paint()..color = Colors.white.withValues(alpha: 0.55),
-      );
-      // Re-stroke a thin highlight along the channel's top edge over the
-      // bead, so the rim reads as being in front of it (i.e. the bead sits
-      // recessed in the groove instead of floating above the surface).
-      canvas.drawPath(
-        tubePath,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.6
-          ..strokeCap = StrokeCap.round
-          ..color = Colors.white.withValues(alpha: 0.22),
-      );
-    }
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final fineDepth = size.height * 0.22;
-    final coarseDepth = size.height * 0.30;
-    _drawArc(canvas, size, 6, fineDepth, fineRange, fineRange, 1);
-    _drawArc(
-      canvas,
-      size,
-      size.height * 0.56,
-      coarseDepth,
-      coarseRange,
-      coarseRange / 3,
-      coarseRange / 9,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _DualArcPainter oldDelegate) =>
-      oldDelegate.valueDeg != valueDeg ||
-      oldDelegate.fineRange != fineRange ||
-      oldDelegate.coarseRange != coarseRange;
-}
-
-// ─── MetricCard ───────────────────────────────────────────────────────────────
-class MetricCard extends StatelessWidget {
-  const MetricCard({
-    super.key,
-    required this.title,
-    required this.value,
-    required this.color,
-    this.unit,
-    this.subtitle,
-    this.zoom,
-    this.onTap,
-    this.onLongPress,
-    this.onDoubleTap,
-    this.onSecondaryTap,
-    this.graphMetrics,
-    this.trend,
-    this.bigLines,
-  });
-
-  final String title;
-  final String value;
-  final String? unit;
-  final String? subtitle;
-  final Color color;
-  final int? trend; // -1 down, 0 flat, 1 up
-  final List<String>? bigLines;
-  final void Function(
-    String title,
-    String value,
-    Color color, {
-    String? subtitle,
-    List<MetricDef>? graphMetrics,
-  })?
-  zoom;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-  final VoidCallback? onDoubleTap;
-  final VoidCallback? onSecondaryTap;
-  final List<MetricDef>? graphMetrics;
-
-  @override
-  Widget build(BuildContext context) {
-    return CardShell(
-      onTap:
-          onTap ??
-          () => zoom?.call(
-            title,
-            value,
-            color,
-            subtitle: subtitle,
-            graphMetrics: graphMetrics,
-          ),
-      onLongPress: onLongPress,
-      onDoubleTap: onDoubleTap,
-      onSecondaryTap: onSecondaryTap,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: cMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-                const Spacer(),
-                if (unit != null)
-                  Text(
-                    unit!,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 26,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                if (graphMetrics != null) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.show_chart,
-                    size: 13,
-                    color: color.withValues(alpha: 0.5),
-                  ),
-                ],
-                if (trend != null && trend != 0) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    trend! > 0 ? Icons.arrow_upward : Icons.arrow_downward,
-                    size: 15,
-                    color: color,
-                  ),
-                ],
-              ],
-            ),
-            Expanded(
-              child: Center(
-                child: bigLines != null
-                    ? FittedBox(
-                        fit: BoxFit.contain,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (final line in bigLines!)
-                              Text(
-                                line,
-                                style: TextStyle(
-                                  fontSize: 90,
-                                  fontWeight: FontWeight.w900,
-                                  color: color,
-                                  height: 1.15,
-                                ),
-                              ),
-                          ],
-                        ),
-                      )
-                    : FittedBox(
-                        fit: BoxFit.contain,
-                        child: Text(
-                          value,
-                          style: TextStyle(
-                            fontSize: 300,
-                            fontWeight: FontWeight.w900,
-                            color: color,
-                            height: 1.0,
-                          ),
-                        ),
-                      ),
-              ),
-            ),
-            if (subtitle != null)
-              Center(
-                child: Text(
-                  subtitle!,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: cMuted,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Graph dialog ─────────────────────────────────────────────────────────────
-class GraphDialog extends StatefulWidget {
-  const GraphDialog({
-    super.key,
-    required this.metrics,
-    required this.historySource,
-    required this.influxHost,
-    required this.influxOrg,
-    required this.influxToken,
-    required this.skHost,
-    required this.skPort,
-    required this.skAuthBase64,
-    this.bucket = influxBucketDefault,
-    this.archiveBucket = influxBucketDefault,
-    this.demo = false,
-    this.settings,
-  });
-  final List<MetricDef> metrics;
-  final String historySource; // 'auto' | 'influx' | 'sk'
-  final String influxHost;
-  final String influxOrg;
-  final String influxToken;
-  final String skHost;
-  final int skPort;
-  final String skAuthBase64;
-  final String bucket;
-  final String archiveBucket;
-  final bool demo;
-  // Only needed for the "Informe de rendimiento" button — null hides it
-  // (e.g. call sites that don't have the full SettingsModel handy).
-  final SettingsModel? settings;
-
-  @override
-  State<GraphDialog> createState() => _GraphDialogState();
-}
-
-typedef AppRange = ({String label, String flux, String agg, bool longRange});
-const appRanges = <AppRange>[
-  (label: '1h', flux: '-1h', agg: '10s', longRange: false),
-  (label: '6h', flux: '-6h', agg: '30s', longRange: false),
-  (label: '12h', flux: '-12h', agg: '1m', longRange: false),
-  (label: '24h', flux: '-24h', agg: '2m', longRange: false),
-  (label: '48h', flux: '-48h', agg: '5m', longRange: false),
-  (label: '7d', flux: '-7d', agg: '15m', longRange: true),
-  (label: '1 mes', flux: '-30d', agg: '1h', longRange: true),
-];
-
-// Signal K sources (KIP/SQLite) sample far more densely than InfluxDB's
-// aggregated buckets and only retain a short window, so there's no reason
-// to downsample as conservatively as the Influx `agg` steps above — use a
-// finer resolution per range instead of reusing the Influx one.
-const _skAgg = <String, String>{
-  '1h': '2s',
-  '6h': '10s',
-  '12h': '20s',
-  '24h': '30s',
-  '48h': '1m',
-  '7d': '5m',
-  '1 mes': '15m',
-};
-
-class _GraphDialogState extends State<GraphDialog> {
-  int _mIdx = 0;
-  // Default range stays 24h (now index 3, after the new 1h/6h/12h buttons).
-  int _rIdx = 3;
-  bool _histogramMode = false;
-  List<GraphPoint> _points = [];
-  bool _loading = false;
-  String? _error;
-  bool _usedSk = false;
-  // Per-range data availability when the Signal K History API (KIP/SQLite)
-  // is in play — null = not checked yet, true/false once known. A short
-  // per-series retention (KIP defaults to 24h) means 48h/7d/1mes routinely
-  // come back empty, so those range buttons get disabled instead of looking
-  // clickable and then silently showing nothing.
-  List<bool?> _skRangeAvailable = List.filled(appRanges.length, null);
-
-  MetricDef get _def => widget.metrics[_mIdx];
-
-  @override
-  void initState() {
-    super.initState();
-    _fetch();
-  }
-
-  Future<void> _fetch() async {
-    if (!mounted) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final r = appRanges[_rIdx];
-      final (pts, usedSk) = widget.demo
-          ? (demoGraphSeries(_def, r.flux, r.agg), false)
-          : await _queryHistory(r);
-      if (!mounted) return;
-      setState(() {
-        _points = pts;
-        _loading = false;
-        _usedSk = usedSk;
-        _skRangeAvailable[_rIdx] = usedSk ? pts.isNotEmpty : null;
-      });
-      if (usedSk) unawaited(_checkOtherSkRanges());
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  // After landing on SK/KIP data for the current range, silently probe the
-  // other ranges so their buttons can be greyed out up front instead of
-  // the user tapping into a range that's always going to come back empty.
-  Future<void> _checkOtherSkRanges() async {
-    for (var i = 0; i < appRanges.length; i++) {
-      if (i == _rIdx || _skRangeAvailable[i] != null) continue;
-      try {
-        final pts = await _fetchSk(appRanges[i]);
-        if (mounted) setState(() => _skRangeAvailable[i] = pts.isNotEmpty);
-      } catch (_) {
-        if (mounted) setState(() => _skRangeAvailable[i] = false);
-      }
-    }
-  }
-
-  Future<List<GraphPoint>> _fetchInflux(AppRange r) => influxQuery(
-    host: widget.influxHost,
-    org: widget.influxOrg,
-    token: widget.influxToken,
-    def: _def,
-    fluxRange: r.flux,
-    aggEvery: r.agg,
-    bucket: r.longRange ? widget.archiveBucket : widget.bucket,
-  );
-
-  Future<List<GraphPoint>> _fetchSk(AppRange r) => skHistoryQuery(
-    host: widget.skHost,
-    port: widget.skPort,
-    authBase64: widget.skAuthBase64,
-    def: _def,
-    range: parseFluxRange(r.flux),
-    resolution: parseAggEvery(_skAgg[r.label] ?? r.agg),
-  );
-
-  Future<(List<GraphPoint>, bool)> _queryHistory(AppRange r) async {
-    switch (widget.historySource) {
-      case 'influx':
-        return (await _fetchInflux(r), false);
-      case 'sk':
-        return (await _fetchSk(r), true);
-      default: // 'auto' — prefer InfluxDB (richer/longer history), fall back
-        // to the Signal K History API (e.g. KIP/SQLite) if it fails.
-        try {
-          return (await _fetchInflux(r), false);
-        } catch (_) {
-          return (await _fetchSk(r), true);
-        }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: cBg,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopBar(),
-            if (widget.metrics.length > 1) _buildMetricTabs(),
-            Expanded(child: _buildBody()),
-            if (_points.isNotEmpty) _buildStats(),
-            const SizedBox(height: 10),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTopBar() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.arrow_back, color: cMuted),
-            onPressed: () => Navigator.pop(context),
-          ),
-          Container(
-            width: 44,
-            height: 6,
-            decoration: BoxDecoration(
-              color: _def.color,
-              borderRadius: BorderRadius.circular(3),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              _def.label,
-              style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w700,
-                color: cText,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          // Toggle between the line chart and a distribution histogram
-          // ("% of time spent in each value range") over the same time
-          // window/range buttons.
-          IconButton(
-            icon: Icon(
-              _histogramMode ? Icons.show_chart : Icons.bar_chart,
-              color: _def.color,
-            ),
-            tooltip: _histogramMode
-                ? 'Ver gráfica de línea'
-                : 'Ver distribución',
-            onPressed: () => setState(() => _histogramMode = !_histogramMode),
-          ),
-          if (widget.settings != null)
-            IconButton(
-              icon: Icon(Icons.picture_as_pdf, color: _def.color),
-              tooltip: 'Informe de rendimiento (${appRanges[_rIdx].label})',
-              onPressed: () => openPerformanceReport(
-                context,
-                settings: widget.settings!,
-                range: appRanges[_rIdx],
-              ),
-            ),
-          // Range buttons — greyed out and untappable once we know (from a
-          // Signal K/KIP probe) that range has no data at all for this
-          // series. Horizontally scrollable so adding more ranges never
-          // overflows the bar on a narrow screen.
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (var i = 0; i < appRanges.length; i++)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 5),
-                    child: GestureDetector(
-                      onTap: _skRangeAvailable[i] == false
-                          ? null
-                          : () {
-                              if (_rIdx != i) {
-                                setState(() => _rIdx = i);
-                                _fetch();
-                              }
-                            },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: _rIdx == i ? _def.color : cPanel2,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          appRanges[i].label,
-                          style: TextStyle(
-                            color: _skRangeAvailable[i] == false
-                                ? const Color(0xff445560)
-                                : (_rIdx == i ? cBg : cMuted),
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMetricTabs() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-      child: Row(
-        children: [
-          for (var i = 0; i < widget.metrics.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: GestureDetector(
-                onTap: () {
-                  if (_mIdx != i) {
-                    setState(() {
-                      _mIdx = i;
-                      _skRangeAvailable = List.filled(appRanges.length, null);
-                    });
-                    _fetch();
-                  }
-                },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 7,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _mIdx == i ? widget.metrics[i].color : cPanel,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _mIdx == i
-                          ? widget.metrics[i].color
-                          : const Color(0xff2a3a44),
-                    ),
-                  ),
-                  child: Text(
-                    widget.metrics[i].label,
-                    style: TextStyle(
-                      color: _mIdx == i ? cBg : cText,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBody() {
-    if (_loading) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: _def.color),
-            const SizedBox(height: 12),
-            Text(
-              'Cargando datos…',
-              style: TextStyle(color: _def.color.withValues(alpha: 0.7)),
-            ),
-          ],
-        ),
-      );
-    }
-    if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.wifi_off, color: cOrange, size: 48),
-              const SizedBox(height: 12),
-              const Text(
-                'Error obteniendo histórico',
-                style: TextStyle(color: cOrange, fontSize: 18),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                widget.historySource == 'sk'
-                    ? widget.skHost
-                    : widget.influxHost,
-                style: const TextStyle(color: cMuted, fontSize: 13),
-              ),
-              const SizedBox(height: 8),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Text(
-                    _error!,
-                    style: const TextStyle(color: cRed, fontSize: 11),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.refresh),
-                label: const Text('Reintentar'),
-                onPressed: _fetch,
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-    // A KIP series with genuinely no data even at 24h isn't a temporary gap —
-    // it means this path was never added to a widget in a KIP screen, so
-    // KIP never started sampling it at all. Say so instead of "sin datos".
-    if (_points.isEmpty && _usedSk && _skRangeAvailable[0] == false) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.info_outline, color: cMuted, size: 40),
-              const SizedBox(height: 12),
-              const Text(
-                'Sin histórico en KIP para esta serie',
-                style: TextStyle(color: cMuted, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Añade "${_def.skPath}" a un widget en alguna pantalla de KIP para que empiece a registrarla.',
-                style: const TextStyle(color: cMuted, fontSize: 12),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-    if (_points.isEmpty) {
-      return const Center(
-        child: Text('Sin datos', style: TextStyle(color: cMuted, fontSize: 24)),
-      );
-    }
-    if (_histogramMode) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-        child: _HistogramChart(
-          values: _points.map((p) => p.value).toList(),
-          unit: _def.unit,
-          color: _def.color,
-        ),
-      );
-    }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 4, 16, 4),
-      child: LineGraph(
-        points: _points,
-        color: _def.color,
-        unit: _def.unit,
-        windowStart: DateTime.now().subtract(
-          parseFluxRange(appRanges[_rIdx].flux),
-        ),
-        windowEnd: DateTime.now(),
-        expectedStepMs: parseAggEvery(
-          _usedSk
-              ? (_skAgg[appRanges[_rIdx].label] ?? appRanges[_rIdx].agg)
-              : appRanges[_rIdx].agg,
-        ).inMilliseconds.toDouble(),
-      ),
-    );
-  }
-
-  static final RegExp _engineRunTimeRe = RegExp(r'^propulsion\.[^.]+\.runTime');
-
-  Widget _buildStats() {
-    final values = _points.map((p) => p.value).toList();
-    final current = values.last;
-    final minV = values.reduce(math.min);
-    final maxV = values.reduce(math.max);
-    // Engine hours is a lifetime odometer-style counter, not a value that
-    // fluctuates — "min/max/trend" is meaningless for it. What's actually
-    // useful is how much it grew during the selected period.
-    if (_engineRunTimeRe.hasMatch(_def.skPath)) {
-      final usedH = values.last - values.first;
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(
-          children: [
-            Text(
-              'Uso en el periodo: ${usedH.toStringAsFixed(1)} h',
-              style: const TextStyle(
-                color: cText,
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const Spacer(),
-            Text(
-              '${current.toStringAsFixed(1)} h totales',
-              style: TextStyle(
-                color: _def.color,
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    final q = math.max(1, values.length ~/ 4);
-    final earlySum = values.take(q).fold(0.0, (a, b) => a + b);
-    final lateSum = values.skip(values.length - q).fold(0.0, (a, b) => a + b);
-    final diff = lateSum / q - earlySum / q;
-    final thr = (maxV - minV) * 0.1;
-    final trendStr = diff > thr
-        ? '↑ Subiendo'
-        : diff < -thr
-        ? '↓ Bajando'
-        : '→ Estable';
-    final trendColor = diff > thr
-        ? cRed
-        : diff < -thr
-        ? cGreen
-        : cMuted;
-    final u = _def.unit;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: Row(
-        children: [
-          Text(
-            trendStr,
-            style: TextStyle(
-              color: trendColor,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const Spacer(),
-          Text(
-            '${current.toStringAsFixed(1)} $u',
-            style: TextStyle(
-              color: _def.color,
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const Spacer(),
-          Text(
-            'Min ${minV.toStringAsFixed(1)}  Max ${maxV.toStringAsFixed(1)} $u',
-            style: const TextStyle(color: cMuted, fontSize: 13),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Distribution histogram (% of time spent in each value range) ─────────────
-class _HistogramChart extends StatelessWidget {
-  const _HistogramChart({
-    required this.values,
-    required this.unit,
-    required this.color,
-  });
-  final List<double> values;
-  final String unit;
-  final Color color;
-
-  // A step that divides the observed range into whole-number bins (e.g.
-  // wind in 2kt steps, not "6.3–8.7kt") — chosen from the span so there are
-  // roughly 6-10 bins regardless of whether the metric spans 5 units or 50.
-  static int _niceStep(double span) {
-    if (span <= 8) return 1;
-    if (span <= 16) return 2;
-    if (span <= 40) return 5;
-    if (span <= 80) return 10;
-    return 20;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final minV = values.reduce(math.min);
-    final maxV = values.reduce(math.max);
-    final span = maxV - minV;
-    final step = _niceStep(span);
-    final lowStart = (minV / step).floor() * step;
-    final binCount = span > 0
-        ? ((maxV - lowStart) / step).ceil().clamp(1, 20)
-        : 1;
-    final counts = List<int>.filled(binCount, 0);
-    for (final v in values) {
-      final idx = span > 0
-          ? math.min(binCount - 1, ((v - lowStart) / step).floor())
-          : 0;
-      counts[idx]++;
-    }
-    final total = values.length;
-    final maxCount = counts.reduce(math.max);
-
-    return Column(
-      children: [
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              for (var i = 0; i < binCount; i++)
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 3),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        Text(
-                          counts[i] == 0
-                              ? ''
-                              : '${(counts[i] * 100 / total).round()}%',
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Expanded(
-                          child: FractionallySizedBox(
-                            alignment: Alignment.bottomCenter,
-                            heightFactor: maxCount == 0
-                                ? 0.0
-                                : math.max(0.02, counts[i] / maxCount),
-                            child: AnimatedContainer(
-                              duration: const Duration(milliseconds: 200),
-                              decoration: BoxDecoration(
-                                color: counts[i] == 0 ? cPanel2 : color,
-                                borderRadius: const BorderRadius.vertical(
-                                  top: Radius.circular(3),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            for (var i = 0; i < binCount; i++)
-              Expanded(
-                child: Text(
-                  '${(lowStart + step * i).round()}'
-                  '${span > 0 ? '–${(lowStart + step * (i + 1)).round()}' : ''}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: cMuted, fontSize: 10),
-                ),
-              ),
-          ],
-        ),
-        Text(unit, style: const TextStyle(color: cMuted, fontSize: 10)),
-      ],
-    );
-  }
-}
-
-// ─── Line graph ───────────────────────────────────────────────────────────────
-class LineGraph extends StatefulWidget {
-  const LineGraph({
-    super.key,
-    required this.points,
-    required this.color,
-    this.unit = '',
-    required this.windowStart,
-    required this.windowEnd,
-    required this.expectedStepMs,
-  });
-  final List<GraphPoint> points;
-  final Color color;
-  final String unit;
-  // The x-axis always spans the *requested* range (24h/48h/7d/1 mes), not
-  // just however much data actually came back — a sparse history source
-  // (e.g. KIP's short retention) used to make the axis silently shrink to
-  // fit only the available span, stretching one real day across the full
-  // width and making it look like "1 mes" had a month of data.
-  final DateTime windowStart;
-  final DateTime windowEnd;
-  // Gaps between consecutive points bigger than ~1.8x this get drawn as a
-  // break in the line instead of a straight connector, so missing data
-  // reads as missing rather than a plausible-looking flat/sloped segment.
-  final double expectedStepMs;
-  @override
-  State<LineGraph> createState() => _LineGraphState();
-}
-
-class _LineGraphState extends State<LineGraph> {
-  GraphPoint? _sel;
-
-  static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0;
-
-  void _pick(Offset local, Size size) {
-    final pL = _lPad, pR = size.width - _rPad;
-    if (local.dx < pL || local.dx > pR) return;
-    final pts = widget.points;
-    if (pts.isEmpty) return;
-    final tFirst = widget.windowStart.millisecondsSinceEpoch.toDouble();
-    final tLast = widget.windowEnd.millisecondsSinceEpoch.toDouble();
-    final t = tFirst + (local.dx - pL) / (pR - pL) * (tLast - tFirst);
-    GraphPoint? best;
-    var bestD = double.infinity;
-    for (final p in pts) {
-      final d = (p.time.millisecondsSinceEpoch - t).abs().toDouble();
-      if (d < bestD) {
-        bestD = d;
-        best = p;
-      }
-    }
-    setState(() => _sel = best);
-  }
-
-  Widget _tooltip(GraphPoint sel, Size size) {
-    final dt = sel.time.toLocal();
-    final dateStr =
-        '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')} '
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    final valStr = '${sel.value.toStringAsFixed(1)} ${widget.unit}';
-    final tFirst = widget.windowStart.millisecondsSinceEpoch.toDouble();
-    final tLast = widget.windowEnd.millisecondsSinceEpoch.toDouble();
-    final pL = _lPad, pR = size.width - _rPad;
-    final cx =
-        pL +
-        (sel.time.millisecondsSinceEpoch - tFirst) /
-            (tLast - tFirst).clamp(1, double.infinity) *
-            (pR - pL);
-    const w = 140.0;
-    var left = cx - w / 2;
-    left = left.clamp(pL, pR - w);
-    return Positioned(
-      left: left,
-      top: _tPad + 4,
-      child: IgnorePointer(
-        child: Container(
-          width: w,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xff0d1e2c).withValues(alpha: 0.95),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: widget.color.withValues(alpha: 0.7),
-              width: 1.5,
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                dateStr,
-                style: const TextStyle(color: cMuted, fontSize: 11),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                valStr,
-                style: TextStyle(
-                  color: widget.color,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (ctx, c) {
-      final size = Size(c.maxWidth, c.maxHeight);
-      return GestureDetector(
-        onTapDown: (e) => _pick(e.localPosition, size),
-        onPanUpdate: (e) => _pick(e.localPosition, size),
-        onTapUp: (_) => setState(() => _sel = null),
-        onPanEnd: (_) => setState(() => _sel = null),
-        child: Stack(
-          children: [
-            CustomPaint(
-              painter: _LineGraphPainter(
-                points: widget.points,
-                color: widget.color,
-                selected: _sel,
-                windowStart: widget.windowStart,
-                windowEnd: widget.windowEnd,
-                expectedStepMs: widget.expectedStepMs,
-              ),
-              child: const SizedBox.expand(),
-            ),
-            if (_sel != null) _tooltip(_sel!, size),
-          ],
-        ),
-      );
-    },
-  );
-}
-
-class _LineGraphPainter extends CustomPainter {
-  const _LineGraphPainter({
-    required this.points,
-    required this.color,
-    this.selected,
-    required this.windowStart,
-    required this.windowEnd,
-    required this.expectedStepMs,
-  });
-  final List<GraphPoint> points;
-  final Color color;
-  final GraphPoint? selected;
-  final DateTime windowStart;
-  final DateTime windowEnd;
-  final double expectedStepMs;
-
-  static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0, _bPad = 30.0;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (points.isEmpty) return;
-    final pL = _lPad, pR = size.width - _rPad;
-    final pT = _tPad, pB = size.height - _bPad;
-    final pW = pR - pL, pH = pB - pT;
-
-    // Y scale
-    final vals = points.map((p) => p.value).toList();
-    var yMin = vals.reduce(math.min), yMax = vals.reduce(math.max);
-    final ySpan0 = yMax - yMin;
-    final pad = ySpan0 < 0.5 ? 0.5 : ySpan0 * 0.08;
-    yMin -= pad;
-    yMax += pad;
-    final ySpan = yMax - yMin;
-
-    // X scale — always the full requested window, not just the span the
-    // returned points happen to cover (see the doc comment on LineGraph).
-    final tFirst = windowStart.millisecondsSinceEpoch.toDouble();
-    final tLast = windowEnd.millisecondsSinceEpoch.toDouble();
-    final tSpan = (tLast - tFirst).clamp(1.0, double.infinity);
-    final gapThresholdMs = expectedStepMs * 1.8;
-
-    double toX(double t) => pL + (t - tFirst) / tSpan * pW;
-    double toY(double v) => pB - (v - yMin) / ySpan * pH;
-
-    // Nice grid step
-    double step;
-    final yRange = ySpan;
-    if (yRange < 5) {
-      step = 1;
-    } else if (yRange < 15) {
-      step = 2;
-    } else if (yRange < 40) {
-      step = 5;
-    } else if (yRange < 100) {
-      step = 10;
-    } else if (yRange < 250) {
-      step = 25;
-    } else if (yRange < 500) {
-      step = 50;
-    } else {
-      step = 100;
-    }
-
-    final gridPaint = Paint()
-      ..color = const Color(0xff1a2c38)
-      ..strokeWidth = 1;
-    final labelStyle = TextStyle(
-      color: const Color(0xff5e7e90),
-      fontSize: 10.5,
-      fontFeatures: const [FontFeature.tabularFigures()],
-    );
-
-    // Zero line — thick and bright if in range
-    if (yMin < 0 && yMax > 0) {
-      final zy = toY(0);
-      canvas.drawLine(
-        Offset(pL, zy),
-        Offset(pR, zy),
-        Paint()
-          ..color = const Color(0xff4a6070)
-          ..strokeWidth = 2.5,
-      );
-    }
-
-    final gStart = (yMin / step).ceil() * step;
-    for (var g = gStart; g <= yMax + 0.001; g += step) {
-      final gy = toY(g);
-      if (gy < pT - 2 || gy > pB + 2) continue;
-      if (g.abs() < step * 0.01 && yMin < 0 && yMax > 0) {
-        // skip the regular grid line at 0 — already drawn as zero line above
-      } else {
-        canvas.drawLine(Offset(pL, gy), Offset(pR, gy), gridPaint);
-      }
-      final tp = TextPainter(
-        text: TextSpan(text: g.round().toString(), style: labelStyle),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(pL - tp.width - 4, gy - tp.height / 2));
-    }
-
-    // X labels
-    final totalSecs = tSpan / 1000;
-    int tickMs;
-    String Function(DateTime) tfmt;
-    if (totalSecs <= 26 * 3600) {
-      tickMs = 3 * 3600 * 1000;
-      tfmt = (dt) => '${dt.toLocal().hour.toString().padLeft(2, '0')}h';
-    } else if (totalSecs <= 50 * 3600) {
-      tickMs = 6 * 3600 * 1000;
-      tfmt = (dt) => '${dt.toLocal().hour.toString().padLeft(2, '0')}h';
-    } else if (totalSecs <= 8 * 86400) {
-      tickMs = 86400 * 1000;
-      const days = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
-      tfmt = (dt) => days[dt.toLocal().weekday - 1];
-    } else {
-      tickMs = 7 * 86400 * 1000;
-      tfmt = (dt) {
-        final l = dt.toLocal();
-        return '${l.day}/${l.month}';
-      };
-    }
-
-    var tick = (((tFirst / tickMs).floor() + 1) * tickMs).toDouble();
-    while (tick <= tLast) {
-      final tx = toX(tick);
-      canvas.drawLine(Offset(tx, pT), Offset(tx, pB), gridPaint);
-      final dt = DateTime.fromMillisecondsSinceEpoch(tick.round());
-      final tp = TextPainter(
-        text: TextSpan(text: tfmt(dt), style: labelStyle),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(tx - tp.width / 2, pB + 4));
-      tick += tickMs;
-    }
-
-    // Split into contiguous segments wherever the gap to the next point is
-    // bigger than expected — those gaps are missing data (e.g. a source
-    // with patchy coverage), not a real flat/sloped transition, so they
-    // must not be bridged by a connecting line or fill.
-    final segments = <List<GraphPoint>>[];
-    for (final p in points) {
-      if (segments.isEmpty ||
-          p.time.millisecondsSinceEpoch -
-                  segments.last.last.time.millisecondsSinceEpoch >
-              gapThresholdMs) {
-        segments.add([p]);
-      } else {
-        segments.last.add(p);
-      }
-    }
-
-    final fillPath = Path();
-    for (final seg in segments) {
-      fillPath.moveTo(
-        toX(seg.first.time.millisecondsSinceEpoch.toDouble()),
-        pB,
-      );
-      for (final p in seg) {
-        fillPath.lineTo(
-          toX(p.time.millisecondsSinceEpoch.toDouble()),
-          toY(p.value),
-        );
-      }
-      fillPath.lineTo(toX(seg.last.time.millisecondsSinceEpoch.toDouble()), pB);
-      fillPath.close();
-    }
-    canvas.drawPath(
-      fillPath,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [color.withValues(alpha: 0.3), color.withValues(alpha: 0.03)],
-        ).createShader(Rect.fromLTWH(pL, pT, pW, pH))
-        ..style = PaintingStyle.fill,
-    );
-
-    final linePath = Path();
-    for (final seg in segments) {
-      var started = false;
-      for (final p in seg) {
-        final px = toX(p.time.millisecondsSinceEpoch.toDouble());
-        final py = toY(p.value);
-        if (!started) {
-          linePath.moveTo(px, py);
-          started = true;
-        } else {
-          linePath.lineTo(px, py);
-        }
-      }
-    }
-    canvas.drawPath(
-      linePath,
-      Paint()
-        ..color = color
-        ..strokeWidth = 2.2
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round,
-    );
-
-    // End dot — at the last real sample's own position, not the window
-    // edge, so a source with a stale/short tail doesn't show a dot
-    // floating at the right margin with an old value.
-    final lastPt = points.last;
-    final lastX = toX(lastPt.time.millisecondsSinceEpoch.toDouble());
-    final lastY = toY(lastPt.value);
-    canvas.drawCircle(Offset(lastX, lastY), 5, Paint()..color = color);
-    canvas.drawCircle(Offset(lastX, lastY), 3, Paint()..color = cBg);
-
-    // Selected crosshair
-    if (selected != null) {
-      final sx = toX(selected!.time.millisecondsSinceEpoch.toDouble());
-      final sy = toY(selected!.value);
-      canvas.drawLine(
-        Offset(sx, pT),
-        Offset(sx, pB),
-        Paint()
-          ..color = color.withValues(alpha: 0.5)
-          ..strokeWidth = 1.5,
-      );
-      canvas.drawCircle(Offset(sx, sy), 7, Paint()..color = color);
-      canvas.drawCircle(Offset(sx, sy), 4.5, Paint()..color = cBg);
-    }
-
-    // Border
-    canvas.drawRect(
-      Rect.fromLTRB(pL, pT, pR, pB),
-      Paint()
-        ..color = const Color(0xff243040)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_LineGraphPainter old) =>
-      old.points != points || old.color != color || old.selected != selected;
-}
-
-// ─── Wind tap card (wind panel → graph) ──────────────────────────────────────
-class _WindTapCard extends StatelessWidget {
-  const _WindTapCard({
-    required this.label,
-    required this.value,
-    required this.color,
-    required this.accentColor,
-    required this.graphMetrics,
-    required this.host,
-    required this.bucket,
-    this.archiveBucket = influxBucketDefault,
-    this.historySource = 'auto',
-    this.influxOrg = influxOrgDefault,
-    this.influxToken = influxTokenDefault,
-    this.skHost = '',
-    this.skPort = 3000,
-    this.skAuthBase64 = '',
-    this.unit = '',
-    this.side = 0, // -1=port(red), 0=none, 1=starboard(green)
-    this.trend = 0, // -1 falling, 0 steady, 1 rising
-    this.gust,
-    this.beaufort,
-    this.demo = false,
-    this.settings,
-  });
-  final String label;
-  final String value;
-  final Color color;
-  final Color accentColor;
-  final String unit;
-  final int side; // -1 port, 0 none, 1 starboard
-  final int trend;
-  final String? gust;
-  final int? beaufort;
-  final List<MetricDef> graphMetrics;
-  final String host;
-  final String bucket;
-  final String archiveBucket;
-  final String historySource;
-  final String influxOrg;
-  final String influxToken;
-  final String skHost;
-  final int skPort;
-  final SettingsModel? settings;
-  final String skAuthBase64;
-  final bool demo;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(14),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            fullscreenDialog: true,
-            builder: (ctx) => GraphDialog(
-              metrics: graphMetrics,
-              historySource: historySource,
-              influxHost: host,
-              influxOrg: influxOrg,
-              influxToken: influxToken,
-              skHost: skHost.isEmpty ? host : skHost,
-              skPort: skPort,
-              skAuthBase64: skAuthBase64,
-              bucket: bucket,
-              archiveBucket: archiveBucket,
-              demo: demo,
-              settings: settings,
-            ),
-          ),
-        ),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: accentColor.withAlpha(80), width: 2),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Top bar: label left, unit right
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 3, 8, 0),
-                child: Row(
-                  children: [
-                    Text(
-                      label,
-                      style: TextStyle(
-                        color: accentColor,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    if (trend != 0) ...[
-                      const SizedBox(width: 4),
-                      Icon(
-                        trend > 0 ? Icons.arrow_drop_up : Icons.arrow_drop_down,
-                        size: 16,
-                        color: cMuted,
-                      ),
-                    ],
-                    const Spacer(),
-                    if (unit.isNotEmpty)
-                      Text(
-                        unit,
-                        style: TextStyle(
-                          color: accentColor,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              // Number fills the middle
-              Expanded(
-                child: Row(
-                  children: [
-                    const SizedBox(width: 6),
-                    if (side < 0) ...[
-                      LayoutBuilder(
-                        builder: (ctx, c) => Icon(
-                          Icons.play_arrow,
-                          color: cRed,
-                          size: (c.maxHeight * 0.60).clamp(20.0, 72.0),
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                    ],
-                    Expanded(
-                      child: FittedBox(
-                        fit: BoxFit.contain,
-                        child: Text(
-                          value,
-                          style: const TextStyle(
-                            color: cText,
-                            fontSize: 300,
-                            fontWeight: FontWeight.w900,
-                            height: 1.0,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (side > 0) ...[
-                      const SizedBox(width: 2),
-                      LayoutBuilder(
-                        builder: (ctx, c) => Transform.flip(
-                          flipX: true,
-                          child: Icon(
-                            Icons.play_arrow,
-                            color: cGreen,
-                            size: (c.maxHeight * 0.60).clamp(20.0, 72.0),
-                          ),
-                        ),
-                      ),
-                    ],
-                    const SizedBox(width: 6),
-                  ],
-                ),
-              ),
-              // Bottom bar: graph icon left, gust bottom-right
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 3),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.show_chart,
-                      size: 13,
-                      color: accentColor.withAlpha(100),
-                    ),
-                    if (beaufort != null) ...[
-                      const SizedBox(width: 4),
-                      Text(
-                        'f. $beaufort Bft.',
-                        style: const TextStyle(
-                          color: cMuted,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                    const Spacer(),
-                    if (gust != null)
-                      Text(
-                        'r. $gust',
-                        style: const TextStyle(
-                          color: cMuted,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Existing widgets (unchanged) ─────────────────────────────────────────────
-class ForecastCard extends StatelessWidget {
-  const ForecastCard({
-    super.key,
-    required this.title,
-    required this.point,
-    this.minMax,
-    this.zoom,
-  });
-  final String title;
-  final ForecastPoint? point;
-  final (double?, double?)? minMax;
-  final void Function(
-    String title,
-    String value,
-    Color color, {
-    String? subtitle,
-    List<MetricDef>? graphMetrics,
-  })?
-  zoom;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = point;
-    final mn = minMax?.$1, mx = minMax?.$2;
-    return CardShell(
-      onTap: p == null
-          ? null
-          : () => zoom?.call(
-              title,
-              fmt(p.tempC, 0, ' C'),
-              cYellow,
-              subtitle:
-                  'Lluvia ${fmt(p.rainPct, 0, '%')} · Viento ${fmt(p.windKn, 0, ' kt')} · Racha ${fmt(p.gustKn, 0, ' kt')}',
-            ),
-      child: p == null
-          ? const Center(child: Text('--', style: TextStyle(fontSize: 40)))
-          : FittedBox(
-              fit: BoxFit.contain,
-              child: SizedBox(
-                width: 230,
-                height: 150,
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      WeatherIcon(
-                        code: p.weatherCode,
-                        time: p.time,
-                        small: true,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: cMuted,
-                                fontSize: 15,
-                              ),
-                            ),
-                            Text(
-                              fmt(p.tempC, 0, ' C'),
-                              style: const TextStyle(
-                                fontSize: 52,
-                                fontWeight: FontWeight.w800,
-                                height: 1.0,
-                              ),
-                            ),
-                            if (mn != null && mx != null)
-                              Text(
-                                '${mx.round()}° / ${mn.round()}°',
-                                style: const TextStyle(
-                                  color: cMuted,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            Text(
-                              'Lluvia ${fmt(p.rainPct, 0, '%')}',
-                              style: const TextStyle(
-                                color: cCyan,
-                                fontSize: 13,
-                              ),
-                            ),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    fmt(p.windKn, 0, ' kt'),
-                                    style: TextStyle(
-                                      color: windColor(p.windKn),
-                                      fontSize: 20,
-                                    ),
-                                  ),
-                                ),
-                                WindArrow(deg: p.windDirDeg, speed: p.windKn),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-    );
-  }
-}
-
-class ForecastStrip extends StatelessWidget {
-  const ForecastStrip({super.key, required this.points});
-  final List<ForecastPoint> points;
-
-  @override
-  Widget build(BuildContext context) {
-    if (points.isEmpty) {
-      return const Center(
-        child: Text(
-          'Sin prevision',
-          style: TextStyle(color: cMuted, fontSize: 24),
-        ),
-      );
-    }
-    return ListView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.all(12),
-      children: [for (final p in points) HourForecast(point: p)],
-    );
-  }
-}
-
-class HourForecast extends StatelessWidget {
-  const HourForecast({super.key, required this.point});
-  final ForecastPoint point;
-
-  static const _days = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
-  static Widget _hourLabel(DateTime t) {
-    final l = t.toLocal();
-    return Text(
-      '${_days[l.weekday - 1]} ${l.hour.toString().padLeft(2, '0')}h',
-      style: const TextStyle(
-        color: cMuted,
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 98,
-      margin: const EdgeInsets.only(right: 8),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: cPanel2,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: FittedBox(
-        fit: BoxFit.scaleDown,
-        child: SizedBox(
-          width: 82,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _hourLabel(point.time),
-              const SizedBox(height: 4),
-              WeatherIcon(
-                code: point.weatherCode,
-                time: point.time,
-                small: true,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                fmt(point.tempC, 0, ' °C'),
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              Text(
-                fmt(point.rainPct, 0, '%'),
-                style: const TextStyle(color: cCyan, fontSize: 13),
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    fmt(point.windKn, 0, ''),
-                    style: TextStyle(
-                      color: windColor(point.windKn),
-                      fontSize: 17,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const Text(
-                    '/',
-                    style: TextStyle(color: cMuted, fontSize: 13),
-                  ),
-                  Text(
-                    fmt(point.gustKn, 0, ' kt'),
-                    style: TextStyle(
-                      color: windColor(point.gustKn),
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              SizedBox(
-                height: 30,
-                width: 30,
-                child: WindArrow(deg: point.windDirDeg, speed: point.windKn),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class MarineCard extends StatelessWidget {
-  const MarineCard({
-    super.key,
-    required this.title,
-    required this.point,
-    this.zoom,
-  });
-  final String title;
-  final MarinePoint point;
-  final void Function(
-    String title,
-    String value,
-    Color color, {
-    String? subtitle,
-    List<MetricDef>? graphMetrics,
-  })?
-  zoom;
-
-  @override
-  Widget build(BuildContext context) {
-    return CardShell(
-      onTap: () => zoom?.call(
-        title,
-        fmt(point.waveM, 1, ' m'),
-        cCyan,
-        subtitle:
-            'Periodo ${fmt(point.wavePeriod, 1, ' s')} · Fondo ${fmt(point.swellM, 1, ' m')} · T. mar ${fmt(point.seaTempC, 0, ' C')}',
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: const TextStyle(color: cMuted)),
-            const Spacer(),
-            Text(
-              fmt(point.waveM, 1, ' m'),
-              style: const TextStyle(
-                fontSize: 38,
-                fontWeight: FontWeight.w800,
-                color: cCyan,
-              ),
-            ),
-            Text(
-              'Periodo ${fmt(point.wavePeriod, 1, ' s')}  ${dir(point.waveDir)}',
-            ),
-            Text(
-              'Fondo ${fmt(point.swellM, 1, ' m')}  ${fmt(point.swellPeriod, 1, ' s')}',
-            ),
-            Text(
-              'T. mar ${fmt(point.seaTempC, 0, ' C')}  Corr ${fmt(point.currentKmh == null ? null : point.currentKmh! / 1.852, 1, ' kt')}',
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class WindValueCard extends StatelessWidget {
-  const WindValueCard({
-    super.key,
-    required this.label,
-    required this.value,
-    required this.color,
-    this.subtitle,
-    this.angle,
-    this.isAngle = false,
-  });
-  final String label, value;
-  final Color color;
-  final String? subtitle;
-  final double? angle;
-  final bool isAngle;
-
-  @override
-  Widget build(BuildContext context) {
-    final leftSide = angle != null && normalizeRelativeAngle(angle!) < 0;
-    return Card(
-      color: Colors.black,
-      clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: const BorderSide(color: Color(0xff303030), width: 1.2),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(9),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(width: 34, height: 5, color: color),
-                const Spacer(),
-                Text(
-                  label,
-                  style: const TextStyle(color: cMuted, fontSize: 17),
-                ),
-              ],
-            ),
-            Expanded(
-              child: Center(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (isAngle && leftSide)
-                      SideTriangle(color: color, left: true),
-                    Flexible(
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Text(
-                          value,
-                          style: const TextStyle(
-                            color: cText,
-                            fontSize: 54,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (isAngle && !leftSide)
-                      SideTriangle(color: color, left: false),
-                  ],
-                ),
-              ),
-            ),
-            if (subtitle != null)
-              Center(
-                child: Text(
-                  subtitle!,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: cMuted, fontSize: 17),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class SideTriangle extends StatelessWidget {
-  const SideTriangle({super.key, required this.color, required this.left});
-  final Color color;
-  final bool left;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: EdgeInsets.only(left: left ? 0 : 8, right: left ? 8 : 0),
-    child: Transform.rotate(
-      angle: left ? 0 : math.pi,
-      child: Icon(Icons.play_arrow, color: color, size: 26),
-    ),
-  );
-}
-
-class TankCard extends StatelessWidget {
-  const TankCard({
-    super.key,
-    required this.name,
-    required this.value,
-    required this.capacityL,
-    required this.color,
-    required this.icon,
-    this.large = false,
-    this.flexible = false,
-    this.onTap,
-  });
-  final String name;
-  final double? value;
-  final int capacityL;
-  final Color color;
-  final IconData icon;
-  final bool large;
-  final bool flexible;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final percent = (value ?? 0).clamp(0, 100).toDouble();
-    final liters = capacityL <= 0 ? null : (capacityL * percent / 100).round();
-    final cardWidth = flexible ? null : (large ? 190.0 : 152.0);
-    return Container(
-      width: cardWidth,
-      margin: flexible ? null : EdgeInsets.only(right: large ? 18 : 10),
-      child: Material(
-        color: const Color(0xff151515),
-        borderRadius: BorderRadius.circular(16),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xff303030), width: 1.3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              children: [
-                // Title bar
-                Container(
-                  height: large ? 46 : 38,
-                  color: color,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontSize: large ? 20 : 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                // Body: left = icon + % + liters, right = gauge bar
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                    child: Row(
-                      children: [
-                        // Left: icon, percentage, liters
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(icon, color: cText, size: large ? 28 : 22),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerLeft,
-                                child: RichText(
-                                  text: TextSpan(
-                                    children: [
-                                      TextSpan(
-                                        // "--" (not "0") when there's no
-                                        // reading at all, so an actually-empty
-                                        // tank and a missing/unconfigured one
-                                        // don't look identical.
-                                        text: value == null
-                                            ? '--'
-                                            : percent.round().toString(),
-                                        style: TextStyle(
-                                          color: cText,
-                                          fontSize: large ? 52 : 42,
-                                          fontWeight: FontWeight.w300,
-                                        ),
-                                      ),
-                                      TextSpan(
-                                        text: '%',
-                                        style: TextStyle(
-                                          color: cMuted,
-                                          fontSize: large ? 36 : 28,
-                                          fontWeight: FontWeight.w300,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              Text(
-                                liters == null
-                                    ? '-- l'
-                                    : '$liters/$capacityL l',
-                                style: TextStyle(
-                                  color: cMuted,
-                                  fontSize: large ? 14 : 12,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        // Right: vertical gauge bar
-                        SizedBox(
-                          width: large ? 32 : 24,
-                          child: SegmentedTankGauge(percent: percent),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class SegmentedTankGauge extends StatelessWidget {
-  const SegmentedTankGauge({super.key, required this.percent});
-  final double percent;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final fillHeight =
-            constraints.maxHeight * (percent / 100).clamp(0.0, 1.0);
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(9),
-          child: Stack(
-            children: [
-              Container(color: const Color(0xff10283d)),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: fillHeight,
-                child: Container(color: const Color(0xff3f86cc)),
-              ),
-              for (final mark in [0.25, 0.5, 0.75])
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: constraints.maxHeight * mark,
-                  child: Container(height: 3, color: Colors.black),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class WeatherIcon extends StatelessWidget {
-  const WeatherIcon({
-    super.key,
-    required this.code,
-    required this.time,
-    this.small = false,
-  });
-  final int? code;
-  final DateTime time;
-  final bool small;
-
-  @override
-  Widget build(BuildContext context) {
-    final hour = time.toLocal().hour;
-    final night = hour < 7 || hour >= 20;
-    final icon = night
-        ? Icons.nightlight_round
-        : (code == 0 ? Icons.wb_sunny : Icons.cloud);
-    return Icon(
-      icon,
-      color: night || code == 0 ? cYellow : cMuted,
-      size: small ? 24 : 52,
-    );
-  }
-}
-
-// ─── Alarms (CFG tab) ──────────────────────────────────────────────────────
-// Dot pagination for the NAV page's cyclic vertical swipe. Page 0 (the
-// user's actual selected cards) is drawn as a small square instead of a
-// dot — everything else is "more cards to pick from" — so it's obvious at
-// a glance whether you're home or browsing the catalog.
-class _NavPageIndicator extends StatelessWidget {
-  const _NavPageIndicator({required this.total, required this.current});
-  final int total;
-  final int current;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (var i = 0; i < total; i++) ...[
-            if (i > 0) const SizedBox(width: 5),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: i == 0 ? 8 : 6,
-              height: i == 0 ? 8 : 6,
-              decoration: BoxDecoration(
-                color: i == current ? cCyan : cMuted.withValues(alpha: 0.5),
-                shape: i == 0 ? BoxShape.rectangle : BoxShape.circle,
-                borderRadius: i == 0 ? BorderRadius.circular(2) : null,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ThresholdRow extends StatefulWidget {
-  const _ThresholdRow({
-    required this.label,
-    required this.unit,
-    required this.value,
-    required this.onChanged,
-  });
-  final String label;
-  final String unit;
-  final double value;
-  final ValueChanged<double> onChanged;
-
-  @override
-  State<_ThresholdRow> createState() => _ThresholdRowState();
-}
-
-class _ThresholdRowState extends State<_ThresholdRow> {
-  late final _controller = TextEditingController(
-    text: widget.value == widget.value.roundToDouble()
-        ? widget.value.toStringAsFixed(0)
-        : widget.value.toString(),
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              widget.label,
-              style: const TextStyle(color: cText, fontSize: 13),
-            ),
-          ),
-          SizedBox(
-            width: 70,
-            child: TextField(
-              controller: _controller,
-              textAlign: TextAlign.right,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              style: const TextStyle(color: cText, fontSize: 13),
-              decoration: const InputDecoration(isDense: true),
-              onSubmitted: (v) {
-                final n = double.tryParse(v.replaceAll(',', '.'));
-                if (n != null) widget.onChanged(n);
-              },
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(widget.unit, style: const TextStyle(color: cMuted, fontSize: 12)),
-        ],
-      ),
-    );
-  }
-}
-
-class _SkZoneAlarmRow extends StatelessWidget {
-  const _SkZoneAlarmRow({
-    required this.path,
-    required this.state,
-    required this.setting,
-    required this.onChanged,
-  });
-  final String path;
-  final String state;
-  final SkZoneAlarmSetting? setting;
-  final ValueChanged<SkZoneAlarmSetting> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = setting?.enabled ?? true;
-    final sound = setting?.sound ?? true;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  path,
-                  style: const TextStyle(color: cText, fontSize: 12),
-                ),
-                Text(
-                  state,
-                  style: const TextStyle(color: cRed, fontSize: 10),
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            icon: Icon(
-              sound ? Icons.volume_up : Icons.volume_off,
-              color: enabled ? cCyan : cMuted,
-              size: 18,
-            ),
-            onPressed: !enabled
-                ? null
-                : () => onChanged(
-                    SkZoneAlarmSetting(enabled: enabled, sound: !sound),
-                  ),
-          ),
-          Switch(
-            value: enabled,
-            onChanged: (v) =>
-                onChanged(SkZoneAlarmSetting(enabled: v, sound: sound)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CustomAlarmRow extends StatelessWidget {
-  const _CustomAlarmRow({
-    required this.rule,
-    required this.onChanged,
-    required this.onDelete,
-  });
-  final CustomAlarmRule rule;
-  final VoidCallback onChanged;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: Row(
-      children: [
-        Expanded(
-          child: Text(
-            rule.label,
-            style: const TextStyle(color: cText, fontSize: 12),
-          ),
-        ),
-        IconButton(
-          icon: Icon(
-            rule.sound ? Icons.volume_up : Icons.volume_off,
-            color: rule.enabled ? cCyan : cMuted,
-            size: 18,
-          ),
-          onPressed: !rule.enabled
-              ? null
-              : () {
-                  rule.sound = !rule.sound;
-                  onChanged();
-                },
-        ),
-        Switch(
-          value: rule.enabled,
-          onChanged: (v) {
-            rule.enabled = v;
-            onChanged();
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.delete_outline, color: cMuted, size: 18),
-          onPressed: onDelete,
-        ),
-      ],
-    ),
-  );
-}
-
-class CardShell extends StatelessWidget {
-  const CardShell({
-    super.key,
-    required this.child,
-    this.onTap,
-    this.onLongPress,
-    this.onDoubleTap,
-    this.onSecondaryTap,
-  });
-  final Widget child;
-  final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
-  final VoidCallback? onDoubleTap;
-  final VoidCallback? onSecondaryTap;
-
-  @override
-  Widget build(BuildContext context) => Card(
-    color: Colors.transparent,
-    elevation: 0,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(14),
-      side: BorderSide(color: cMuted.withValues(alpha: 0.35), width: 1.4),
-    ),
-    clipBehavior: Clip.antiAlias,
-    child: InkWell(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      onDoubleTap: onDoubleTap,
-      onSecondaryTap: onSecondaryTap,
-      child: child,
-    ),
-  );
-}
-
-class WindArrow extends StatelessWidget {
-  const WindArrow({super.key, required this.deg, required this.speed});
-  final double? deg;
-  final double? speed;
-
-  @override
-  Widget build(BuildContext context) {
-    if (deg == null) {
-      return const SizedBox(
-        width: 28,
-        height: 28,
-        child: Center(child: Text('--')),
-      );
-    }
-    return Transform.rotate(
-      angle: ((deg! + 180) % 360) * math.pi / 180,
-      child: Icon(Icons.navigation, color: windColor(speed), size: 28),
-    );
-  }
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 T? elementAtOrNull<T>(List<T> list, int index) =>
     index < 0 || index >= list.length ? null : list[index];
 double? _num(dynamic value) => value is num ? value.toDouble() : null;
@@ -9331,497 +6793,3 @@ DateTime _epoch(dynamic value) => DateTime.fromMillisecondsSinceEpoch(
   (_num(value) ?? 0).round() * 1000,
   isUtc: true,
 );
-int _closestIndex(List<num> times, DateTime target) {
-  if (times.isEmpty) return -1;
-  var best = 0;
-  var bestDelta = ((times[0] * 1000).round() - target.millisecondsSinceEpoch)
-      .abs();
-  for (var i = 1; i < times.length; i++) {
-    final delta = ((times[i] * 1000).round() - target.millisecondsSinceEpoch)
-        .abs();
-    if (delta < bestDelta) {
-      best = i;
-      bestDelta = delta;
-    }
-  }
-  return best;
-}
-
-String fmt(double? value, int decimals, String suffix) =>
-    value == null ? '--$suffix' : '${value.toStringAsFixed(decimals)}$suffix';
-String tempK(double? value) =>
-    value == null ? '-- C' : '${(value - 273.15).toStringAsFixed(1)} C';
-String tempNum(double? kelvin) =>
-    kelvin == null ? '--' : (kelvin - 273.15).toStringAsFixed(1);
-String tempValue(double? kelvin) =>
-    kelvin == null ? 'No data' : (kelvin - 273.15).toStringAsFixed(1);
-String? tempUnit(double? kelvin) => kelvin == null ? null : '°C';
-// Degrees + minutes.tenths (e.g. 36°43.3'N) — the format sailors actually
-// plot with, rather than raw decimal degrees.
-String _dmm(double value, bool isLat) {
-  final hemi = isLat ? (value >= 0 ? 'N' : 'S') : (value >= 0 ? 'E' : 'W');
-  final abs = value.abs();
-  var deg = abs.floor();
-  var min = (abs - deg) * 60;
-  var minStr = min.toStringAsFixed(1);
-  if (double.parse(minStr) >= 60) {
-    deg += 1;
-    minStr = '0.0';
-  }
-  final degStr = deg.toString().padLeft(isLat ? 2 : 3, '0');
-  return "$degStr°$minStr'$hemi";
-}
-
-String pos(double? lat, double? lon) => lat == null || lon == null
-    ? '--'
-    : '${_dmm(lat, true)} ${_dmm(lon, false)}';
-String posLines(double? lat, double? lon) => lat == null || lon == null
-    ? '--'
-    : '${_dmm(lat, true)}\n${_dmm(lon, false)}';
-String angle(double? value) => value == null ? '--' : value.round().toString();
-String angleAbs(double? value) => value == null
-    ? '--'
-    : normalizeRelativeAngle(value).abs().round().toString();
-String directionDeg(double? value) =>
-    value == null ? '--' : normalize360(value).round().toString();
-String hhmm(DateTime value) =>
-    '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
-String ddmmyyyy(DateTime value) =>
-    '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')}/${value.year}';
-String _lastUpdateText(DateTime? value) {
-  if (value == null) return 'Sin datos';
-  final seconds = DateTime.now().difference(value).inSeconds;
-  if (seconds < 60) return 'Hace ${math.max(0, seconds)} s';
-  final minutes = seconds ~/ 60;
-  if (minutes < 60) return 'Hace $minutes min';
-  return hhmm(value);
-}
-
-String dir(double? value) {
-  if (value == null) return '--';
-  const dirs = [
-    'N',
-    'NNE',
-    'NE',
-    'ENE',
-    'E',
-    'ESE',
-    'SE',
-    'SSE',
-    'S',
-    'SSO',
-    'SO',
-    'OSO',
-    'O',
-    'ONO',
-    'NO',
-    'NNO',
-  ];
-  return dirs[((value + 11.25) ~/ 22.5) & 15];
-}
-
-String fmtDeg(double? deg) =>
-    deg == null ? '--°' : '${normalize360(deg).round()}°';
-
-String fmtHeel(double? deg) {
-  if (deg == null) return '--°';
-  final side = deg < 0 ? 'B' : 'E';
-  return '${deg.abs().round()}° $side';
-}
-
-Color heelColor(double? deg) {
-  if (deg == null) return cMuted;
-  return deg >= 0 ? cGreen : cRed;
-}
-
-Color meteogramColor(double? kn) {
-  if (kn == null) return cMuted;
-  if (kn < 3) return cMuted;
-  if (kn < 7) return const Color(0xff2ea89a);
-  if (kn < 10) return cOrange;
-  if (kn < 15) return cRed;
-  if (kn < 20) return const Color(0xffb33a3a);
-  return cPurple;
-}
-
-Color windColor(double? speed) {
-  if (speed == null) return cRed;
-  if (speed <= 5) return cCyan;
-  if (speed <= 15) return cGreen;
-  if (speed <= 25) return cOrange;
-  return cRed;
-}
-
-int? beaufort(double? kn) {
-  if (kn == null) return null;
-  const upper = [1, 4, 7, 11, 17, 22, 28, 34, 41, 48, 56, 64];
-  for (var i = 0; i < upper.length; i++) {
-    if (kn < upper[i]) return i;
-  }
-  return 12;
-}
-
-Color socColor(double? pct) {
-  if (pct == null) return cMuted;
-  if (pct >= 80) return cGreen;
-  if (pct >= 50) return cYellow;
-  if (pct >= 20) return cOrange;
-  return cRed;
-}
-
-Color currentColor(double? amps) {
-  if (amps == null) return cMuted;
-  return amps >= 0 ? cGreen : cOrange;
-}
-
-Color sideColor(double? angle) {
-  if (angle == null) return cMuted;
-  return normalizeRelativeAngle(angle) < 0 ? cRed : cGreen;
-}
-
-Color voltageColor12V(double? v) {
-  if (v == null) return cMuted;
-  if (v >= 12.7) return cGreen;
-  if (v >= 12.4) return cYellow;
-  if (v >= 12.0) return cOrange;
-  return cRed;
-}
-
-Color seaTempColor(double? kelvin) {
-  if (kelvin == null) return cMuted;
-  final c = kelvin - 273.15;
-  if (c < 15) return cCyan;
-  if (c < 22) return cGreen;
-  if (c < 28) return cYellow;
-  return cOrange;
-}
-
-// Equipment temp: green=normal, orange=warm, red=too hot
-Color equipTempColor(double? kelvin, {double warnC = 40, double alarmC = 55}) {
-  if (kelvin == null) return cMuted;
-  final c = kelvin - 273.15;
-  if (c >= alarmC) return cRed;
-  if (c >= warnC) return cOrange;
-  return cGreen;
-}
-
-// Fridge temp: cyan=perfect, green=ok, orange=too warm, red=alarm
-Color fridgeTempColor(double? kelvin) {
-  if (kelvin == null) return cMuted;
-  final c = kelvin - 273.15;
-  if (c > 10) return cRed;
-  if (c > 6) return cOrange;
-  if (c > 2) return cGreen;
-  return cCyan;
-}
-
-// Depth: cyan=deep, green=ok, orange=caution, red=shallow
-Color depthColor(double? meters) {
-  if (meters == null) return cMuted;
-  if (meters < 2.0) return cRed;
-  if (meters < 5.0) return cOrange;
-  if (meters < 15.0) return cYellow;
-  return cCyan;
-}
-
-double normalize360(double value) {
-  var out = value % 360.0;
-  if (out < 0) out += 360.0;
-  return out;
-}
-
-double normalizeRelativeAngle(double value) {
-  var out = normalize360(value);
-  if (out > 180.0) out -= 360.0;
-  return out;
-}
-
-double? relativeWindAngle(double? directionDeg, double? referenceDeg) {
-  if (directionDeg == null || referenceDeg == null) return null;
-  return normalizeRelativeAngle(directionDeg - referenceDeg);
-}
-
-// ─── Anchor page: embedded Hoeken/Freeboard-SK view ───────────────────────────
-class _AnchorWebView extends StatefulWidget {
-  const _AnchorWebView({
-    required this.host,
-    required this.port,
-    this.path = '/hoekens-anchor-alarm/',
-    this.label = 'Ancla',
-    this.missingPluginHint,
-    this.demo = false,
-    this.demoExplainer,
-  });
-  final String host;
-  final int port;
-  final String path;
-  final String label;
-  final String? missingPluginHint;
-  final bool demo;
-  final String? demoExplainer;
-  @override
-  State<_AnchorWebView> createState() => _AnchorWebViewState();
-}
-
-class _AnchorWebViewState extends State<_AnchorWebView>
-    with AutomaticKeepAliveClientMixin {
-  bool _loading = true;
-  bool _error = false;
-  int _reloadNonce = 0;
-
-  @override
-  bool get wantKeepAlive => true;
-
-  String get _url => 'http://${widget.host}:${widget.port}${widget.path}';
-
-  void _reload() {
-    setState(() {
-      _loading = true;
-      _error = false;
-      _reloadNonce++;
-    });
-  }
-
-  @override
-  void didUpdateWidget(_AnchorWebView old) {
-    super.didUpdateWidget(old);
-    if (!widget.demo &&
-        (old.host != widget.host ||
-            old.port != widget.port ||
-            old.path != widget.path)) {
-      _loading = true;
-      _error = false;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    if (widget.demo) {
-      return Container(
-        color: cBg,
-        padding: const EdgeInsets.all(32),
-        alignment: Alignment.center,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.web_asset_off, color: cMuted, size: 48),
-            const SizedBox(height: 16),
-            Text(
-              widget.label,
-              style: const TextStyle(
-                color: cText,
-                fontSize: 20,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              widget.demoExplainer ??
-                  'Aquí se mostraría ${widget.label}, embebido desde el servidor Signal K.',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: cMuted, fontSize: 15),
-            ),
-            const SizedBox(height: 14),
-            const Text(
-              'No disponible en modo DEMO.',
-              style: TextStyle(
-                color: cOrange,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return Stack(
-      children: [
-        PlatformWebView(
-          key: ValueKey(_reloadNonce),
-          url: _url,
-          onPageStarted: () {
-            if (mounted) setState(() => _loading = true);
-          },
-          onPageFinished: () {
-            if (mounted) setState(() => _loading = false);
-          },
-          onError: () {
-            if (mounted) {
-              setState(() {
-                _loading = false;
-                _error = true;
-              });
-            }
-          },
-        ),
-        if (_loading)
-          const Center(child: CircularProgressIndicator(color: cCyan)),
-        if (_error)
-          Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.web_asset_off, color: cMuted, size: 48),
-                const SizedBox(height: 12),
-                Text(
-                  'No se puede cargar ${widget.label}',
-                  style: const TextStyle(color: cMuted, fontSize: 18),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  _url,
-                  style: const TextStyle(color: cOrange, fontSize: 12),
-                ),
-                if (widget.missingPluginHint != null) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    widget.missingPluginHint!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: cYellow, fontSize: 14),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Reintentar'),
-                  onPressed: _reload,
-                ),
-              ],
-            ),
-          ),
-        Positioned(
-          top: 28,
-          left: 8,
-          child: GestureDetector(
-            onTap: _reload,
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Icon(Icons.refresh, color: cMuted, size: 20),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ─── Circular exponential damper (B&G-style smoothing) ───────────────────────
-// ─── Wind history buffer (trend + gusts over a rolling window) ───────────────
-/// Confirmed-trend detector for depth (and similar slow-moving values):
-/// a Schmitt-trigger-style hysteresis on top of a light exponential
-/// moving average, so seabed/wave noise doesn't flip the arrow back and
-/// forth — the direction only updates once the smoothed value has moved
-/// by [_thresholdM] from the last confirmed point, and re-anchors there.
-class _DepthTrendTracker {
-  double? _smoothed;
-  double? _confirmedAt;
-  int direction = 0; // -1 bajando, 0 sin tendencia clara, 1 subiendo
-  static const _thresholdM = 0.3;
-  static const _alpha = 0.15;
-
-  void add(double? depth) {
-    if (depth == null) return;
-    _smoothed = _smoothed == null
-        ? depth
-        : _smoothed! + (depth - _smoothed!) * _alpha;
-    _confirmedAt ??= _smoothed;
-    final delta = _smoothed! - _confirmedAt!;
-    if (delta.abs() >= _thresholdM) {
-      direction = delta > 0 ? 1 : -1;
-      _confirmedAt = _smoothed;
-    }
-  }
-}
-
-class _WindHistory {
-  final List<(DateTime, double)> _samples = [];
-  static const _window = Duration(minutes: 30);
-
-  void add(double? value) {
-    if (value == null) return;
-    final now = DateTime.now();
-    _samples.add((now, value));
-    final cutoff = now.subtract(_window);
-    while (_samples.isNotEmpty && _samples.first.$1.isBefore(cutoff)) {
-      _samples.removeAt(0);
-    }
-  }
-
-  double? _avg(Duration from, Duration to) {
-    final now = DateTime.now();
-    final start = now.subtract(to);
-    final end = now.subtract(from);
-    final vals = [
-      for (final s in _samples)
-        if (!s.$1.isBefore(start) && s.$1.isBefore(end)) s.$2,
-    ];
-    if (vals.isEmpty) return null;
-    return vals.reduce((a, b) => a + b) / vals.length;
-  }
-
-  // -1 falling, 0 steady, 1 rising (2min avg vs 2-30min avg, 1.5kt hysteresis)
-  int trend({double threshold = 1.5}) {
-    final recent = _avg(Duration.zero, const Duration(minutes: 2));
-    final past = _avg(const Duration(minutes: 2), const Duration(minutes: 30));
-    if (recent == null || past == null) return 0;
-    final diff = recent - past;
-    if (diff > threshold) return 1;
-    if (diff < -threshold) return -1;
-    return 0;
-  }
-
-  // Max raw value in the last [window] (default 2min) = gust.
-  double? gust({Duration window = const Duration(minutes: 2)}) {
-    final now = DateTime.now();
-    final start = now.subtract(window);
-    final vals = [
-      for (final s in _samples)
-        if (!s.$1.isBefore(start)) s.$2,
-    ];
-    if (vals.isEmpty) return null;
-    return vals.reduce(math.max);
-  }
-}
-
-class _WindCircularDamper {
-  final double tau; // time constant in seconds (higher = more smoothing)
-  double? _s, _c; // sin / cos accumulators (for circular angles)
-  double? _v; // linear accumulator (for speeds)
-
-  _WindCircularDamper({this.tau = 5.0});
-
-  double get _alpha => 1.0 - math.exp(-1.0 / tau);
-
-  // Feed a circular angle (degrees, any range). Returns smoothed degrees.
-  double? angle(double? deg) {
-    if (deg == null) return _toDeg();
-    final a = _alpha;
-    final rad = deg * math.pi / 180;
-    _s = _s == null ? math.sin(rad) : _s! + a * (math.sin(rad) - _s!);
-    _c = _c == null ? math.cos(rad) : _c! + a * (math.cos(rad) - _c!);
-    return _toDeg();
-  }
-
-  double? _toDeg() {
-    if (_s == null || _c == null) return null;
-    return math.atan2(_s!, _c!) * 180 / math.pi;
-  }
-
-  // Feed a linear value (speed, temperature, etc.).
-  double? linear(double? val) {
-    if (val == null) return _v;
-    _v = _v == null ? val : _v! + _alpha * (val - _v!);
-    return _v;
-  }
-
-  void reset() {
-    _s = null;
-    _c = null;
-    _v = null;
-  }
-}

@@ -2,6 +2,21 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.35] - 2026-08-29
+
+### Añadido
+- **Reloj de viento aparente (NAV Premium)**: rediseñado con dos zonas — proa (±45° alrededor de 0°) y popa (±45° alrededor de 180°, espejo vertical exacto de la de proa) — cada una maximizando el radio hasta tocar el borde de la tarjeta, con banda roja(babor)/verde(estribor), marcador que desaparece fuera de su propio rango en vez de quedarse clavado en el borde, e histéresis en el cambio de zona.
+- **Alarma de colisión AIS** (`CFG → Alarmas`): nueva alarma real (con aviso sonoro) basada en CPA/TCPA del blanco más cercano, con umbrales propios y más estrictos (1 NM / 10 min por defecto) que el filtro de qué se muestra en NAV.
+- **Modo Premium por defecto** en NAV; nuevo modo "Ambas" (Premium + Clásica) además de Clásica/Premium.
+
+### Cambiado
+- **Filtro "mostrado en NAV" de AIS**: movido de `CFG → Alarmas` a `CFG → Pantalla` (no es una alarma) y ahora exige CPA y TCPA dentro de rango a la vez, no solo el que esté disponible — un contacto lejano con un solo dato calculado ya no aparece como "más cercano".
+- **Pantalla de Fondeo (NAV Premium)**: el aro de anclaje ahora tiene el ancla fija en el centro y el barco como marcador que se mueve; la tarjeta de distancia, batería y viento se reorganizaron para aprovechar mejor el espacio.
+- **Modo DEMO**: ya no compite con una conexión real a Signal K abierta en paralelo (causaba parpadeo de datos simulados/reales mezclados), y el indicador de estado se pone naranja mientras está activo.
+
+### Interno
+- **`lib/main.dart` reducido ~45%** (11.700 → ~6.600 líneas): diálogos, paneles pintados a mano (`CustomPainter`), tarjetas, funciones de formato/color y trackers de historial se movieron a `lib/widgets/` y `lib/utils/` como archivos `part of`, sin cambiar ninguna lógica.
+
 ## [1.4.34] - 2026-08-28
 
 ### Quitado
