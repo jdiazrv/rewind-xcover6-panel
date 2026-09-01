@@ -512,13 +512,74 @@ class _DashboardState extends State<Dashboard> {
         'context': 'vessels.self',
         'updates': [
           {
-            'source': {'label': 'rewind-panel-anchor'},
+            // Device id suffix lets other installs of this same app tell
+            // "my own echo" apart from "a DIFFERENT install changed this" —
+            // see settings.anchorDeviceId and _onSignalKMessage's routing.
+            'source': {
+              'label': 'rewind-panel-anchor-${settings.anchorDeviceId}',
+            },
             'timestamp': DateTime.now().toUtc().toIso8601String(),
             'values': values,
           },
         ],
       }),
     );
+  }
+
+  // A DIFFERENT install of this app (another device, or the web version)
+  // published a navigation.anchor.* change — mirror it into this install's
+  // own local AnchorConfig, the same one the ANC screen and the alarm
+  // logic actually read, so anchoring from one install shows as anchored
+  // on every other install too. Called once per path per incoming delta
+  // item (see _onSignalKMessage) — cheap, and each path is independent.
+  bool _applyRemoteAnchorState(String path, dynamic value) {
+    final cfg = settings.anchorConfig;
+    var changed = false;
+    switch (path) {
+      case 'navigation.anchor.state':
+        final armed = value == 'on';
+        if (cfg.armed != armed) {
+          cfg.armed = armed;
+          cfg.armedOrMovedAt = DateTime.now();
+          changed = true;
+        }
+      case 'navigation.anchor.position':
+        if (value is Map) {
+          final lat = _num(value['latitude']);
+          final lon = _num(value['longitude']);
+          if (lat != null && lon != null &&
+              (cfg.dropLat != lat || cfg.dropLon != lon)) {
+            cfg.dropLat = lat;
+            cfg.dropLon = lon;
+            changed = true;
+          }
+        }
+      case 'navigation.anchor.watchZone':
+        if (value is Map) {
+          final shape = value['type'] as String?;
+          final radius = _num(value['radius']);
+          if (shape != null && cfg.shape != shape) {
+            cfg.shape = shape;
+            changed = true;
+          }
+          if (radius != null && cfg.radiusM != radius) {
+            cfg.radiusM = radius;
+            changed = true;
+          }
+          final startDeg = _num(value['startDeg']);
+          final endDeg = _num(value['endDeg']);
+          if (cfg.sectorStartDeg != startDeg || cfg.sectorEndDeg != endDeg) {
+            cfg.sectorStartDeg = startDeg;
+            cfg.sectorEndDeg = endDeg;
+            changed = true;
+          }
+        }
+    }
+    if (changed) {
+      unawaited(_saveSettings());
+      _syncAnchorPublishTimer();
+    }
+    return changed;
   }
 
   // Keeps distanceFromBow/bearingTrue fresh while armed (they change
@@ -1855,6 +1916,13 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    settings.anchorDeviceId = prefs.getString('anchorDeviceId') ?? '';
+    if (settings.anchorDeviceId.isEmpty) {
+      settings.anchorDeviceId =
+          '${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
+          '${math.Random().nextInt(1 << 32).toRadixString(36)}';
+      await prefs.setString('anchorDeviceId', settings.anchorDeviceId);
+    }
     if (_isSignalKWebapp) {
       // Served from Signal K's own webapp mount — always this same origin.
       // Never trust a cached host/port here: a device that previously
@@ -2684,10 +2752,18 @@ class _DashboardState extends State<Dashboard> {
       final rawTs = update is Map ? update['timestamp'] : null;
       final dataTime = rawTs is String ? DateTime.tryParse(rawTs) : null;
       // Our own navigation.anchor.* publish (see _publishAnchorDelta) rides
-      // the same shared paths hoekens uses — reading it back in as if it
-      // were "some other plugin's" anchor state would make the "hoekens is
-      // still armed" banner detect its own echo and never clear. Every
-      // path EXCEPT that one is fine to take from any source as usual.
+      // the same shared paths hoekens uses. Three cases, told apart by the
+      // device-id suffix in the source label (settings.anchorDeviceId):
+      // an echo of what THIS install just published (ignore, it's not new
+      // information); a publish from a DIFFERENT install of this same app
+      // — another phone/tablet, or the web version — which means the
+      // shared anchor watch actually changed and this install should sync
+      // to match (see _applyRemoteAnchorState); or a genuinely different
+      // source (hoekens etc.), which still drives the "other plugin still
+      // armed" disarm banner via signalK.anchorState as before. Without
+      // this distinction every install used to ignore ALL anchor.* data
+      // carrying its own label, including from other installs — meaning
+      // anchoring from the webapp never showed as anchored on Android.
       String sourceLabel = '';
       if (update is Map) {
         final flat = update[r'$source'];
@@ -2700,11 +2776,23 @@ class _DashboardState extends State<Dashboard> {
           }
         }
       }
-      final isOwnSource = sourceLabel.startsWith('rewind-panel');
+      final isOwnDevice =
+          sourceLabel == 'rewind-panel-anchor-${settings.anchorDeviceId}';
+      final isOtherAppDevice =
+          !isOwnDevice && sourceLabel.startsWith('rewind-panel-anchor');
       for (final item in values) {
         if (item is! Map) continue;
         final path = item['path'] as String? ?? '';
-        if (isOwnSource && path.startsWith('navigation.anchor.')) continue;
+        if (path.startsWith('navigation.anchor.')) {
+          if (isOwnDevice) continue;
+          if (isOtherAppDevice) {
+            changed = _applyRemoteAnchorState(path, item['value']) || changed;
+            continue;
+          }
+          // else: falls through to _routeValue below, same as any other
+          // path — a genuinely foreign source (hoekens) updates
+          // signalK.anchorState there, driving the disarm banner.
+        }
         if (isSelf) {
           changed = _routeValue(path, item['value'], dataTime) || changed;
         } else if (_aisSubscribed) {

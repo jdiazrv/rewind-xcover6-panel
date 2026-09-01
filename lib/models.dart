@@ -1122,6 +1122,15 @@ class WeatherModel {
 }
 
 class SettingsModel {
+  // Random, generated once on first run and persisted — lets the app tell
+  // "my own anchor.* publish echoing back" apart from "a DIFFERENT install
+  // of this same app (another phone/tablet, or the web version) changed
+  // the shared anchor watch", since both currently publish under the same
+  // 'rewind-panel-anchor' label prefix. Without this, every install was
+  // forced to ignore ALL rewind-panel-anchor-labeled data including from
+  // other installs — meaning anchoring from the webapp never showed as
+  // anchored on Android and vice versa.
+  String anchorDeviceId = '';
   String host = 'lysmarine.local';
   int port = 3000;
   String authBase64 = ''; // Basic auth for the Signal K connection (WebSocket + REST) — not InfluxDB.
