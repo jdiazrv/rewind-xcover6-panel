@@ -6,6 +6,10 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// anonymous/local-network read access over WS will work from a web build.
 /// [authBase64] is accepted for API symmetry with the native version, but
 /// unused.
-WebSocketChannel connectSignalKWs(Uri uri, {required String authBase64}) {
+WebSocketChannel connectSignalKWs(
+  Uri uri, {
+  required String authBase64,
+  String? bearerToken,
+}) {
   return WebSocketChannel.connect(uri);
 }

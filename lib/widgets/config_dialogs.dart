@@ -233,7 +233,7 @@ class _LocationPickerDialogState extends State<_LocationPickerDialog> {
 class _SensorConfigDialog extends StatefulWidget {
   const _SensorConfigDialog({required this.initial, required this.discover});
   final SensorConfig initial;
-  final Future<SkDiscovery?> Function() discover;
+  final Future<SkDiscovery> Function() discover;
 
   @override
   State<_SensorConfigDialog> createState() => _SensorConfigDialogState();
@@ -256,15 +256,20 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       _loading = true;
       _error = null;
     });
-    final d = await widget.discover();
+    SkDiscovery d;
+    try {
+      d = await widget.discover();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'No se pudo conectar a Signal K: ${friendlyApiError(e)}';
+      });
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _loading = false;
-      if (d == null) {
-        _error =
-            'No se pudo conectar a Signal K (${'revisa host/puerto en CFG'})';
-        return;
-      }
       _discovery = d;
       _cfg.hasOutsideTemp = d.hasOutsideTemp;
       _cfg.hasOutsidePressure = d.hasOutsidePressure;

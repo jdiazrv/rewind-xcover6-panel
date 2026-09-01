@@ -1026,4 +1026,3 @@ class _LineGraphPainter extends CustomPainter {
   bool shouldRepaint(_LineGraphPainter old) =>
       old.points != points || old.color != color || old.selected != selected;
 }
-

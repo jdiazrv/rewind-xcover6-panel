@@ -17,11 +17,25 @@ class PlatformWebView extends StatefulWidget {
   const PlatformWebView({
     super.key,
     required this.url,
+    this.headers,
+    this.skLogin,
+    this.allowGeolocation = true,
     this.onPageStarted,
     this.onPageFinished,
     this.onError,
   });
   final String url;
+  // Unused on web: an <iframe> can't attach custom request headers (a
+  // browser security restriction) — accepted only so call sites don't need
+  // platform-specific branching.
+  final Map<String, String>? headers;
+  // Unused on web — when this build IS the Signal K webapp (see
+  // _isSignalKWebapp), the iframe already shares the host page's own
+  // logged-in session/cookies on the same origin, nothing extra to do.
+  final ({String username, String password})? skLogin;
+  // Unused on web — an iframe's own geolocation permission is handled by
+  // the browser itself, not something this app can answer programmatically.
+  final bool allowGeolocation;
   final VoidCallback? onPageStarted;
   final VoidCallback? onPageFinished;
   final VoidCallback? onError;

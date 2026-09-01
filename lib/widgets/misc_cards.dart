@@ -460,12 +460,25 @@ class PressureTrendCard extends StatelessWidget {
     final trend = history.trend();
     final trendText = history.trendText();
     final source = fromInflux ? 'InfluxDB' : 'en vivo';
+    // The sparkline used to have no scale at all — "no se sabe de cuánto
+    // tiempo atrás es". span is the *actual* coverage of history.samples
+    // (up to 24h once InfluxDB has backfilled it, honestly shorter right
+    // after boot or with no Influx configured), not just an assumed label.
+    final span = history.span;
+    final spanLabel = span == null
+        ? null
+        : span.inHours >= 1
+        ? '${span.inHours} h'
+        : '${span.inMinutes} min';
+    final trendLine = spanLabel == null
+        ? trendText
+        : '$trendText · últ. $spanLabel';
     return CardShell(
       onTap: () => zoom?.call(
         'Presión',
         fmt(value, 0, ''),
         cPurple,
-        subtitle: '$trendText · $source',
+        subtitle: '$trendLine · $source',
         graphMetrics: const [mPressure],
       ),
       child: Padding(
@@ -540,7 +553,7 @@ class PressureTrendCard extends StatelessWidget {
             ),
             Center(
               child: Text(
-                trendText,
+                trendLine,
                 textAlign: TextAlign.center,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -1483,6 +1496,186 @@ class _StarterMotorGlyphPainter extends CustomPainter {
       oldDelegate.color != color;
 }
 
+// Small thermometer badge superimposed on the fridge glyphs below, so a
+// temperature-sensor card reads at a glance even before the number loads.
+void _paintThermometerBadge(Canvas canvas, Size size, Color color) {
+  final badgeCenter = Offset(size.width * 0.80, size.height * 0.80);
+  final badgeRadius = size.shortestSide * 0.26;
+  canvas.drawCircle(badgeCenter, badgeRadius, Paint()..color = cBg);
+  canvas.drawCircle(
+    badgeCenter,
+    badgeRadius,
+    Paint()
+      ..color = color.withValues(alpha: 0.55)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size.shortestSide * 0.022,
+  );
+
+  final stemTop = badgeCenter + Offset(0, -badgeRadius * 0.62);
+  final bulbCenter = badgeCenter + Offset(0, badgeRadius * 0.28);
+  final stemWidth = badgeRadius * 0.34;
+  canvas.drawLine(
+    stemTop,
+    bulbCenter,
+    Paint()
+      ..color = color.withValues(alpha: 0.35)
+      ..strokeWidth = stemWidth
+      ..strokeCap = StrokeCap.round,
+  );
+  canvas.drawLine(
+    Offset(stemTop.dx, stemTop.dy + badgeRadius * 0.15),
+    bulbCenter,
+    Paint()
+      ..color = color
+      ..strokeWidth = stemWidth
+      ..strokeCap = StrokeCap.round,
+  );
+  canvas.drawCircle(bulbCenter, stemWidth * 0.66, Paint()..color = color);
+}
+
+// Small single-door upright fridge — used for a fridge that opens with a
+// front, vertically-hinged door (as opposed to FridgeChestGlyph's
+// top-hinged lid).
+class FridgeUprightGlyph extends StatelessWidget {
+  const FridgeUprightGlyph({super.key, required this.color});
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+    painter: _FridgeUprightGlyphPainter(color),
+    child: const SizedBox.expand(),
+  );
+}
+
+class _FridgeUprightGlyphPainter extends CustomPainter {
+  const _FridgeUprightGlyphPainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = color
+      ..strokeWidth = size.shortestSide * 0.052
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fill = Paint()
+      ..color = color.withValues(alpha: 0.13)
+      ..style = PaintingStyle.fill;
+
+    final body = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        size.width * 0.26,
+        size.height * 0.10,
+        size.width * 0.48,
+        size.height * 0.72,
+      ),
+      Radius.circular(size.shortestSide * 0.07),
+    );
+    canvas.drawRRect(body, fill);
+    canvas.drawRRect(body, stroke);
+
+    // Long vertical handle near the door's hinge-free edge — reads as a
+    // single front door, unlike the chest glyph's short lid handle.
+    canvas.drawLine(
+      Offset(size.width * 0.62, size.height * 0.20),
+      Offset(size.width * 0.62, size.height * 0.72),
+      Paint()
+        ..color = color
+        ..strokeWidth = size.shortestSide * 0.055
+        ..strokeCap = StrokeCap.round,
+    );
+
+    canvas.drawLine(
+      Offset(size.width * 0.30, size.height * 0.86),
+      Offset(size.width * 0.70, size.height * 0.86),
+      stroke..strokeWidth = size.shortestSide * 0.05,
+    );
+
+    _paintThermometerBadge(canvas, size, color);
+  }
+
+  @override
+  bool shouldRepaint(covariant _FridgeUprightGlyphPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
+// Vertical fridge/freezer that opens via a top lid (chest-style, but taller)
+// — the horizontal split near the top and short lid handle distinguish it
+// from FridgeUprightGlyph's front door.
+class FridgeChestGlyph extends StatelessWidget {
+  const FridgeChestGlyph({super.key, required this.color});
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+    painter: _FridgeChestGlyphPainter(color),
+    child: const SizedBox.expand(),
+  );
+}
+
+class _FridgeChestGlyphPainter extends CustomPainter {
+  const _FridgeChestGlyphPainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = color
+      ..strokeWidth = size.shortestSide * 0.052
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fill = Paint()
+      ..color = color.withValues(alpha: 0.13)
+      ..style = PaintingStyle.fill;
+
+    final body = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        size.width * 0.24,
+        size.height * 0.10,
+        size.width * 0.52,
+        size.height * 0.72,
+      ),
+      Radius.circular(size.shortestSide * 0.07),
+    );
+    canvas.drawRRect(body, fill);
+    canvas.drawRRect(body, stroke);
+
+    // Lid split, hinged at the back — the top slice opens upward.
+    final lidY = size.height * 0.30;
+    canvas.drawLine(
+      Offset(size.width * 0.24, lidY),
+      Offset(size.width * 0.76, lidY),
+      Paint()
+        ..color = color
+        ..strokeWidth = size.shortestSide * 0.045
+        ..strokeCap = StrokeCap.round,
+    );
+
+    canvas.drawLine(
+      Offset(size.width * 0.42, size.height * 0.20),
+      Offset(size.width * 0.58, size.height * 0.20),
+      Paint()
+        ..color = color
+        ..strokeWidth = size.shortestSide * 0.06
+        ..strokeCap = StrokeCap.round,
+    );
+
+    canvas.drawLine(
+      Offset(size.width * 0.30, size.height * 0.86),
+      Offset(size.width * 0.70, size.height * 0.86),
+      stroke..strokeWidth = size.shortestSide * 0.05,
+    );
+
+    _paintThermometerBadge(canvas, size, color);
+  }
+
+  @override
+  bool shouldRepaint(covariant _FridgeChestGlyphPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
 class MarineCard extends StatelessWidget {
   const MarineCard({
     super.key,
@@ -1684,7 +1877,7 @@ class TankCard extends StatelessWidget {
               children: [
                 // Title bar
                 Container(
-                  height: large ? 46 : 38,
+                  height: large ? 46 : 30,
                   color: color,
                   alignment: Alignment.center,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1694,7 +1887,7 @@ class TankCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: Colors.black,
-                      fontSize: large ? 20 : 16,
+                      fontSize: large ? 20 : 14,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -1702,7 +1895,12 @@ class TankCard extends StatelessWidget {
                 // Body: left = icon + % + liters, right = gauge bar
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                    padding: EdgeInsets.fromLTRB(
+                      large ? 12 : 8,
+                      large ? 10 : 6,
+                      large ? 12 : 8,
+                      large ? 10 : 6,
+                    ),
                     child: Row(
                       children: [
                         // Left: icon, percentage, liters
@@ -1711,9 +1909,16 @@ class TankCard extends StatelessWidget {
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Icon(icon, color: cText, size: large ? 28 : 22),
+                              Icon(icon, color: cText, size: large ? 28 : 18),
+                              // fit: contain (not scaleDown) so the number
+                              // actually grows to fill the space the card's
+                              // own width gives it — on a wide tablet card
+                              // scaleDown left this stuck at its base size
+                              // with a lot of empty room around it, which
+                              // read as "the card is huge but the number is
+                              // small" rather than genuinely large text.
                               FittedBox(
-                                fit: BoxFit.scaleDown,
+                                fit: BoxFit.contain,
                                 alignment: Alignment.centerLeft,
                                 child: RichText(
                                   text: TextSpan(
@@ -1728,7 +1933,7 @@ class TankCard extends StatelessWidget {
                                             : percent.round().toString(),
                                         style: TextStyle(
                                           color: cText,
-                                          fontSize: large ? 52 : 42,
+                                          fontSize: large ? 52 : 40,
                                           fontWeight: FontWeight.w300,
                                         ),
                                       ),
@@ -1736,7 +1941,7 @@ class TankCard extends StatelessWidget {
                                         text: '%',
                                         style: TextStyle(
                                           color: cMuted,
-                                          fontSize: large ? 36 : 28,
+                                          fontSize: large ? 36 : 26,
                                           fontWeight: FontWeight.w300,
                                         ),
                                       ),
@@ -1750,7 +1955,7 @@ class TankCard extends StatelessWidget {
                                     : '$liters/$capacityL l',
                                 style: TextStyle(
                                   color: cMuted,
-                                  fontSize: large ? 14 : 12,
+                                  fontSize: large ? 14 : 13,
                                 ),
                               ),
                             ],
@@ -1759,7 +1964,7 @@ class TankCard extends StatelessWidget {
                         const SizedBox(width: 10),
                         // Right: vertical gauge bar
                         SizedBox(
-                          width: large ? 32 : 24,
+                          width: large ? 32 : 18,
                           child: SegmentedTankGauge(percent: percent),
                         ),
                       ],
@@ -1844,9 +2049,19 @@ class WeatherIcon extends StatelessWidget {
 // dot — everything else is "more cards to pick from" — so it's obvious at
 // a glance whether you're home or browsing the catalog.
 class _NavPageIndicator extends StatelessWidget {
-  const _NavPageIndicator({required this.total, required this.current});
+  const _NavPageIndicator({
+    required this.total,
+    required this.current,
+    this.onDotTap,
+  });
   final int total;
   final int current;
+  // Web has no touch swipe and mouse-drag on a nested ListView is
+  // unreliable ("no se puede deslizar" — click-and-drag scrolling here
+  // fights the overscroll-distance page-change detection above). Tapping a
+  // dot is the fallback: null on the tablet/touch build, where the real
+  // swipe already works and the dots are decoration-only there.
+  final void Function(int index)? onDotTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1862,17 +2077,87 @@ class _NavPageIndicator extends StatelessWidget {
         children: [
           for (var i = 0; i < total; i++) ...[
             if (i > 0) const SizedBox(height: 5),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: i == current ? 8 : 6,
-              height: i == current ? 8 : 6,
-              decoration: BoxDecoration(
-                color: i == current ? cCyan : cMuted.withValues(alpha: 0.5),
-                shape: i == current ? BoxShape.rectangle : BoxShape.circle,
-                borderRadius: i == current ? BorderRadius.circular(2) : null,
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onDotTap == null ? null : () => onDotTap!(i),
+              child: Padding(
+                // Bigger tap target than the dot itself draws — an 8px dot
+                // is too small to hit reliably with a mouse otherwise.
+                padding: const EdgeInsets.all(4),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  width: i == current ? 8 : 6,
+                  height: i == current ? 8 : 6,
+                  decoration: BoxDecoration(
+                    color: i == current ? cCyan : cMuted.withValues(alpha: 0.5),
+                    shape: i == current ? BoxShape.rectangle : BoxShape.circle,
+                    borderRadius: i == current
+                        ? BorderRadius.circular(2)
+                        : null,
+                  ),
+                ),
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+// Prominent, top-of-Diagnóstico version readout — replaces the old
+// easy-to-miss footer line (which also relied on a hand-maintained
+// constant that drifted out of sync with the actual build for weeks).
+// installSource in particular is the point of this card: "the console
+// says it's live, why doesn't my phone see it" is only answerable by
+// knowing whether the install on that device even came from Play Store.
+class _AppVersionCard extends StatelessWidget {
+  const _AppVersionCard({
+    required this.version,
+    required this.buildNumber,
+    required this.installSource,
+  });
+  final String? version;
+  final String? buildNumber;
+  final String installSource;
+
+  @override
+  Widget build(BuildContext context) {
+    final versionText = version == null
+        ? 'Cargando…'
+        : 'v$version${buildNumber != null ? ' (build $buildNumber)' : ''}';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: cPanel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cCyan.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline, color: cCyan, size: 18),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  versionText,
+                  style: const TextStyle(
+                    color: cText,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Instalado vía: $installSource',
+                  style: const TextStyle(color: cMuted, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

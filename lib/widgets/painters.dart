@@ -278,14 +278,30 @@ class _PremiumSpeedScalePainter extends CustomPainter {
 }
 
 class _PremiumCompassPainter extends CustomPainter {
-  const _PremiumCompassPainter({required this.value, required this.color});
+  const _PremiumCompassPainter({
+    required this.value,
+    required this.color,
+    this.compact = false,
+    this.showMarker = true,
+  });
   final double? value;
   final Color color;
+  // Phone-only bump (0.43→0.45) — this ring has a marker triangle drawn
+  // just outside its radius, and much past 0.45 that triangle's tip
+  // starts clipping the AspectRatio square's own edge ("sin desbordar"
+  // was explicit in the request), so it stays capped below the anchor
+  // ring's phone bump. Tablet keeps the original, unchanged 0.43.
+  final bool compact;
+  // The marker is a fixed 12-o'clock triangle, not actually rotated to
+  // point at `value` — on Rumbo (heading) that reads as a meaningless
+  // decoration rather than a real indicator, so the phone build of that
+  // card turns it off. VMG keeps it everywhere (unchanged).
+  final bool showMarker;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) * 0.43;
+    final radius = math.min(size.width, size.height) * (compact ? 0.45 : 0.43);
     canvas.drawCircle(
       center,
       radius,
@@ -317,17 +333,22 @@ class _PremiumCompassPainter extends CustomPainter {
           ..strokeWidth = major ? 1.6 : 1.0,
       );
     }
-    final markerPath = Path()
-      ..moveTo(center.dx, center.dy - radius - 11)
-      ..lineTo(center.dx - 11, center.dy - radius + 11)
-      ..lineTo(center.dx + 11, center.dy - radius + 11)
-      ..close();
-    canvas.drawPath(markerPath, Paint()..color = color);
+    if (showMarker) {
+      final markerPath = Path()
+        ..moveTo(center.dx, center.dy - radius - 11)
+        ..lineTo(center.dx - 11, center.dy - radius + 11)
+        ..lineTo(center.dx + 11, center.dy - radius + 11)
+        ..close();
+      canvas.drawPath(markerPath, Paint()..color = color);
+    }
   }
 
   @override
   bool shouldRepaint(covariant _PremiumCompassPainter oldDelegate) =>
-      oldDelegate.value != value || oldDelegate.color != color;
+      oldDelegate.value != value ||
+      oldDelegate.color != color ||
+      oldDelegate.compact != compact ||
+      oldDelegate.showMarker != showMarker;
 }
 
 // Anchor-centered radar: outer ring = the swing limit (maxRadius), the
@@ -342,6 +363,7 @@ class _PremiumAnchorPainter extends CustomPainter {
     required this.bearingDeg,
     required this.color,
     this.shipIcon,
+    this.compact = false,
   });
   final double? radiusFraction;
   // Relative to the bow, not true north — the ring is drawn bow-up, so the
@@ -350,11 +372,17 @@ class _PremiumAnchorPainter extends CustomPainter {
   final double? bearingDeg;
   final Color color;
   final ui.Image? shipIcon;
+  // Phone-only bump (0.43→0.47) — with the distance readout moved into
+  // the header there (see _premiumAnchorCard's compact branch), this ring
+  // no longer shares its column with a stacked number block above it, so
+  // it can grow to nearly the full card width. Tablet keeps the original
+  // layout (distance above the ring) and its original 0.43 radius.
+  final bool compact;
 
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) * 0.43;
+    final radius = math.min(size.width, size.height) * (compact ? 0.47 : 0.43);
     canvas.drawCircle(
       center,
       radius,
@@ -394,11 +422,19 @@ class _PremiumAnchorPainter extends CustomPainter {
 
     final frac = radiusFraction;
     final bearing = bearingDeg;
-    if (frac == null || bearing == null) return;
-    // bearingDeg is the anchor's direction as seen from the boat — to plot
-    // the boat's position around the now-fixed anchor we need the reverse
-    // vector, i.e. the boat sits opposite that bearing.
-    final a = -math.pi / 2 + (bearing + 180) * math.pi / 180;
+    if (frac == null) return;
+    // Normal case: bearingDeg (anchor's direction as seen from the boat)
+    // is known, so the boat's position around the now-fixed anchor is the
+    // reverse vector — it sits opposite that bearing. Without it (e.g. no
+    // heading source on this boat to derive an *apparent*/bow-relative
+    // bearing from), there's no real angle to plot — rather than drawing
+    // nothing, place the boat at a fixed point (straight up) at the
+    // correct distance and rotate its icon to face the anchor, so the
+    // card still reads as "anchored, this far away" instead of empty.
+    final hasBearing = bearing != null;
+    final a = hasBearing
+        ? -math.pi / 2 + (bearing + 180) * math.pi / 180
+        : -math.pi / 2;
     final r = frac.clamp(0.0, 1.15) * radius;
     final boatPos = center + Offset(math.cos(a), math.sin(a)) * r;
     canvas.drawLine(
@@ -410,17 +446,29 @@ class _PremiumAnchorPainter extends CustomPainter {
     );
     // Same top-down artwork as the AIS radar; the ring is bow-up, so the
     // icon just sits pointing straight up (that already *is* "facing our
-    // heading" in this frame) rather than being rotated a second time.
+    // heading" in this frame) rather than being rotated a second time —
+    // except in the no-bearing fallback above, where "up" has no meaning
+    // and the icon is rotated 180° instead so the bow faces back down at
+    // the anchor (center) as requested.
     final icon = shipIcon;
     if (icon != null) {
       const targetH = 22.0;
       final targetW = targetH * icon.width / icon.height;
+      final dst = Rect.fromCenter(
+        center: Offset.zero,
+        width: targetW,
+        height: targetH,
+      );
+      canvas.save();
+      canvas.translate(boatPos.dx, boatPos.dy);
+      if (!hasBearing) canvas.rotate(math.pi);
       canvas.drawImageRect(
         icon,
         Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
-        Rect.fromCenter(center: boatPos, width: targetW, height: targetH),
+        dst,
         Paint()..filterQuality = FilterQuality.medium,
       );
+      canvas.restore();
     } else {
       final boatPath = Path()
         ..moveTo(boatPos.dx, boatPos.dy - 9)
@@ -436,7 +484,8 @@ class _PremiumAnchorPainter extends CustomPainter {
       oldDelegate.radiusFraction != radiusFraction ||
       oldDelegate.bearingDeg != bearingDeg ||
       oldDelegate.color != color ||
-      oldDelegate.shipIcon != shipIcon;
+      oldDelegate.shipIcon != shipIcon ||
+      oldDelegate.compact != compact;
 }
 
 class _PremiumDepthScalePainter extends CustomPainter {
@@ -494,10 +543,12 @@ class _PremiumDepthScalePainter extends CustomPainter {
     }
     if (value != null) {
       final y = top + (bottom - top) * (value!.clamp(0.0, maxValue) / maxValue);
+      // Tip points right, at the scale line/number it's marking — not out
+      // toward the edge of the card.
       final marker = Path()
-        ..moveTo(x - 18, y)
-        ..lineTo(x - 2, y - 9)
-        ..lineTo(x - 2, y + 9)
+        ..moveTo(x - 2, y)
+        ..lineTo(x - 18, y - 9)
+        ..lineTo(x - 18, y + 9)
         ..close();
       canvas.drawPath(marker, Paint()..color = color);
     }

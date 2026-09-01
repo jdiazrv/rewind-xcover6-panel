@@ -110,3 +110,9 @@ tema, separados de la UI; `lib/ais_view.dart` y `lib/model_comparison.dart`
 son las dos funcionalidades más independientes (AIS relativo, comparativa
 de modelos + PDF); `lib/fullscreen/` gestiona el modo pantalla completa
 condicional para web.
+
+## Documentación adicional
+
+- [Detección de rachas de viento](docs/gust-detection.md) — algoritmo
+  estadístico (media + 3σ sobre 10min, con un piso absoluto de 5 m/s) usado
+  en `_WindHistory` (`lib/utils/trackers.dart`), tanto en VNT como en ANC.

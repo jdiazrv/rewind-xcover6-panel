@@ -26,12 +26,98 @@ class _DepthTrendTracker {
 class _WindHistory {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(minutes: 30);
+  // Every confirmed gust in the reporting window, not just the latest —
+  // overwriting with whichever confirmed most recently meant a big gust
+  // could get replaced by a smaller, more recent one; the displayed
+  // "racha" should be the actual peak, not just the last one seen.
+  final List<(DateTime, double)> _confirmedGusts = [];
 
   void add(double? value) {
     if (value == null) return;
     final now = DateTime.now();
     _samples.add((now, value));
     _trim(now);
+    _updateGustState(now);
+  }
+
+  // Statistical gust detection — see docs/gust-detection.md for the full
+  // writeup: a reading counts as a gust only when the last 3s peak is both
+  // a 3σ+ outlier above the 10-minute mean AND at least 5 m/s (~9.7kn)
+  // above it. The second clause is what keeps a dead-calm-but-twitchy
+  // reading from registering as a "gust" on variance alone.
+  static const _gustBaselineWindow = Duration(minutes: 10);
+  static const _gustPeakWindow = Duration(seconds: 3);
+  static const _gustReportWindow = Duration(minutes: 30);
+  static const _gustAbsoluteFloorKn = 5 / 0.514444; // 5 m/s in knots
+
+  ({double? meanKn, double? stddevKn})? _baselineStats(DateTime now) {
+    final baseline = [
+      for (final s in _samples)
+        if (!s.$1.isBefore(now.subtract(_gustBaselineWindow))) s.$2,
+    ];
+    // Not enough history yet to trust a standard deviation.
+    if (baseline.length < 30) return null;
+    final mean = baseline.reduce((a, b) => a + b) / baseline.length;
+    final variance =
+        baseline.map((v) => (v - mean) * (v - mean)).reduce((a, b) => a + b) /
+        baseline.length;
+    return (meanKn: mean, stddevKn: math.sqrt(variance));
+  }
+
+  double? _peak3s(DateTime now) {
+    final peak = [
+      for (final s in _samples)
+        if (!s.$1.isBefore(now.subtract(_gustPeakWindow))) s.$2,
+    ];
+    return peak.isEmpty ? null : peak.reduce(math.max);
+  }
+
+  void _updateGustState(DateTime now) {
+    _confirmedGusts.removeWhere(
+      (g) => now.difference(g.$1) > _gustReportWindow,
+    );
+    final stats = _baselineStats(now);
+    final uMax = _peak3s(now);
+    if (stats == null || uMax == null) return;
+    final mean = stats.meanKn!, stddev = stats.stddevKn!;
+    if (uMax >= mean + 3 * stddev && uMax - mean >= _gustAbsoluteFloorKn) {
+      _confirmedGusts.add((now, uMax));
+    }
+  }
+
+  // True only while a gust is actively confirmed (within the last peak
+  // window) — not "was there one recently".
+  bool isGusting() =>
+      _confirmedGusts.isNotEmpty &&
+      DateTime.now().difference(_confirmedGusts.last.$1) < _gustPeakWindow;
+
+  // The PEAK confirmed gust in the reporting window + how long ago that
+  // peak (not necessarily the latest confirmation) happened.
+  ({double value, Duration age})? statisticalGustWithAge() {
+    if (_confirmedGusts.isEmpty) return null;
+    final best = _confirmedGusts.reduce((a, b) => a.$2 >= b.$2 ? a : b);
+    return (value: best.$2, age: DateTime.now().difference(best.$1));
+  }
+
+  // Raw numbers behind the detection — mean/stddev/3s-peak/floor — for a
+  // "why did/didn't this count as a gust" debug view.
+  ({
+    double? meanKn,
+    double? stddevKn,
+    double? peak3sKn,
+    double floorKn,
+    bool isGusting,
+  })
+  gustDebugSnapshot() {
+    final now = DateTime.now();
+    final stats = _baselineStats(now);
+    return (
+      meanKn: stats?.meanKn,
+      stddevKn: stats?.stddevKn,
+      peak3sKn: _peak3s(now),
+      floorKn: _gustAbsoluteFloorKn,
+      isGusting: isGusting(),
+    );
   }
 
   void _trim(DateTime now) {
@@ -64,22 +150,11 @@ class _WindHistory {
     return 0;
   }
 
-  // Max raw value in the last [window] (default 2min) = gust.
-  double? gust({Duration window = const Duration(minutes: 2)}) {
-    final now = DateTime.now();
-    final start = now.subtract(window);
-    final vals = [
-      for (final s in _samples)
-        if (!s.$1.isBefore(start)) s.$2,
-    ];
-    if (vals.isEmpty) return null;
-    return vals.reduce(math.max);
-  }
 }
 
 class _PressureHistory {
   final List<(DateTime, double)> _samples = [];
-  static const _window = Duration(hours: 6);
+  static const _window = Duration(hours: 24);
 
   void add(double? value) {
     if (value == null) return;
@@ -103,6 +178,17 @@ class _PressureHistory {
   }
 
   List<(DateTime, double)> get samples => List.unmodifiable(_samples);
+
+  // How far back the sparkline actually reaches — shown on the card so
+  // "no se sabe de cuánto tiempo atrás es" has a real answer instead of an
+  // unlabeled squiggle. Genuinely reflects what's in `_samples`: the full
+  // 24h window once InfluxDB has backfilled it, or a shorter, honestly
+  // labeled span before that (freshly booted with no Influx configured, for
+  // instance) — never hardcoded to claim 24h when it isn't there yet.
+  Duration? get span {
+    if (_samples.length < 2) return null;
+    return _samples.last.$1.difference(_samples.first.$1);
+  }
 
   double? get ratePerHour {
     if (_samples.length < 2) return null;

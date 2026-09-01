@@ -22,23 +22,8 @@ const cMagenta = Color(
   double lat2,
   double lon2,
 ) {
-  const r = 3440.065; // nm
-  final dLat = (lat2 - lat1) * math.pi / 180,
-      dLon = (lon2 - lon1) * math.pi / 180;
-  final lat1r = lat1 * math.pi / 180, lat2r = lat2 * math.pi / 180;
-  final a =
-      math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(lat1r) *
-          math.cos(lat2r) *
-          math.sin(dLon / 2) *
-          math.sin(dLon / 2);
-  final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-  final y = math.sin(dLon) * math.cos(lat2r);
-  final x =
-      math.cos(lat1r) * math.sin(lat2r) -
-      math.sin(lat1r) * math.cos(lat2r) * math.cos(dLon);
-  final brg = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
-  return (bearingDeg: brg, distNm: r * c);
+  final r = bearingDistanceMeters(lat1, lon1, lat2, lon2);
+  return (bearingDeg: r.bearingDeg, distNm: r.distanceM / 1852.0);
 }
 
 ({double cpaNm, double tcpaMin})? _cpa(
@@ -325,6 +310,50 @@ String _aisTypeName(int? id) {
   }
 }
 
+// Nulls sort last regardless of column — a target with no CPA/SOG/etc. is
+// "unknown", not "zero", and burying it at the bottom keeps the ascending
+// sort from front-loading the list with targets missing the very data
+// being sorted on.
+int _compareNullableNum(num? a, num? b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a.compareTo(b);
+}
+
+int _compareNullableStr(String? a, String? b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return a.compareTo(b);
+}
+
+/// Header tap-to-sort for the AIS list — always ascending. TCPA (the
+/// default) is bucketed to the nearest 0.5 min so tiny tick-to-tick float
+/// jitter between near-equal TCPAs doesn't make rows swap places
+/// continuously; every column falls back to the target's own context id
+/// for a stable tie-break.
+int _aisListCompare(_AisPlot a, _AisPlot b, String column) {
+  final cmp = switch (column) {
+    'name' => (a.target.name ?? a.target.mmsi ?? '').compareTo(
+      b.target.name ?? b.target.mmsi ?? '',
+    ),
+    'type' => _aisTypeName(
+      a.target.shipTypeId,
+    ).compareTo(_aisTypeName(b.target.shipTypeId)),
+    'sog' => _compareNullableNum(a.target.sogKn, b.target.sogKn),
+    'brg' => a.bearingDeg.compareTo(b.bearingDeg),
+    'dist' => a.distNm.compareTo(b.distNm),
+    'cpa' => _compareNullableNum(a.cpaNm, b.cpaNm),
+    'crossing' => _compareNullableStr(a.crossing, b.crossing),
+    _ => _compareNullableNum(
+      a.tcpaMin == null ? null : (a.tcpaMin! * 2).round(),
+      b.tcpaMin == null ? null : (b.tcpaMin! * 2).round(),
+    ),
+  };
+  return cmp != 0 ? cmp : a.target.context.compareTo(b.target.context);
+}
+
 /// Rotated hull outline helper — all the hand-drawn vessel silhouettes below
 /// build their points in local (bow = -y) space and rotate/translate here.
 Path _rotatedHull(Offset pos, double bearingDeg, List<Offset> localPoints) {
@@ -391,17 +420,19 @@ Path _hullForPlot(_AisPlot plot) {
   return _genericHull(plot.pos, plot.screenCourseDeg);
 }
 
-// Own-ship icon (user-supplied top-down sailboat artwork) — loaded once and cached.
-ui.Image? _cachedShipIcon;
-Future<ui.Image>? _shipIconLoading;
-Future<ui.Image> loadShipIcon() {
-  final cached = _cachedShipIcon;
+// Own-ship icon (user-selectable top-down artwork) — cached per asset path
+// so switching the icon in CFG doesn't re-decode on every frame, but a
+// different selection isn't served a stale cached image either.
+final Map<String, ui.Image> _cachedShipIcons = {};
+final Map<String, Future<ui.Image>> _shipIconLoading = {};
+Future<ui.Image> loadShipIcon([String assetPath = 'assets/img/own_ship.png']) {
+  final cached = _cachedShipIcons[assetPath];
   if (cached != null) return Future.value(cached);
-  return _shipIconLoading ??= () async {
-    final data = await rootBundle.load('assets/img/own_ship.png');
+  return _shipIconLoading[assetPath] ??= () async {
+    final data = await rootBundle.load(assetPath);
     final codec = await ui.instantiateImageCodec(data.buffer.asUint8List());
     final frame = await codec.getNextFrame();
-    _cachedShipIcon = frame.image;
+    _cachedShipIcons[assetPath] = frame.image;
     return frame.image;
   }();
 }
@@ -412,6 +443,7 @@ class _AisRadarPainter extends CustomPainter {
     required this.rangeNm,
     required this.ownScreenHeadingDeg,
     required this.northScreenAngleDeg,
+    this.headingFromCog = false,
     this.shipIcon,
   });
   final List<_AisPlot> plots;
@@ -419,6 +451,10 @@ class _AisRadarPainter extends CustomPainter {
   final double
   ownScreenHeadingDeg; // own ship icon rotation relative to screen-up
   final double northScreenAngleDeg; // where true north points on screen
+  // True when there's no heading sensor and this line/icon orientation is
+  // COG standing in for it instead — drawn yellow rather than cyan so it
+  // reads as "estimated from COG", not a real heading reading.
+  final bool headingFromCog;
   final ui.Image? shipIcon;
 
   @override
@@ -466,7 +502,7 @@ class _AisRadarPainter extends CustomPainter {
       center,
       headingLineEnd,
       Paint()
-        ..color = cCyan.withValues(alpha: 0.5)
+        ..color = (headingFromCog ? cYellow : cCyan).withValues(alpha: 0.5)
         ..strokeWidth = 1.5,
     );
     final northRad = northScreenAngleDeg * math.pi / 180;
@@ -594,8 +630,7 @@ void showAisTargetDetail(
   String? crossing,
 }) {
   final t = target;
-  final hasMeaningfulCpa =
-      tcpaMin != null && tcpaMin <= 30 && crossing != null;
+  final hasMeaningfulCpa = tcpaMin != null && tcpaMin <= 30 && crossing != null;
   Widget row(String k, String v) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 3),
     child: Row(
@@ -668,9 +703,7 @@ void showAisTargetDetail(
                 ),
                 row(
                   'TCPA',
-                  tcpaMin != null
-                      ? '${tcpaMin.toStringAsFixed(0)} min'
-                      : '--',
+                  tcpaMin != null ? '${tcpaMin.toStringAsFixed(0)} min' : '--',
                 ),
                 if (hasMeaningfulCpa) row('Cruce', crossing),
                 row(
@@ -735,13 +768,15 @@ class AisTargetPhoto extends StatelessWidget {
 }
 
 class AisRelativeView extends StatefulWidget {
-  const AisRelativeView({super.key, 
+  const AisRelativeView({
+    super.key,
     required this.targets,
     required this.ownHeadingDeg,
     required this.ownCogDeg,
     required this.ownSogKn,
     required this.ownLat,
     required this.ownLon,
+    this.shipIconAsset = 'assets/img/own_ship.png',
   });
   final Map<String, AisTarget> targets;
   final double? ownHeadingDeg;
@@ -749,6 +784,7 @@ class AisRelativeView extends StatefulWidget {
   final double? ownSogKn;
   final double? ownLat;
   final double? ownLon;
+  final String shipIconAsset;
 
   @override
   State<AisRelativeView> createState() => _AisRelativeViewState();
@@ -760,6 +796,11 @@ class _AisRelativeViewState extends State<AisRelativeView>
   bool get wantKeepAlive => true;
 
   bool _showList = false;
+  // Which column the AIS list is sorted by, tap-to-change on the header —
+  // always ascending (soonest/closest/slowest first), matching the request
+  // literally rather than adding a toggle-descending affordance nobody
+  // asked for.
+  String _sortColumn = 'tcpa';
   bool _headingUp = true;
   bool _showTrail = false;
   bool _relativeMotion = true;
@@ -799,7 +840,17 @@ class _AisRelativeViewState extends State<AisRelativeView>
   @override
   void initState() {
     super.initState();
-    loadShipIcon().then((img) {
+    _loadShipIconAsset();
+  }
+
+  @override
+  void didUpdateWidget(AisRelativeView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.shipIconAsset != widget.shipIconAsset) _loadShipIconAsset();
+  }
+
+  void _loadShipIconAsset() {
+    loadShipIcon(widget.shipIconAsset).then((img) {
       if (mounted) setState(() => _shipIcon = img);
     });
   }
@@ -831,7 +882,22 @@ class _AisRelativeViewState extends State<AisRelativeView>
         builder: (ctx, c) {
           final size = Size(c.maxWidth, c.maxHeight);
           final rangeNm = _effectiveRange();
-          final ownHeading = widget.ownHeadingDeg ?? 0;
+          // No heading sensor/autopilot on some boats — common enough to
+          // need a real fallback rather than just showing nothing. COG only
+          // means something as a proxy for which way the bow points once
+          // actually moving (below ~2kn it's noise — current/leeway drift
+          // dominate), hence the SOG gate. Below that, or with no COG
+          // either, ownHeading falls back to 0 (north) same as before —
+          // an edge case (no heading, and not really moving), not the one
+          // this fallback targets.
+          final hasHeading = widget.ownHeadingDeg != null;
+          final cogFallbackActive =
+              !hasHeading &&
+              widget.ownCogDeg != null &&
+              (widget.ownSogKn ?? 0) > 2;
+          final ownHeading =
+              widget.ownHeadingDeg ??
+              (cogFallbackActive ? widget.ownCogDeg! : 0);
           final plots = _computeAisPlots(
             widget.targets.values.toList(),
             widget.ownLat,
@@ -894,6 +960,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
                   rangeNm,
                   ownScreenHeadingDeg,
                   northScreenAngleDeg,
+                  cogFallbackActive,
                 ),
               Positioned(
                 top: 8,
@@ -906,10 +973,10 @@ class _AisRelativeViewState extends State<AisRelativeView>
                         crossAxisAlignment: CrossAxisAlignment.baseline,
                         textBaseline: TextBaseline.alphabetic,
                         children: [
-                          const Text(
-                            'HDG',
+                          Text(
+                            hasHeading ? 'HDG' : 'COG',
                             style: TextStyle(
-                              color: cText,
+                              color: hasHeading ? cText : cYellow,
                               fontSize: 15,
                               fontWeight: FontWeight.w700,
                               letterSpacing: 0.6,
@@ -917,9 +984,11 @@ class _AisRelativeViewState extends State<AisRelativeView>
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            widget.ownHeadingDeg != null
+                            hasHeading
                                 ? '${widget.ownHeadingDeg!.round()}°'
-                                : '--',
+                                : (cogFallbackActive
+                                      ? '${widget.ownCogDeg!.round()}°'
+                                      : '--'),
                             style: const TextStyle(
                               color: cText,
                               fontSize: 26,
@@ -932,7 +1001,11 @@ class _AisRelativeViewState extends State<AisRelativeView>
                     if (!_showList) ...[
                       const SizedBox(height: 10),
                       _pillChip(
-                        _headingUp ? 'RUMBO ARRIBA' : 'NORTE ARRIBA',
+                        _headingUp
+                            ? (cogFallbackActive
+                                  ? 'COG ARRIBA'
+                                  : 'RUMBO ARRIBA')
+                            : 'NORTE ARRIBA',
                         () => setState(() => _headingUp = !_headingUp),
                       ),
                       const SizedBox(height: 8),
@@ -1136,6 +1209,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
     double rangeNm,
     double ownScreenHeadingDeg,
     double northScreenAngleDeg,
+    bool headingFromCog,
   ) {
     // Pinch changes the nm-per-ring scale (like a real chartplotter), not a
     // canvas transform — icon/text sizes stay constant, only the range does.
@@ -1166,6 +1240,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
           rangeNm: rangeNm,
           ownScreenHeadingDeg: ownScreenHeadingDeg,
           northScreenAngleDeg: northScreenAngleDeg,
+          headingFromCog: headingFromCog,
           shipIcon: _shipIcon,
         ),
         size: size,
@@ -1174,26 +1249,33 @@ class _AisRelativeViewState extends State<AisRelativeView>
   }
 
   Widget _aisList(List<_AisPlot> plots) {
-    // Bucket TCPA to the nearest 0.5 min and break ties by a stable key (the
-    // target's own context id) — otherwise tiny tick-to-tick float jitter
-    // between near-equal TCPAs makes rows swap places continuously.
     final sorted = [...plots]
-      ..sort((a, b) {
-        final ta = a.tcpaMin, tb = b.tcpaMin;
-        if (ta == null && tb == null) {
-          return a.target.context.compareTo(b.target.context);
-        }
-        if (ta == null) return 1;
-        if (tb == null) return -1;
-        final cmp = (ta * 2).round().compareTo((tb * 2).round());
-        return cmp != 0 ? cmp : a.target.context.compareTo(b.target.context);
-      });
-    const headStyle = TextStyle(
-      color: cMuted,
-      fontSize: 11,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0.6,
-    );
+      ..sort((a, b) => _aisListCompare(a, b, _sortColumn));
+    Widget sortHeader(
+      String label,
+      String column,
+      double width, {
+      TextAlign align = TextAlign.right,
+    }) {
+      final active = _sortColumn == column;
+      return SizedBox(
+        width: width,
+        child: InkWell(
+          onTap: () => setState(() => _sortColumn = column),
+          child: Text(
+            label,
+            textAlign: align,
+            style: TextStyle(
+              color: active ? cCyan : cMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+            ),
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 40, 10, 8),
       child: Column(
@@ -1203,66 +1285,14 @@ class _AisRelativeViewState extends State<AisRelativeView>
             padding: const EdgeInsets.only(bottom: 6),
             child: Row(
               children: [
-                const SizedBox(
-                  width: 150,
-                  child: Text('BARCO', style: headStyle),
-                ),
-                SizedBox(
-                  width: 78,
-                  child: Text(
-                    'TIPO',
-                    style: headStyle,
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-                SizedBox(
-                  width: 46,
-                  child: Text(
-                    'SOG',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                SizedBox(
-                  width: 46,
-                  child: Text(
-                    'BRG',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                SizedBox(
-                  width: 54,
-                  child: Text(
-                    'DIST',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                SizedBox(
-                  width: 52,
-                  child: Text(
-                    'CPA',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                SizedBox(
-                  width: 52,
-                  child: Text(
-                    'TCPA',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-                const SizedBox(
-                  width: 92,
-                  child: Text(
-                    'CRUCE',
-                    style: headStyle,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
+                sortHeader('BARCO', 'name', 150, align: TextAlign.left),
+                sortHeader('TIPO', 'type', 78, align: TextAlign.center),
+                sortHeader('SOG', 'sog', 46),
+                sortHeader('BRG', 'brg', 46),
+                sortHeader('DIST', 'dist', 54),
+                sortHeader('CPA', 'cpa', 52),
+                sortHeader('TCPA', 'tcpa', 52),
+                sortHeader('CRUCE', 'crossing', 92),
               ],
             ),
           ),

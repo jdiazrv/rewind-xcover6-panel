@@ -1,6 +1,5 @@
 part of '../main.dart';
 
-
 // ─── Host preset chip ─────────────────────────────────────────────────────────
 class _HostPresetChip extends StatelessWidget {
   const _HostPresetChip({
@@ -173,42 +172,53 @@ class _Header extends StatelessWidget {
           ),
           if (kIsWeb) const _FullscreenButton(),
           if (kIsWeb) const SizedBox(width: 8),
-          if (alarmCount > 0) ...[
-            GestureDetector(
-              onTap: onBellTap,
+          // Always present, not just while something's actively alarming —
+          // otherwise there's no way to get to the alarm list (to check
+          // what's muted, silence something in advance, etc.) except by
+          // waiting for an alarm to fire first.
+          GestureDetector(
+            onTap: onBellTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  const Icon(Icons.notifications_active, color: cRed),
-                  Positioned(
-                    right: -4,
-                    top: -4,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      decoration: const BoxDecoration(
-                        color: cRed,
-                        shape: BoxShape.circle,
-                      ),
-                      constraints: const BoxConstraints(
-                        minWidth: 16,
-                        minHeight: 16,
-                      ),
-                      child: Text(
-                        '$alarmCount',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
+                  Icon(
+                    alarmCount > 0
+                        ? Icons.notifications_active
+                        : Icons.notifications_none,
+                    color: alarmCount > 0 ? cRed : cMuted,
+                  ),
+                  if (alarmCount > 0)
+                    Positioned(
+                      right: -4,
+                      top: -4,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: const BoxDecoration(
+                          color: cRed,
+                          shape: BoxShape.circle,
+                        ),
+                        constraints: const BoxConstraints(
+                          minWidth: 16,
+                          minHeight: 16,
+                        ),
+                        child: Text(
+                          '$alarmCount',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                          ),
                         ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
-            const SizedBox(width: 12),
-          ],
+          ),
+          const SizedBox(width: 4),
           Icon(
             ok ? Icons.link : Icons.link_off,
             color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),

@@ -547,7 +547,8 @@ pw.Widget pdfWindArrow(double? degTo, double? speedKn, {double size = 9}) {
 // hours across the top, one colour-coded wind row per model (speed + gust +
 // direction arrow), so several models can be scanned and compared at a glance.
 class ModelComparisonDialog extends StatefulWidget {
-  const ModelComparisonDialog({super.key, 
+  const ModelComparisonDialog({
+    super.key,
     required this.place,
     required this.lat,
     required this.lon,

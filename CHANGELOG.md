@@ -2,6 +2,28 @@
 
 Todas las versiones notables de este proyecto se documentan aquí.
 
+## [1.4.37] - 2026-08-29
+
+### Añadido
+- **TEMP → Nevera 1/2**: iconos propios (nevera de puerta vertical / nevera vertical con tapa), cada uno con un termómetro superpuesto.
+
+### Cambiado
+- **Panel Motor → RPM**: el tacómetro pasa de arco a círculo completo (0 a 4, hueco en la parte inferior como un cuentarrevoluciones real).
+- **Panel Motor → indicadores**: Contacto/Carga/Presión aceite/Temperatura/Precalentar ahora en una sola columna, todos del mismo ancho y más juntos verticalmente.
+- **Panel Motor → controles SIMUL**: OFF/ON/START/STOP pasan a botones redondos, colocados en el espacio que dejan libre los indicadores más compactos.
+
+## [1.4.36] - 2026-08-29
+
+### Añadido
+- **Panel motor Premium**: slider de RPM en modo SIMUL (arranca en 700 RPM), sector del tacómetro más grande, número de RPM sin decimales, indicadores de alarma tipo LED (fondo de color sólido + resplandor al encenderse). Los botones OFF/ON/START/STOP solo se muestran con SIMUL activado.
+- **CFG → Diagnóstico**: nueva columna "RASPBERRY PI" con temperatura CPU/GPU y uso de CPU/memoria/SD.
+- **TEMP**: nuevas tarjetas de temperatura de Sonoff y fusibles solares.
+
+### Cambiado
+- **PWR**: la temperatura de cada batería (servicio y bowthruster) se muestra ahora en su propia tarjeta, en vez de tarjetas aparte en TEMP.
+- **TEMP → Raspberry**: movido a `CFG → Diagnóstico` junto con el resto de datos de la Pi.
+- **MAR → T. mar**: ahora usa el sensor en vivo cuando está disponible, en vez de solo el dato de pronóstico.
+
 ## [1.4.35] - 2026-08-29
 
 ### Añadido

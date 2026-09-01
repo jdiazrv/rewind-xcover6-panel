@@ -294,13 +294,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   }
 
   // ─── Stats ──────────────────────────────────────────────────────────────
-  double _avg(List<GraphPoint> pts) =>
-      pts.isEmpty ? 0 : pts.map((p) => p.value).reduce((a, b) => a + b) / pts.length;
+  double _avg(List<GraphPoint> pts) => pts.isEmpty
+      ? 0
+      : pts.map((p) => p.value).reduce((a, b) => a + b) / pts.length;
   double _max(List<GraphPoint> pts) =>
       pts.isEmpty ? 0 : pts.map((p) => p.value).reduce(math.max);
-  double _maxAbs(List<GraphPoint> pts) => pts.isEmpty
-      ? 0
-      : pts.map((p) => p.value.abs()).reduce(math.max);
+  double _maxAbs(List<GraphPoint> pts) =>
+      pts.isEmpty ? 0 : pts.map((p) => p.value.abs()).reduce(math.max);
 
   // Points are roughly evenly spaced at the range's aggregation interval, so
   // distance ≈ Σ(speed · Δt) using that fixed interval as a stand-in for the
@@ -338,12 +338,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       return (
         twsEdges: const [0],
         twaBands: twaBands,
-        avgStw: [
-          for (final _ in twaBands) <double?>[],
-        ],
-        counts: [
-          for (final _ in twaBands) <int>[],
-        ],
+        avgStw: [for (final _ in twaBands) <double?>[]],
+        counts: [for (final _ in twaBands) <int>[]],
       );
     }
     final twsValues = tws.map((p) => p.value).toList();
@@ -391,9 +387,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final sums = [
       for (final _ in twaBands) List<double>.filled(twsBinCount, 0),
     ];
-    final counts = [
-      for (final _ in twaBands) List<int>.filled(twsBinCount, 0),
-    ];
+    final counts = [for (final _ in twaBands) List<int>.filled(twsBinCount, 0)];
 
     for (final sp in stw) {
       final twaP = nearest(twa, sp.time, tol);
@@ -1060,7 +1054,10 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
         children: [
           cell('TWA \\ TWS', header: true),
           for (var w = 0; w < twsBinCount; w++)
-            cell('${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt', header: true),
+            cell(
+              '${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt',
+              header: true,
+            ),
         ],
       ),
       for (var b = 0; b < polar.twaBands.length; b++)

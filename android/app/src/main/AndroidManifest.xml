@@ -1,6 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Needed for the embedded anchor-alarm WebView (see anchor_webview.dart)
+         to answer the plugin's own "getCurrentPosition" JS geolocation call
+         with the device's real GPS fix, the same way a normal mobile browser
+         would — without this, WebView geolocation silently fails and the
+         plugin has no coordinate to arm the anchor with. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- ANC's "te has llevado el móvil" detectors: step count (pedometer)
+         and the boat's own WiFi SSID (network_info_plus), both used only
+         while the anchor watch is relying on device GPS as a stand-in for
+         Signal K's own position. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
 
     <application
         android:label="REWIND Panel"

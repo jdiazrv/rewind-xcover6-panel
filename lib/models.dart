@@ -1,8 +1,39 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import 'attitude_sensor.dart';
 import 'data_api.dart';
 import 'theme.dart';
+
+/// Great-circle bearing/distance between two points — shared by the AIS
+/// radar (ais_view.dart, in nautical miles) and the native anchor watch
+/// (main.dart, in meters), so both use the same Haversine math instead of
+/// two divergent copies.
+({double bearingDeg, double distanceM}) bearingDistanceMeters(
+  double lat1,
+  double lon1,
+  double lat2,
+  double lon2,
+) {
+  const r = 6371000.0; // meters
+  final dLat = (lat2 - lat1) * math.pi / 180,
+      dLon = (lon2 - lon1) * math.pi / 180;
+  final lat1r = lat1 * math.pi / 180, lat2r = lat2 * math.pi / 180;
+  final a =
+      math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(lat1r) *
+          math.cos(lat2r) *
+          math.sin(dLon / 2) *
+          math.sin(dLon / 2);
+  final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  final y = math.sin(dLon) * math.cos(lat2r);
+  final x =
+      math.cos(lat1r) * math.sin(lat2r) -
+      math.sin(lat1r) * math.cos(lat2r) * math.cos(dLon);
+  final brg = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+  return (bearingDeg: brg, distanceM: r * c);
+}
 
 class GraphPoint {
   const GraphPoint({required this.time, required this.value});
@@ -42,13 +73,6 @@ const mOutdoorTemp = MetricDef(
   offset: -273.15,
   color: cCyan,
 );
-const mBowTemp = MetricDef(
-  'electrical.batteries.bowthruster.temperature',
-  'T. bowthruster',
-  'C',
-  offset: -273.15,
-  color: cOrange,
-);
 const mSeaTemp = MetricDef(
   'environment.water.temperature',
   'T. mar',
@@ -56,12 +80,19 @@ const mSeaTemp = MetricDef(
   offset: -273.15,
   color: cCyan,
 );
-const mCpuTemp = MetricDef(
-  'environment.rpi.cpu.temperature',
-  'T. Raspberry',
+const mSonoffTemp = MetricDef(
+  'environment.sonoff.temperature',
+  'T. Sonoff',
   'C',
   offset: -273.15,
-  color: cMuted,
+  color: cOrange,
+);
+const mSolarFusesTemp = MetricDef(
+  'environment.solar_fuses.temperature',
+  'T. Fusibles solar',
+  'C',
+  offset: -273.15,
+  color: cOrange,
 );
 const mDcLoads = MetricDef(
   'electrical.venus.dcPower',
@@ -354,6 +385,17 @@ class SignalKModel {
   double? stwKn;
   double? headingTrueDeg;
   double? cogTrueDeg;
+  // Each of these four also gets its own timestamp — navUpdate above is
+  // shared by every navigation.* path, so a compass that dies while GPS
+  // keeps emitting SOG/position deltas kept navUpdate ticking over and
+  // heading read as "fresh" forever (the exact bug reported: heading
+  // frozen at a real value since a specific time, never falling back to
+  // COG because the shared timestamp masked it). These four feed that
+  // fallback logic directly, so they need real per-field staleness.
+  DateTime? sogKnUpdate;
+  DateTime? stwKnUpdate;
+  DateTime? headingTrueDegUpdate;
+  DateTime? cogTrueDegUpdate;
   double? heelDeg;
   double? pitchDeg;
   // GNSS/GPS quality — separate from the position update timestamp above,
@@ -377,6 +419,12 @@ class SignalKModel {
   double? indoorTempK;
   double? indoorHumidity; // 0-100 %
   double? cpuTempK;
+  double? gpuTempK;
+  double? cpuUtil; // 0-100 %
+  double? memUtil; // 0-100 %
+  double? sdUtil; // 0-100 %
+  double? sonoffTempK;
+  double? solarFusesTempK;
   double? fridge1TempK;
   double? fridge2TempK;
   // Wind
@@ -396,6 +444,54 @@ class SignalKModel {
   double? startV;
   double? bowthrusterV;
   double? engineHours; // hours, from propulsion.<id>.runTime (seconds)
+  // Real engine telemetry — siblings of enginePath under the same
+  // propulsion.<id> base (see _buildDynamicHandlers), auto-registered
+  // once the user picks the engine's runTime path in CFG > Sensores, no
+  // separate configuration needed for each.
+  double? engineRpm; // revolutions (Hz) × 60
+  // Percent load, same PGN 61444 (EEC1) frame as RPM — SPN 512. Purely
+  // informational (no alarm derived from it), shown only in the
+  // "Completo" Motor panel.
+  double? engineTorquePercent;
+  double? engineCoolantTempK;
+  double? engineOilPressurePa;
+  double? engineAlternatorV;
+  // Per-metric "last delta received" timestamps — each gauge goes stale
+  // (needle to zero, "--" on its readout) independently 5s after its own
+  // last update, same principle as navUpdate/windUpdate above: one sensor
+  // dying shouldn't hide behind another still reporting. torquePercent
+  // shares engineRpmUpdate — same PGN 61444 frame as RPM.
+  DateTime? engineRpmUpdate;
+  DateTime? engineCoolantTempUpdate;
+  DateTime? engineOilPressureUpdate;
+  DateTime? engineAlternatorVUpdate;
+  // Discrete DM1 fault bits (J1939 PGN 65226 — SPN 110/FMI 0, 100/FMI 1,
+  // 167/FMI 1), if the bridge firmware ever decodes them; null while
+  // unpublished, in which case the threshold comparison is used instead.
+  bool? engineOverTempAlarm;
+  bool? engineLowOilAlarm;
+  bool? engineLowVoltAlarm;
+  // "Last delta received" for the 3 flags above — a fault bit has no
+  // natural "cleared" value the way a number reverting to normal does, so
+  // without its own staleness a bridge that stops publishing (engine off,
+  // bus/bridge disconnected) left whatever it last said sitting there
+  // forever, including a real fault that's actually gone stale, not gone.
+  DateTime? engineOverTempAlarmUpdate;
+  DateTime? engineLowOilAlarmUpdate;
+  DateTime? engineLowVoltAlarmUpdate;
+  // Glow-plug/starter-relay circuit fault (PGN 65226 DM1 — SPN 677 or 724,
+  // FMI 5: open circuit/current below normal). No numeric equivalent
+  // exists, so unlike the 3 above there's no threshold fallback — stays
+  // off until the bridge actually publishes a fault.
+  bool? engineGlowPlugFaultAlarm;
+  // Preheat-in-progress status (PGN 65264 — SPN 1494, Glow Plug Relay
+  // Status). Not an alarm, just the normal "still warming the glow plugs"
+  // state — drives the 'precal' lamp in real (non-SIMUL) mode.
+  bool? enginePreheatActive;
+  // Bridge diagnostics (propulsion.<id>.volvoMdi.*) — PGN frames seen on
+  // the bus but not decoded, shown in the "Completo" Motor panel.
+  double? engineUnknownPgn;
+  double? engineUnknownFrameCount;
   double? bowthrusterTempK;
   // Tanks (key = "type.id", e.g. "freshWater.24")
   final tanks = <String, double?>{};
@@ -408,6 +504,96 @@ class SignalKModel {
   double? anchorMaxRadiusM;
   double? anchorApparentBearingDeg; // relative to the bow, not true north
   bool get anchorArmed => anchorState == 'on';
+
+  // Wipes every live-data field back to "unknown" — called at the start of
+  // each (re)connect (see _DashboardState._connectSignalK) so switching to
+  // a different Signal K server, or even just reconnecting to the same
+  // one, can never show a value that's actually left over from whatever
+  // was connected before. Previously only `tanks` was cleared here, which
+  // is how a stale STW/depth reading from a *previous* server could keep
+  // showing forever on a new server that doesn't even publish those paths
+  // — nothing was left to overwrite it with "--". Deliberately leaves
+  // `connected`/`status` alone (the connection state machine owns those).
+  void reset() {
+    vesselName = null;
+    navUpdate = null;
+    windUpdate = null;
+    courseUpdate = null;
+    sogKnUpdate = null;
+    stwKnUpdate = null;
+    headingTrueDegUpdate = null;
+    cogTrueDegUpdate = null;
+    latitude = null;
+    longitude = null;
+    sogKn = null;
+    stwKn = null;
+    headingTrueDeg = null;
+    cogTrueDeg = null;
+    heelDeg = null;
+    pitchDeg = null;
+    gnssSatellites = null;
+    gnssHdop = null;
+    gnssAntennaAltitudeM = null;
+    gnssFixType = null;
+    gnssMethodQuality = null;
+    courseVmgKn = null;
+    depthM = null;
+    waterTempK = null;
+    outsideTempK = null;
+    outsideHumidity = null;
+    outsidePressureHpa = null;
+    indoorTempK = null;
+    indoorHumidity = null;
+    cpuTempK = null;
+    gpuTempK = null;
+    cpuUtil = null;
+    memUtil = null;
+    sdUtil = null;
+    sonoffTempK = null;
+    solarFusesTempK = null;
+    fridge1TempK = null;
+    fridge2TempK = null;
+    awsKn = null;
+    awaDeg = null;
+    twaDeg = null;
+    twsKn = null;
+    twdDeg = null;
+    houseV = null;
+    houseA = null;
+    houseW = null;
+    houseSoc = null;
+    houseTempK = null;
+    solarW = null;
+    dcW = null;
+    startV = null;
+    bowthrusterV = null;
+    engineHours = null;
+    engineRpm = null;
+    engineTorquePercent = null;
+    engineCoolantTempK = null;
+    engineOilPressurePa = null;
+    engineAlternatorV = null;
+    engineRpmUpdate = null;
+    engineCoolantTempUpdate = null;
+    engineOilPressureUpdate = null;
+    engineAlternatorVUpdate = null;
+    engineOverTempAlarm = null;
+    engineLowOilAlarm = null;
+    engineLowVoltAlarm = null;
+    engineOverTempAlarmUpdate = null;
+    engineLowOilAlarmUpdate = null;
+    engineLowVoltAlarmUpdate = null;
+    engineGlowPlugFaultAlarm = null;
+    enginePreheatActive = null;
+    engineUnknownPgn = null;
+    engineUnknownFrameCount = null;
+    bowthrusterTempK = null;
+    tanks.clear();
+    anchorState = null;
+    anchorCurrentRadiusM = null;
+    anchorMaxRadiusM = null;
+    anchorApparentBearingDeg = null;
+  }
 }
 
 // ─── Per-boat sensor configuration (paths vary boat to boat) ─────────────────
@@ -516,6 +702,164 @@ class SensorConfig {
     }
     return c;
   }
+}
+
+// ─── Native anchor watch (ANC) — replaces the embedded hoekens-anchor-alarm
+// webview entirely. State lives here instead of on the Signal K server (the
+// plugin's `zone`/`on` config), so the watch works even if that plugin is
+// gone or misconfigured — no PUT to Signal K, no dependency on it at all.
+class AnchorConfig {
+  bool armed = false;
+  double? dropLat;
+  double? dropLon;
+  DateTime? droppedAt;
+  // Depth at the moment of dropping — the reference point for the depth
+  // "swing" alarm (settings.alarmAnchorDepthEnabled), not an absolute
+  // threshold.
+  double? dropDepthM;
+  double radiusM = 30;
+  // The radius set on drop (or last manually confirmed via the "Radio"
+  // handle) — radiusM itself may grow past this automatically to keep the
+  // watch circle around the boat, and shrinks back to this baseline once
+  // the boat is close enough to the anchor again to fit inside it.
+  double? initialRadiusM;
+  // Set on arm and on every confirmed anchor-position change — the drag
+  // alarm ignores "outside the zone" for a short grace window afterward,
+  // so repositioning the anchor (or the sector) outside where the boat
+  // currently sits doesn't immediately alarm on the edit itself.
+  DateTime? armedOrMovedAt;
+  String shape = 'circle'; // 'circle' or 'sector'
+  double? sectorStartDeg; // only meaningful when shape == 'sector'
+  double? sectorEndDeg;
+  // Layer toggles — mirrors the show/hide checkboxes the hoekens plugin
+  // offered, so switching to the native screen isn't a step down.
+  bool showWind = true;
+  bool showDepth = true;
+  // Off by default — a minority-interest panel, not something everyone
+  // wants cluttering the screen on every anchor drop.
+  bool showScope = false;
+  bool showAisNearby = true;
+  bool showOwnTrack = true;
+  // Independent checkboxes, not exclusive — satellite + OpenSeaMap
+  // together is a legitimate hybrid (imagery with nautical marks on top),
+  // and both off just means a plain background, not an invalid state.
+  bool showSatelliteLayer = true;
+  bool showSeamarkLayer = false;
+  List<int> scopeRatios = [7, 5, 4, 3];
+  // Past anchorages (drop → raise), most recent last — mirrors the
+  // hoekens plugin's own history view. Capped in _raiseAnchor's append so
+  // this doesn't grow unbounded across a season.
+  List<AnchorHistoryEntry> history = [];
+
+  Map<String, dynamic> toJson() => {
+    'armed': armed,
+    'dropLat': dropLat,
+    'dropLon': dropLon,
+    'dropDepthM': dropDepthM,
+    'droppedAt': droppedAt?.toIso8601String(),
+    'radiusM': radiusM,
+    'initialRadiusM': initialRadiusM,
+    'armedOrMovedAt': armedOrMovedAt?.toIso8601String(),
+    'shape': shape,
+    'sectorStartDeg': sectorStartDeg,
+    'sectorEndDeg': sectorEndDeg,
+    'showWind': showWind,
+    'showDepth': showDepth,
+    'showScope': showScope,
+    'showAisNearby': showAisNearby,
+    'showOwnTrack': showOwnTrack,
+    'showSatelliteLayer': showSatelliteLayer,
+    'showSeamarkLayer': showSeamarkLayer,
+    'scopeRatios': scopeRatios,
+    'history': history.map((e) => e.toJson()).toList(),
+  };
+
+  static AnchorConfig fromJson(Map<String, dynamic> j) {
+    final c = AnchorConfig();
+    c.armed = j['armed'] as bool? ?? false;
+    c.dropLat = (j['dropLat'] as num?)?.toDouble();
+    c.dropLon = (j['dropLon'] as num?)?.toDouble();
+    c.dropDepthM = (j['dropDepthM'] as num?)?.toDouble();
+    final droppedAtStr = j['droppedAt'] as String?;
+    c.droppedAt = droppedAtStr == null ? null : DateTime.tryParse(droppedAtStr);
+    c.radiusM = (j['radiusM'] as num?)?.toDouble() ?? c.radiusM;
+    c.initialRadiusM = (j['initialRadiusM'] as num?)?.toDouble();
+    final armedOrMovedAtStr = j['armedOrMovedAt'] as String?;
+    c.armedOrMovedAt = armedOrMovedAtStr == null
+        ? null
+        : DateTime.tryParse(armedOrMovedAtStr);
+    c.shape = j['shape'] as String? ?? c.shape;
+    c.sectorStartDeg = (j['sectorStartDeg'] as num?)?.toDouble();
+    c.sectorEndDeg = (j['sectorEndDeg'] as num?)?.toDouble();
+    c.showWind = j['showWind'] as bool? ?? true;
+    c.showDepth = j['showDepth'] as bool? ?? true;
+    c.showScope = j['showScope'] as bool? ?? false;
+    c.showAisNearby = j['showAisNearby'] as bool? ?? true;
+    c.showOwnTrack = j['showOwnTrack'] as bool? ?? true;
+    // Migrates the old exclusive 'baseLayer' string (satellite/seamark/
+    // none) if present, otherwise reads the new independent checkboxes.
+    final legacyBaseLayer = j['baseLayer'] as String?;
+    if (legacyBaseLayer != null) {
+      c.showSatelliteLayer = legacyBaseLayer == 'satellite';
+      c.showSeamarkLayer = legacyBaseLayer == 'seamark';
+    } else {
+      c.showSatelliteLayer = j['showSatelliteLayer'] as bool? ?? true;
+      c.showSeamarkLayer = j['showSeamarkLayer'] as bool? ?? false;
+    }
+    final rawRatios = j['scopeRatios'];
+    if (rawRatios is List) {
+      c.scopeRatios = rawRatios.map((e) => (e as num).toInt()).toList();
+    }
+    final rawHistory = j['history'];
+    if (rawHistory is List) {
+      c.history = rawHistory
+          .whereType<Map>()
+          .map((e) => AnchorHistoryEntry.fromJson(e.cast<String, dynamic>()))
+          .toList();
+    }
+    return c;
+  }
+}
+
+// One completed anchorage: drop → raise.
+class AnchorHistoryEntry {
+  AnchorHistoryEntry({
+    required this.droppedAt,
+    required this.raisedAt,
+    required this.lat,
+    required this.lon,
+    required this.radiusM,
+    this.depthM,
+  });
+  final DateTime droppedAt;
+  final DateTime raisedAt;
+  final double lat;
+  final double lon;
+  final double radiusM;
+  final double? depthM;
+
+  Map<String, dynamic> toJson() => {
+    'droppedAt': droppedAt.toIso8601String(),
+    'raisedAt': raisedAt.toIso8601String(),
+    'lat': lat,
+    'lon': lon,
+    'radiusM': radiusM,
+    'depthM': depthM,
+  };
+
+  static AnchorHistoryEntry fromJson(Map<String, dynamic> j) =>
+      AnchorHistoryEntry(
+        droppedAt:
+            DateTime.tryParse(j['droppedAt'] as String? ?? '') ??
+            DateTime.now(),
+        raisedAt:
+            DateTime.tryParse(j['raisedAt'] as String? ?? '') ??
+            DateTime.now(),
+        lat: (j['lat'] as num).toDouble(),
+        lon: (j['lon'] as num).toDouble(),
+        radiusM: (j['radiusM'] as num).toDouble(),
+        depthM: (j['depthM'] as num?)?.toDouble(),
+      );
 }
 
 // ─── Signal K path discovery (used by CFG > Sensores) ────────────────────────
@@ -675,6 +1019,52 @@ class AisTarget {
   }
 }
 
+// Own-boat position trail for the native anchor watch — same shape/rules as
+// AisTarget.track above (min spacing, rolling window), just not tied to a
+// specific AIS target since it's our own position.
+class AnchorTrackPoint {
+  const AnchorTrackPoint(this.t, this.lat, this.lon);
+  final DateTime t;
+  final double lat;
+  final double lon;
+}
+
+class OwnTrackHistory {
+  final List<AnchorTrackPoint> points = [];
+  void add(double? lat, double? lon) {
+    if (lat == null || lon == null) return;
+    final now = DateTime.now();
+    if (points.isNotEmpty &&
+        now.difference(points.last.t) < const Duration(seconds: 15)) {
+      return;
+    }
+    points.add(AnchorTrackPoint(now, lat, lon));
+    points.removeWhere((p) => now.difference(p.t) > const Duration(hours: 24));
+  }
+
+  void clear() => points.clear();
+
+  // Backfills from Signal K's own history API on app start, so a fresh
+  // launch doesn't show an empty trail until enough live points accumulate
+  // — unlike add(), timestamps here are the recorded ones, not "now", so
+  // the same 15s-spacing/24h-window rules are re-applied explicitly rather
+  // than relying on add()'s live-clock-relative checks.
+  void seedFromHistory(List<AnchorTrackPoint> historical) {
+    if (points.isNotEmpty) return; // live points already arrived first
+    final now = DateTime.now();
+    final sorted = [...historical]..sort((a, b) => a.t.compareTo(b.t));
+    AnchorTrackPoint? last;
+    for (final p in sorted) {
+      if (now.difference(p.t) > const Duration(hours: 24)) continue;
+      if (last != null && p.t.difference(last.t) < const Duration(seconds: 15)) {
+        continue;
+      }
+      points.add(p);
+      last = p;
+    }
+  }
+}
+
 class ModelForecastPoint {
   const ModelForecastPoint({
     required this.time,
@@ -743,6 +1133,13 @@ class SettingsModel {
   // authenticated too, without the app having to touch their iframes.
   String skUsername = '';
   String skPassword = '';
+  // Whether the user has consented to the anchor screen falling back to
+  // the device's own GPS when Signal K has no vessel position — null
+  // means "never asked yet" (see _AnchorWebView's explanatory dialog,
+  // shown only on the ANC screen and only when actually needed, never at
+  // app launch or on MAP). A privacy-sensitive choice, so it's asked
+  // explicitly rather than assumed, and remembered once answered.
+  bool? gpsFallbackConsent;
   bool keepAwake = true;
   String brightnessMode = 'dia'; // 'dia', 'noche', 'auto'
   // Historical-chart data source: 'auto' tries InfluxDB first and falls back
@@ -755,6 +1152,10 @@ class SettingsModel {
   String influxBucket = influxBucketDefault;
   String influxArchiveBucket = influxBucketDefault; // bucket for 7d / 1mes
   SensorConfig sensorConfig = SensorConfig();
+  AnchorConfig anchorConfig = AnchorConfig();
+  // Selected id from kBoatIconOptions (lib/boat_icons.dart) — null/unknown
+  // falls back to the 'default' entry (the original own_ship.png).
+  String shipIconId = 'default';
   String navLayoutMode = 'premium'; // 'classic', 'premium', or 'both'
   List<String> navCardIds = List<String>.of(defaultNavCardIds);
   int navGridColumns = 3; // 3 -> 3x2 (6 cards), 4 -> 4x2 (8 cards)
@@ -782,6 +1183,44 @@ class SettingsModel {
   bool alarmAisSound = true;
   double alarmAisCpaNm = 1.0;
   double alarmAisTcpaMin = 10.0;
+  // Engine alarms — prefer the engine's own DM1 fault bit (J1939 PGN
+  // 65226 — SPN 100/FMI 1 oil, SPN 110/FMI 0 coolant, SPN 167/FMI 1
+  // alternator) when the NMEA2000 bridge (a Volvo Penta MDI-specific
+  // gateway) publishes one; the threshold below is only the fallback for
+  // as long as that signal stays unpublished (see engineOverTempAlarm et
+  // al. in SignalKModel and the precedence in _activeAlarms/
+  // _isLampOnReal). Evaluated only while the engine is running (see
+  // _engineRunning in main.dart) so a stopped engine's naturally-zero oil
+  // pressure and ambient coolant temp don't fire false alarms. Not
+  // user-toggleable off — unlike AIS/Corredera these are safety alarms,
+  // only the sound and the threshold are configurable.
+  bool alarmEngineOilSound = true;
+  double alarmEngineOilMinBar = 1.0;
+  bool alarmEngineTempSound = true;
+  double alarmEngineTempMaxC = 100.0;
+  bool alarmEngineVoltSound = true;
+  double alarmEngineVoltMinV = 13.0;
+  // Glow-plug/starter-relay circuit fault (SPN 677 or 724, FMI 5) — a
+  // discrete DM1 fault with no numeric equivalent, so no threshold to
+  // configure, just the sound. Also not user-toggleable off.
+  bool alarmEngineGlowPlugSound = true;
+  // "Simple" (current design: RPM + status + 5 lamps) vs "Completo" (adds
+  // numeric gauges for temp/oil/volt with their data source — DM1 or
+  // threshold — plus an undecoded-PGN diagnostics line) — see CFG >
+  // Sensores and PremiumMotorEnginePanel's `detailed` param. Ignored
+  // (Motor screen never even joins the NAV swipe cycle) when
+  // motorPanelEnabled is false.
+  bool motorPanelDetailed = false;
+  // "Ninguno" in CFG > Pantalla > ESTILO MOTOR — a boat with no engine
+  // telemetry wired up at all can drop the Motor screen from the NAV
+  // swipe cycle entirely instead of it always sitting there as an empty
+  // simulation preview (see _kMotorPanelAlwaysVisible in main.dart).
+  bool motorPanelEnabled = true;
+  // Whether NAV's header auto-hides after a few seconds like ANC/MAP
+  // always do (those two are non-negotiable — a WebView needs the full
+  // screen). NAV doesn't have that constraint, so it's the user's call;
+  // true matches the original behavior.
+  bool autoHideHeaderOnNav = true;
   // Corredera (log/speedo) stall alarm: SOG moving but STW reads zero for a
   // sustained period usually means the paddle wheel is fouled/stuck rather
   // than the boat actually being stopped in the water — a standalone alarm
@@ -789,6 +1228,57 @@ class SettingsModel {
   // the user, just on/off + sound.
   bool alarmCorrederaEnabled = false;
   bool alarmCorrederaSound = true;
+  // Anchor watch alarms — only evaluated while settings.anchorConfig.armed
+  // (see _activeAlarms in main.dart). Depth-swing is a margin around the
+  // depth recorded at the moment of dropping, not the absolute value — a
+  // tide change or the boat settling over different bottom both show up as
+  // a swing, which is a useful drag proxy even before the boat leaves the
+  // watch circle. Explicitly NOT a scope-ratio alarm (chain:depth) — asked
+  // for and declined; depth swing is what's wanted instead.
+  bool alarmAnchorDepthEnabled = false;
+  bool alarmAnchorDepthSound = true;
+  double alarmAnchorDepthMarginM = 1.5;
+  bool alarmAnchorWindEnabled = false;
+  bool alarmAnchorWindSound = true;
+  double alarmAnchorWindKn = 25.0;
+  // "Fails loud, not silent" — losing position entirely while armed (both
+  // Signal K and any device-GPS fallback) is itself worth alerting on, not
+  // just silently showing "--" the way it would for an unarmed watch. On
+  // by default, unlike the other two — this one has no false-positive risk
+  // (it only fires when there's truly nothing to watch with).
+  bool alarmAnchorNoPositionEnabled = true;
+  bool alarmAnchorNoPositionSound = true;
+  // A single implausible GPS fix (a big instantaneous jump, then back) can
+  // read as "outside the watch circle" even though the boat never actually
+  // moved — this ignores any one reading that jumps further than this from
+  // the last trusted fix, rather than trusting it as real drift.
+  bool alarmAnchorFilterGlitches = true;
+  double alarmAnchorGlitchJumpM = 50;
+  // Vessel-design facts, not per-anchorage state — published to Signal K
+  // as design.bowAnchorRollerHeight / design.totalAnchorChainLength
+  // alongside the anchor watch data, same paths hoekens used.
+  double anchorBowRollerHeightM = 0;
+  double anchorTotalChainLengthM = 100;
+  // ntfy.sh push, per-alarm opt-in — client-side, no Signal K plugin
+  // involved. Empty topic gets a "SV_<nombre del barco>" default the first
+  // time CFG is opened (see _settingsPage). Which alarms actually push is
+  // just the set of alarm keys (same keys _activeAlarms uses) present here
+  // — no separate master enable switch, no path to type.
+  String ntfyTopic = '';
+  final Set<String> ntfyAlarmKeys = {};
+  // Minimum minutes between repeat pushes for the same alarm key — applies
+  // uniformly to every alarm that pushes, not configured per-alarm.
+  int ntfyMinIntervalSec = 60;
+  // "Te has llevado el móvil" detectors — only meaningful while armed AND
+  // actually relying on the device's own GPS as the anchor position (see
+  // NativeAnchorView._preferDeviceGps/_hasSkPosition): if Signal K has its
+  // own position, the boat's watch is accurate regardless of where the
+  // phone wanders, so these three stay dormant until device GPS is the
+  // one actually being trusted.
+  bool anchorDetectPhoneLeftByMotion = false;
+  bool anchorDetectPhoneLeftBySteps = false;
+  bool anchorDetectPhoneLeftByWifi = false;
+  String anchorBoatWifiSsid = '';
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted
