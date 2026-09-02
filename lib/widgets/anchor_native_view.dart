@@ -43,6 +43,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.onConfigChanged,
     required this.ownLat,
     required this.ownLon,
+    required this.skConnected,
     required this.headingDeg,
     required this.sogKn,
     required this.depthM,
@@ -80,6 +81,11 @@ class NativeAnchorView extends StatefulWidget {
   final ValueChanged<AnchorConfig> onConfigChanged;
   final double? ownLat;
   final double? ownLon;
+  // Live, not a stored/cached value — without a real Signal K connection
+  // the app genuinely doesn't know the boat's current state, so it must
+  // never present "FONDEADO" (or any drag/outside reading) as if it were
+  // confirmed. Explicit per request 2026-09-02.
+  final bool skConnected;
   final double? headingDeg;
   final double? sogKn;
   final double? depthM;
@@ -825,6 +831,27 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     );
   }
 
+  // Where to put the map camera when there's no live position at all right
+  // now (no connection, or none yet) — falls through anchor drop position
+  // (if armed — exactly the point a disconnected watch cares about) then
+  // the most recent own-track point, so a lost connection shows roughly
+  // where the boat actually is instead of flutter_map's (0,0) default,
+  // off the coast of Africa. Only truly falls back to (0,0) if nothing at
+  // all is known yet (brand new install, never armed, empty track).
+  ll.LatLng? get _bestKnownCenter {
+    final lat = _effectiveLat, lon = _effectiveLon;
+    if (lat != null && lon != null) return ll.LatLng(lat, lon);
+    final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
+    if (widget.config.armed && dropLat != null && dropLon != null) {
+      return ll.LatLng(dropLat, dropLon);
+    }
+    if (widget.ownTrack.isNotEmpty) {
+      final last = widget.ownTrack.last;
+      return ll.LatLng(last.lat, last.lon);
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final lat = _effectiveLat, lon = _effectiveLon;
@@ -891,9 +918,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                       !widget.config.showSeamarkLayer)
                   ? Colors.black
                   : cBg,
-              initialCenter: lat != null && lon != null
-                  ? ll.LatLng(lat, lon)
-                  : const ll.LatLng(0, 0),
+              initialCenter: _bestKnownCenter ?? const ll.LatLng(0, 0),
               initialZoom: 17,
               // Past the satellite source's real native resolution,
               // flutter_map keeps stretching (overzooming) the last tile
@@ -943,15 +968,34 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 _watchZoneLayer(dropLat, dropLon, outside),
               if (widget.config.showOwnTrack && widget.ownTrack.length >= 2)
                 fm.PolylineLayer(
+                  // One short polyline per consecutive point pair, each its
+                  // own solid color lerped by age — a single 2-stop
+                  // gradientColors polyline banded far more coarsely than
+                  // this once there were more than a handful of points, per
+                  // "muchas más tonos". Points are already chronological
+                  // (oldest first, see OwnTrackHistory).
                   polylines: [
-                    fm.Polyline(
-                      points: [
-                        for (final p in widget.ownTrack)
-                          ll.LatLng(p.lat, p.lon),
-                      ],
-                      strokeWidth: 1.4,
-                      gradientColors: [_kTrackOld, _kTrackRecent],
-                    ),
+                    for (var i = 0; i < widget.ownTrack.length - 1; i++)
+                      fm.Polyline(
+                        points: [
+                          ll.LatLng(
+                            widget.ownTrack[i].lat,
+                            widget.ownTrack[i].lon,
+                          ),
+                          ll.LatLng(
+                            widget.ownTrack[i + 1].lat,
+                            widget.ownTrack[i + 1].lon,
+                          ),
+                        ],
+                        strokeWidth: 0.9,
+                        color:
+                            Color.lerp(
+                              _kTrackOld,
+                              _kTrackRecent,
+                              i / (widget.ownTrack.length - 1),
+                            ) ??
+                            _kTrackRecent,
+                      ),
                   ],
                 ),
               // Long-press anywhere inside the watch circle: near the rim
@@ -1778,13 +1822,22 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         Text(
           !widget.config.armed
               ? 'SIN ARMAR'
+              // Without a live connection the app has no idea what's
+              // actually true right now — a stale local "armed" flag is
+              // not the same as confirmed "still fine, still anchored".
+              : !widget.skConnected
+              ? 'SIN CONEXIÓN'
               : !outside
               ? 'FONDEADO'
               // Actively moving away vs. parked outside the circle —
               // both need attention, but only one is a live drag.
               : (isDragging ? 'GARREANDO' : 'FUERA DEL CÍRCULO'),
           style: TextStyle(
-            color: !widget.config.armed ? cMuted : (outside ? cRed : cGreen),
+            color: !widget.config.armed
+                ? cMuted
+                : !widget.skConnected
+                ? cOrange
+                : (outside ? cRed : cGreen),
             fontWeight: FontWeight.w800,
             fontSize: 15,
           ),

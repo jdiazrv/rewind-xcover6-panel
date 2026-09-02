@@ -630,6 +630,25 @@ class TankSlot {
 }
 
 class SensorConfig {
+  // Plain SensorConfig() defaults to THIS boat's actual known-good sensor
+  // ids/paths — appropriate the first time the app ever runs, but very
+  // wrong to silently reuse when switching to a DIFFERENT, unconfigured
+  // Signal K server (CFG → Admin) — that would show REWIND's tank/battery
+  // ids as if they were real readings on someone else's boat. This gives a
+  // genuinely blank starting point instead, so an unconfigured server just
+  // shows "no data" until someone runs "Configurar sensores" for it.
+  factory SensorConfig.empty() => SensorConfig()
+    ..batteryHouseId = ''
+    ..batteryStartId = ''
+    ..solarPath = null
+    ..fridge1Path = null
+    ..fridge2Path = null
+    ..depthPath = null
+    ..enginePath = null
+    ..tanks = [];
+
+  SensorConfig();
+
   String batteryHouseId = '278';
   String batteryStartId = '278-second';
   String? solarPath = 'electrical.venus.totalPanelPower';
@@ -1049,19 +1068,29 @@ class OwnTrackHistory {
   // — unlike add(), timestamps here are the recorded ones, not "now", so
   // the same 15s-spacing/24h-window rules are re-applied explicitly rather
   // than relying on add()'s live-clock-relative checks.
+  //
+  // The history fetch is a several-second round trip, so by the time it
+  // resolves live points have almost always already started arriving via
+  // add() — bailing out whenever points was non-empty (the original
+  // approach) meant this never actually ran in practice. Instead, only
+  // backfill points OLDER than whatever's already there, prepending them —
+  // live data always wins for anything it already covers.
   void seedFromHistory(List<AnchorTrackPoint> historical) {
-    if (points.isNotEmpty) return; // live points already arrived first
     final now = DateTime.now();
+    final cutoff = points.isEmpty ? now : points.first.t;
     final sorted = [...historical]..sort((a, b) => a.t.compareTo(b.t));
+    final backfill = <AnchorTrackPoint>[];
     AnchorTrackPoint? last;
     for (final p in sorted) {
       if (now.difference(p.t) > const Duration(hours: 24)) continue;
+      if (!p.t.isBefore(cutoff)) continue;
       if (last != null && p.t.difference(last.t) < const Duration(seconds: 15)) {
         continue;
       }
-      points.add(p);
+      backfill.add(p);
       last = p;
     }
+    points.insertAll(0, backfill);
   }
 }
 
@@ -1121,6 +1150,42 @@ class WeatherModel {
   }
 }
 
+// A remembered Signal K server (CFG → Admin, owner-only) — lets the app
+// jump between several boats' servers without retyping host/port/login
+// each time. Each server keeps its OWN sensor mapping (see
+// SettingsModel.sensorConfigJsonForHost) so switching boats never
+// overwrites another boat's tank/battery/solar setup.
+class SavedServer {
+  SavedServer({
+    required this.name,
+    required this.host,
+    this.port = 3000,
+    this.skUsername = '',
+    this.skPassword = '',
+  });
+  String name;
+  String host;
+  int port;
+  String skUsername;
+  String skPassword;
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'host': host,
+    'port': port,
+    'skUsername': skUsername,
+    'skPassword': skPassword,
+  };
+
+  static SavedServer fromJson(Map<String, dynamic> j) => SavedServer(
+    name: j['name'] as String? ?? '',
+    host: j['host'] as String? ?? '',
+    port: (j['port'] as num?)?.toInt() ?? 3000,
+    skUsername: j['skUsername'] as String? ?? '',
+    skPassword: j['skPassword'] as String? ?? '',
+  );
+}
+
 class SettingsModel {
   // Random, generated once on first run and persisted — lets the app tell
   // "my own anchor.* publish echoing back" apart from "a DIFFERENT install
@@ -1131,6 +1196,18 @@ class SettingsModel {
   // other installs — meaning anchoring from the webapp never showed as
   // anchored on Android and vice versa.
   String anchorDeviceId = '';
+  // CFG → Admin (owner-only, revealed by a long-press — see _settingsPage):
+  // other boats' Signal K servers, for quickly switching which one this
+  // install talks to. Each entry's sensor mapping is kept separately (see
+  // sensorConfigJsonByHost) so switching servers never overwrites another
+  // boat's tank/battery/solar setup.
+  List<SavedServer> savedServers = [];
+  Map<String, Map<String, dynamic>> sensorConfigJsonByHost = {};
+  // Anchor watch state (armed, drop position, radius) is boat-specific —
+  // without this, switching servers while armed on one boat carried that
+  // "anchored" state (and kept publishing it) onto whichever server you
+  // switched to next. Confirmed live 2026-09-02.
+  Map<String, Map<String, dynamic>> anchorConfigJsonByHost = {};
   String host = 'lysmarine.local';
   int port = 3000;
   String authBase64 = ''; // Basic auth for the Signal K connection (WebSocket + REST) — not InfluxDB.

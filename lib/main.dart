@@ -22,6 +22,9 @@ import 'fullscreen/fullscreen_stub.dart'
 import 'lan_scan/lan_scan_stub.dart'
     if (dart.library.io) 'lan_scan/lan_scan_io.dart'
     if (dart.library.html) 'lan_scan/lan_scan_web.dart';
+import 'mdns_resolve/mdns_resolve_stub.dart'
+    if (dart.library.io) 'mdns_resolve/mdns_resolve_io.dart'
+    if (dart.library.html) 'mdns_resolve/mdns_resolve_web.dart';
 import 'webview_embed/webview_embed_stub.dart'
     if (dart.library.io) 'webview_embed/webview_embed_io.dart'
     if (dart.library.html) 'webview_embed/webview_embed_web.dart';
@@ -339,6 +342,11 @@ class _DashboardState extends State<Dashboard> {
       return null;
     }
     _anchorPublishConnecting = true;
+    // A switch to a different server (or any reconnect) can happen while
+    // this login round-trip is in flight — without checking this, the
+    // response landing afterward would resurrect a channel authenticated
+    // against and pointed at the OLD host as the new "current" one.
+    final myGeneration = _connectGeneration;
     try {
       final loginResp = await http
           .post(
@@ -353,6 +361,7 @@ class _DashboardState extends State<Dashboard> {
           )
           .timeout(const Duration(seconds: 8));
       if (loginResp.statusCode != 200) return null;
+      if (myGeneration != _connectGeneration) return null;
       final token = (jsonDecode(loginResp.body) as Map)['token'] as String?;
       if (token == null) return null;
       final uri = Uri.parse(
@@ -372,6 +381,10 @@ class _DashboardState extends State<Dashboard> {
           }
         },
       );
+      if (myGeneration != _connectGeneration) {
+        ch.sink.close();
+        return null;
+      }
       _anchorPublishChannel = ch;
       return ch;
     } catch (_) {
@@ -672,14 +685,38 @@ class _DashboardState extends State<Dashboard> {
   // big "glitch" and silently disable the drag alarm until restart.
   double? _lastAnchorCheckLat, _lastAnchorCheckLon;
   DateTime? _lastAnchorCheckArmedAt;
+  // Set once a real position (Signal K or the device-GPS fallback) has
+  // actually been seen since the app started. The "fondeado sin posición"
+  // alarm below must fire when a position was there and got lost — a real
+  // problem — but NOT during the ordinary few seconds right after launch
+  // before the first GPS fix has even had a chance to arrive, which used
+  // to alarm immediately every time the app opened onto an already-armed
+  // watch. Confirmed live 2026-09-02.
+  bool _everHadAnchorPosition = false;
 
   bool _isOutsideAnchorZone() {
     final cfg = settings.anchorConfig;
     final dropLat = cfg.dropLat, dropLon = cfg.dropLon;
-    final lat = signalK.latitude, lon = signalK.longitude;
-    if (dropLat == null || dropLon == null || lat == null || lon == null) {
-      return false;
-    }
+    if (dropLat == null || dropLon == null) return false;
+    // Without a live connection, Signal K's own lat/lon can still be
+    // non-null for a moment (nothing clears them the instant a socket
+    // drops — only a fresh _connectSignalK() call does, via
+    // signalK.reset()) — computing "outside the circle" from that stale
+    // fix would be asserting something the app genuinely doesn't know
+    // anymore. But that must NOT also blind the alarm to the ANC screen's
+    // own device-GPS fallback (_anchorEffectiveLat/Lon, fed from
+    // NativeAnchorView's onEffectivePositionChanged) — that position is
+    // independently sourced from the phone's own GPS and stays valid
+    // regardless of the Signal K WebSocket's state. Previously this only
+    // ever read signalK.latitude/longitude directly, so if SK lost
+    // position but ANC was still tracking fine via the phone's GPS, the
+    // screen could show GARREANDO while the alarm engine (sound/ntfy/
+    // push) never fired at all.
+    final skLat = signalK.connected ? signalK.latitude : null;
+    final skLon = signalK.connected ? signalK.longitude : null;
+    final lat = skLat ?? _anchorEffectiveLat;
+    final lon = skLon ?? _anchorEffectiveLon;
+    if (lat == null || lon == null) return false;
     if (cfg.armedOrMovedAt != _lastAnchorCheckArmedAt) {
       _lastAnchorCheckArmedAt = cfg.armedOrMovedAt;
       _lastAnchorCheckLat = null;
@@ -807,18 +844,32 @@ class _DashboardState extends State<Dashboard> {
           muted: _mutedAlarms.contains(key),
         ));
       }
-      // "Fails loud, not silent" — armed and no position at all (neither
-      // Signal K nor NativeAnchorView's own device-GPS fallback) means the
-      // watch genuinely isn't watching anything right now.
-      if (settings.alarmAnchorNoPositionEnabled &&
-          signalK.latitude == null &&
-          signalK.longitude == null &&
-          _anchorEffectiveLat == null &&
-          _anchorEffectiveLon == null) {
+      // "Fails loud, not silent" — armed and no position at all (neither a
+      // LIVE Signal K position — a stale last-known one from before a
+      // disconnect doesn't count, see _isOutsideAnchorZone — nor
+      // NativeAnchorView's own device-GPS fallback, which stays valid
+      // independent of the Signal K connection) means the watch genuinely
+      // isn't watching anything right now.
+      final hasPositionNow =
+          (signalK.connected &&
+              signalK.latitude != null &&
+              signalK.longitude != null) ||
+          (_anchorEffectiveLat != null && _anchorEffectiveLon != null);
+      if (hasPositionNow) {
+        _everHadAnchorPosition = true;
+      } else if (settings.alarmAnchorNoPositionEnabled &&
+          // Only once a position was actually being tracked before and
+          // then lost — not during the ordinary few seconds right after
+          // launch/reconnect before the first fix has even arrived, which
+          // used to alarm immediately every time the app opened onto an
+          // already-armed watch. Confirmed live 2026-09-02.
+          _everHadAnchorPosition) {
         const key = 'anchorNoPosition';
         out.add((
           key: key,
-          label: 'Fondeado sin posición — no se puede vigilar el garreo',
+          label: !signalK.connected
+              ? 'Fondeado sin conexión a Signal K — no se puede vigilar el garreo'
+              : 'Fondeado sin posición — no se puede vigilar el garreo',
           sound: settings.alarmAnchorNoPositionSound,
           muted: _mutedAlarms.contains(key),
         ));
@@ -1836,6 +1887,19 @@ class _DashboardState extends State<Dashboard> {
   String? _pkgVersion;
   String? _pkgBuild;
   String? _installerStore;
+  // CFG → Admin (saved-server switcher) stays hidden until a long-press on
+  // the version card in Diagnóstico reveals it — not meant for anyone but
+  // the owner to stumble onto. Persisted once unlocked: whoever has the
+  // tablet in hand already has the same access a visible tab would give.
+  bool _adminRevealed = false;
+  // LAN scan (CFG → Conexión → "Buscar en la red") result state — was
+  // local to _settingsPage()'s build method, which runs fresh on every
+  // Dashboard rebuild (i.e. constantly, on every live SK delta), wiping
+  // "Encontrado: <ip>" a fraction of a second after it appeared. Promoted
+  // to real State fields so a scan result actually survives to be seen.
+  var _lanScanning = false;
+  var _lanScanChecked = 0, _lanScanTotal = 0;
+  List<String> _lanScanResults = [];
   Future<void> _loadPackageInfo() async {
     final info = await PackageInfo.fromPlatform();
     if (!mounted) return;
@@ -1946,6 +2010,33 @@ class _DashboardState extends State<Dashboard> {
     settings.authBase64 = prefs.getString('auth') ?? settings.authBase64;
     settings.skUsername = prefs.getString('skUsername') ?? settings.skUsername;
     settings.skPassword = prefs.getString('skPassword') ?? settings.skPassword;
+    final savedServersJson = prefs.getString('savedServers');
+    if (savedServersJson != null) {
+      try {
+        final raw = jsonDecode(savedServersJson) as List;
+        settings.savedServers = [
+          for (final s in raw) SavedServer.fromJson(s as Map<String, dynamic>),
+        ];
+      } catch (_) {
+        /* keep empty if corrupted */
+      }
+    } else {
+      // First run of the Admin feature — seed with just the name/host of
+      // the 4 known boats, so there's something to tap "Editar" on instead
+      // of typing hosts from scratch. Deliberately NO credentials here:
+      // this repo is public on GitHub, so real passwords can never live in
+      // source — fill them in once per device via the edit dialog, which
+      // only writes to that device's local storage. Only seeds when
+      // there's no saved list at all yet, so deleting entries later
+      // doesn't bring them back.
+      settings.savedServers = [
+        SavedServer(name: 'REWIND', host: 'lysmarine.local'),
+        SavedServer(name: 'DRAGUEUR', host: '100.75.26.38'),
+        SavedServer(name: 'AREA SECADA', host: '100.105.32.16'),
+        SavedServer(name: 'QUINTO REAL', host: '100.73.92.66'),
+      ];
+    }
+    _adminRevealed = prefs.getBool('adminRevealed') ?? false;
     settings.gpsFallbackConsent = prefs.containsKey('gpsFallbackConsent')
         ? prefs.getBool('gpsFallbackConsent')
         : settings.gpsFallbackConsent;
@@ -2117,24 +2208,74 @@ class _DashboardState extends State<Dashboard> {
         /* keep defaults if corrupted */
       }
     }
-    final sensorJson = prefs.getString('sensorConfigJson');
-    if (sensorJson != null) {
+    // Per-host sensor config (CFG → Admin server switching, see
+    // _switchToSavedServer) — each saved server keeps its own tank/battery/
+    // solar mapping instead of one shared global config that switching
+    // servers would silently overwrite.
+    final byHostJson = prefs.getString('sensorConfigByHostJson');
+    if (byHostJson != null) {
       try {
-        settings.sensorConfig = SensorConfig.fromJson(
-          jsonDecode(sensorJson) as Map<String, dynamic>,
-        );
+        final raw = jsonDecode(byHostJson) as Map<String, dynamic>;
+        settings.sensorConfigJsonByHost = {
+          for (final e in raw.entries) e.key: e.value as Map<String, dynamic>,
+        };
+      } catch (_) {
+        /* keep empty if corrupted */
+      }
+    }
+    final hostKey = '${settings.host}:${settings.port}';
+    final byHost = settings.sensorConfigJsonByHost[hostKey];
+    if (byHost != null) {
+      try {
+        settings.sensorConfig = SensorConfig.fromJson(byHost);
       } catch (_) {
         /* keep defaults if corrupted */
       }
+    } else {
+      // Pre-per-host-storage installs kept one shared key — treat it as
+      // this (the very first, "home") server's config rather than losing
+      // it, then let the per-host map take over from here on.
+      final sensorJson = prefs.getString('sensorConfigJson');
+      if (sensorJson != null) {
+        try {
+          settings.sensorConfig = SensorConfig.fromJson(
+            jsonDecode(sensorJson) as Map<String, dynamic>,
+          );
+        } catch (_) {
+          /* keep defaults if corrupted */
+        }
+      }
     }
-    final anchorJson = prefs.getString('anchorConfigJson');
-    if (anchorJson != null) {
+    final anchorByHostJson = prefs.getString('anchorConfigByHostJson');
+    if (anchorByHostJson != null) {
       try {
-        settings.anchorConfig = AnchorConfig.fromJson(
-          jsonDecode(anchorJson) as Map<String, dynamic>,
-        );
+        final raw = jsonDecode(anchorByHostJson) as Map<String, dynamic>;
+        settings.anchorConfigJsonByHost = {
+          for (final e in raw.entries) e.key: e.value as Map<String, dynamic>,
+        };
+      } catch (_) {
+        /* keep empty if corrupted */
+      }
+    }
+    final anchorByHost = settings.anchorConfigJsonByHost[hostKey];
+    if (anchorByHost != null) {
+      try {
+        settings.anchorConfig = AnchorConfig.fromJson(anchorByHost);
       } catch (_) {
         /* keep defaults if corrupted */
+      }
+    } else {
+      // Same pre-per-host-storage migration as sensorConfig above — treat
+      // the one shared key as this (first/"home") server's own state.
+      final anchorJson = prefs.getString('anchorConfigJson');
+      if (anchorJson != null) {
+        try {
+          settings.anchorConfig = AnchorConfig.fromJson(
+            jsonDecode(anchorJson) as Map<String, dynamic>,
+          );
+        } catch (_) {
+          /* keep defaults if corrupted */
+        }
       }
     }
     _migrateLegacyTempAlarmTargets();
@@ -2185,9 +2326,30 @@ class _DashboardState extends State<Dashboard> {
       'sensorConfigJson',
       jsonEncode(settings.sensorConfig.toJson()),
     );
+    // Keep the CURRENT server's entry in the per-host map up to date too,
+    // so switching to another saved server and back restores this one
+    // exactly — see CFG → Admin / _switchToSavedServer.
+    settings.sensorConfigJsonByHost['${settings.host}:${settings.port}'] =
+        settings.sensorConfig.toJson();
+    await prefs.setString(
+      'sensorConfigByHostJson',
+      jsonEncode(settings.sensorConfigJsonByHost),
+    );
+    await prefs.setString(
+      'savedServers',
+      jsonEncode([for (final s in settings.savedServers) s.toJson()]),
+    );
     await prefs.setString(
       'anchorConfigJson',
       jsonEncode(settings.anchorConfig.toJson()),
+    );
+    // Same per-host mirroring as sensorConfig above — see
+    // _switchToSavedServer and anchorConfigJsonByHost's own doc comment.
+    settings.anchorConfigJsonByHost['${settings.host}:${settings.port}'] =
+        settings.anchorConfig.toJson();
+    await prefs.setString(
+      'anchorConfigByHostJson',
+      jsonEncode(settings.anchorConfigJsonByHost),
     );
     await prefs.setString('navCardIdsJson', jsonEncode(settings.navCardIds));
     await prefs.setString('navLayoutMode', settings.navLayoutMode);
@@ -2516,9 +2678,15 @@ class _DashboardState extends State<Dashboard> {
         if (row is! List || row.length < 2) continue;
         final dt = DateTime.tryParse(row[0]?.toString() ?? '');
         final pos = row[1];
-        if (dt == null || pos is! Map) continue;
-        final lat = _num(pos['latitude']);
-        final lon = _num(pos['longitude']);
+        // The v2 history API answers with [lon, lat] (a plain 2-element
+        // list, GeoJSON order) — NOT the {latitude, longitude} object shape
+        // live deltas use. Confirmed live 2026-09-02 against lysmarine.local
+        // (200 OK with real rows, but every one silently dropped here since
+        // `pos is! Map` was always true) — this was why history never
+        // seeded the own-track despite the endpoint working fine.
+        if (dt == null || pos is! List || pos.length < 2) continue;
+        final lon = _num(pos[0]);
+        final lat = _num(pos[1]);
         if (lat == null || lon == null) continue;
         pts.add(AnchorTrackPoint(dt, lat, lon));
       }
@@ -2551,6 +2719,56 @@ class _DashboardState extends State<Dashboard> {
     } catch (_) {
       // Not critical — callers fall back to a generic label.
     }
+  }
+
+  // CFG → Admin: jump to a different boat's Signal K server. Loads THAT
+  // server's own saved sensor mapping if we have one from a previous visit
+  // (never the mapping we were just using) — a fresh server starts from
+  // plain defaults rather than inheriting whatever was configured for the
+  // server we're leaving, which is what "sin reescribir los almacenados
+  // localmente" (never overwrite what's stored locally for another server)
+  // meant: each server's sensor setup is independent and untouched by
+  // visiting a different one.
+  Future<void> _switchToSavedServer(SavedServer s) async {
+    // Persist the outgoing server's current sensor AND anchor-watch state
+    // into their own slots before switching away — anchor state is
+    // boat-specific too (armed/position/radius), the same reasoning as
+    // the sensor config just below. Confirmed live 2026-09-02: without
+    // this, "armed" on one boat kept publishing as armed on whichever
+    // server you switched to next.
+    final outgoingKey = '${settings.host}:${settings.port}';
+    settings.sensorConfigJsonByHost[outgoingKey] =
+        settings.sensorConfig.toJson();
+    settings.anchorConfigJsonByHost[outgoingKey] =
+        settings.anchorConfig.toJson();
+    settings.host = s.host;
+    settings.port = s.port;
+    settings.skUsername = s.skUsername;
+    settings.skPassword = s.skPassword;
+    final hostKey = '${s.host}:${s.port}';
+    final savedSensor = settings.sensorConfigJsonByHost[hostKey];
+    settings.sensorConfig = savedSensor != null
+        ? SensorConfig.fromJson(savedSensor)
+        : SensorConfig.empty();
+    final savedAnchor = settings.anchorConfigJsonByHost[hostKey];
+    settings.anchorConfig = savedAnchor != null
+        ? AnchorConfig.fromJson(savedAnchor)
+        : AnchorConfig();
+    _syncAnchorPublishTimer();
+    // CFG → Conexión's text fields are cached TextEditingControllers
+    // (created once, `??=`) that don't pick up settings.host/etc changing
+    // out from under them — left stale, hitting "Guardar" there would
+    // read the OLD host back out and silently undo this switch. Confirmed
+    // live 2026-09-02: switching servers via Admin, then anything touching
+    // that tab, reverted to the previous server.
+    _hostController?.text = settings.host;
+    _portController?.text = '${settings.port}';
+    _skUsernameController?.text = settings.skUsername;
+    _skPasswordController?.text = settings.skPassword;
+    setState(() {});
+    await _saveSettings();
+    _connectSignalK();
+    unawaited(_loginToSignalK());
   }
 
   // Ground-truth own-ship MMSI (see _isOwnShipTarget) — fetched the same
@@ -2588,18 +2806,58 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
-  void _connectSignalK() {
+  Future<void> _connectSignalK() async {
     // Several call sites (reconnect button, sensor config save, boot)
     // used to call this unconditionally — if DEMO mode was on, that opened
     // a real websocket alongside the demo timer, so both real and
     // simulated data landed on the same model at once and flickered.
     // Guarding here once covers all of them instead of patching each.
     if (settings.demoMode) return;
+    // A reconnect timer armed by an earlier disconnect (real or the stale-
+    // callback race fixed below) must never be left pending across a fresh
+    // connect — it would fire 5s later and tear down the connection this
+    // call just established, looping forever. Confirmed live 2026-09-02.
+    reconnectTimer?.cancel();
+    // The anchor-publish Bearer WS is cached across calls (see
+    // _ensureAnchorPublishChannel) and was never invalidated on a host
+    // change — after switching servers it kept quietly publishing
+    // navigation.anchor.* to the OLD server. Any reconnect (including a
+    // plain host/port edit, not just CFG → Admin) must drop it so the
+    // next publish opens a fresh channel to the CURRENT host.
+    _anchorPublishChannel?.sink.close();
+    _anchorPublishChannel = null;
+    channel?.sink.close();
+    // Bumped here, BEFORE the async mDNS gap below, not just right before
+    // opening the socket — a second _connectSignalK() call (switching
+    // servers again while this one is still resolving) must be able to
+    // supersede this attempt at every step, not only once it reaches the
+    // WS itself.
+    final myGeneration = ++_connectGeneration;
+    // Android's own OS resolver cannot look up .local (mDNS) hostnames at
+    // all — confirmed live 2026-09-02: `Failed host lookup: 'lysmarine
+    // .local' (OS Error: No address associated with hostname, errno = 7)`,
+    // even while sitting on the exact WiFi network that name is published
+    // on (unlike macOS/iOS, which resolve .local natively). Resolve it
+    // ourselves via mDNS and swap settings.host for the real IP once
+    // known — every other place that reads settings.host (REST calls,
+    // InfluxDB, AIS...) then just works with zero further changes.
+    if (settings.host.toLowerCase().endsWith('.local')) {
+      setState(() => signalK.status = 'Resolviendo ${settings.host}…');
+      final resolved = await resolveMdnsHost(settings.host);
+      if (myGeneration != _connectGeneration) return; // superseded meanwhile
+      if (resolved != null) {
+        debugPrint('[SK] mDNS resolved ${settings.host} -> $resolved');
+        settings.host = resolved;
+        _hostController?.text = settings.host;
+        unawaited(_saveSettings());
+      } else {
+        debugPrint('[SK] mDNS resolution failed for ${settings.host}');
+      }
+    }
     debugPrint(
-      '[SK] _connectSignalK() called, gen=${_connectGeneration + 1}, '
+      '[SK] _connectSignalK() called, gen=$myGeneration, '
       'host=${settings.host}:${settings.port}',
     );
-    channel?.sink.close();
     // Wipe every live field, not just tanks — otherwise a value from
     // whatever server was connected before (a different boat, or just a
     // stale reading) keeps showing as if it were live on the new
@@ -2616,18 +2874,19 @@ class _DashboardState extends State<Dashboard> {
       'ws://${settings.host}:${settings.port}/signalk/v1/stream?subscribe=none',
     );
     setState(() => signalK.status = 'Conectando…');
-    // Guards against a stale connect attempt's watchdog firing after a
-    // newer attempt has already started (e.g. the user changes host and
-    // hits reconnect while an old attempt's timer is still pending) —
-    // only the attempt that matches the current generation is allowed to
-    // touch state.
-    final myGeneration = ++_connectGeneration;
     try {
       channel = connectSignalKWs(uri, authBase64: settings.authBase64);
       channel!.stream.listen(
         _onSignalKMessage,
-        onError: _onSignalKError,
-        onDone: _onSignalKDone,
+        // Closing the OLD channel's sink a few lines above triggers ITS
+        // onDone/onError asynchronously, often after `channel`/generation
+        // already point at this new connection — without the generation
+        // check inside _onSignalKError/_onSignalKDone, that stale event
+        // would mark a perfectly healthy new connection as disconnected
+        // and reschedule a reconnect, an endless flicker loop. Confirmed
+        // live 2026-09-02, especially right after switching servers.
+        onError: (e) => _onSignalKError(e, myGeneration),
+        onDone: () => _onSignalKDone(myGeneration),
       );
       _sendSignalKSubscription();
       // Resumes publishing navigation.anchor.* if the watch was already
@@ -2662,11 +2921,11 @@ class _DashboardState extends State<Dashboard> {
         if (!mounted || myGeneration != _connectGeneration) return;
         if (!signalK.connected) {
           debugPrint('[SK] 10s watchdog fired, gen=$myGeneration, no data yet');
-          _onSignalKError('Sin respuesta del servidor Signal K');
+          _onSignalKError('Sin respuesta del servidor Signal K', myGeneration);
         }
       });
     } catch (error) {
-      _onSignalKError(error);
+      _onSignalKError(error, myGeneration);
     }
   }
 
@@ -3068,19 +3327,24 @@ class _DashboardState extends State<Dashboard> {
     return true;
   }
 
-  void _onSignalKError(Object error) {
+  void _onSignalKError(Object error, int generation) {
     debugPrint('[SK] _onSignalKError: $error (${error.runtimeType})');
-    if (!mounted) return;
+    // A stale attempt's own error arriving after a newer attempt already
+    // started must not touch state belonging to that newer connection —
+    // see the comment where this listener is wired up in _connectSignalK.
+    if (!mounted || generation != _connectGeneration) return;
     _scheduleReconnect();
     _debounceDisconnected('SK espera');
   }
 
-  void _onSignalKDone() {
+  void _onSignalKDone(int generation) {
     debugPrint(
       '[SK] _onSignalKDone: channel closed by remote/stream, '
       'closeCode=${channel?.closeCode} closeReason=${channel?.closeReason}',
     );
-    if (!mounted) return;
+    // Same stale-generation guard as _onSignalKError — closing the OLD
+    // channel's sink in _connectSignalK triggers exactly this callback.
+    if (!mounted || generation != _connectGeneration) return;
     _scheduleReconnect();
     _debounceDisconnected('SK desconectado');
   }
@@ -5684,16 +5948,20 @@ class _DashboardState extends State<Dashboard> {
 
   Widget _premiumTitle(String title, Color color, {String? unit}) => Row(
     children: [
-      Text(
-        title,
-        style: const TextStyle(
-          color: cMuted,
-          fontSize: 15,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
+      Expanded(
+        child: Text(
+          title,
+          overflow: TextOverflow.ellipsis,
+          maxLines: 1,
+          style: const TextStyle(
+            color: cMuted,
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.8,
+          ),
         ),
       ),
-      const Spacer(),
+      const SizedBox(width: 6),
       if (unit != null)
         Text(
           unit,
@@ -6447,6 +6715,20 @@ class _DashboardState extends State<Dashboard> {
             // to be. Applies on both Vela/Motor and Fondeado now that
             // Fondeado's title is gone too.
             final upShift = compactWind ? constraints.maxHeight * 0.20 : 0.0;
+            // The numbers strip below used a flat 170/108px regardless of
+            // how tall the card actually is — fine on a normal phone/
+            // tablet card, but on an unusually short one (a very compact
+            // landscape layout) that plus the title/dial no longer fit and
+            // threw a RenderFlex overflow. Capping it to a share of
+            // whatever height is actually available (still 170/108 on any
+            // normal-sized card, since that's well under the cap there)
+            // keeps the same look everywhere this was already tuned for,
+            // and only ever shrinks it on a card that's genuinely too
+            // short for the old fixed number to make sense on anyway.
+            final numbersRowH = math.min(
+              compactWind ? 170.0 : 108.0,
+              constraints.maxHeight * (showGauge ? 0.55 : 1.0),
+            );
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -6508,10 +6790,7 @@ class _DashboardState extends State<Dashboard> {
                 if (showGauge)
                   Transform.translate(
                     offset: Offset(0, -upShift),
-                    child: SizedBox(
-                      height: compactWind ? 170 : 108,
-                      child: numbersRow,
-                    ),
+                    child: SizedBox(height: numbersRowH, child: numbersRow),
                   )
                 else
                   Expanded(
@@ -7885,6 +8164,7 @@ class _DashboardState extends State<Dashboard> {
     },
     ownLat: signalK.latitude,
     ownLon: signalK.longitude,
+    skConnected: signalK.connected,
     // Deliberately just heading, not the usual `?? _freshCog` fallback used
     // elsewhere — the anchor screen's own fallback (bow pointing at the
     // anchor with no heading) is more meaningful at anchor than COG, which
@@ -8007,10 +8287,6 @@ class _DashboardState extends State<Dashboard> {
     );
     final influxTokenController = _influxTokenController ??=
         TextEditingController(text: settings.influxToken);
-    var scanning = false;
-    var scanChecked = 0, scanTotal = 0;
-    List<String> scanResults = [];
-
     const lbl = TextStyle(
       color: cMuted,
       fontSize: 10,
@@ -8039,10 +8315,10 @@ class _DashboardState extends State<Dashboard> {
     }
 
     return DefaultTabController(
-      length: 7,
+      length: _adminRevealed ? 8 : 7,
       child: Column(
         children: [
-          const Material(
+          Material(
             color: cBg,
             child: TabBar(
               isScrollable: true,
@@ -8051,13 +8327,14 @@ class _DashboardState extends State<Dashboard> {
               indicatorColor: cCyan,
               tabAlignment: TabAlignment.start,
               tabs: [
-                Tab(text: 'CONEXIÓN'),
-                Tab(text: 'SENSORES'),
-                Tab(text: 'HISTÓRICO'),
-                Tab(text: 'PANTALLA'),
-                Tab(text: 'ALARMAS'),
-                Tab(text: 'FONDEO'),
-                Tab(text: 'DIAGNÓSTICO'),
+                const Tab(text: 'CONEXIÓN'),
+                const Tab(text: 'SENSORES'),
+                const Tab(text: 'HISTÓRICO'),
+                const Tab(text: 'PANTALLA'),
+                const Tab(text: 'ALARMAS'),
+                const Tab(text: 'FONDEO'),
+                const Tab(text: 'DIAGNÓSTICO'),
+                if (_adminRevealed) const Tab(text: 'ADMIN'),
               ],
             ),
           ),
@@ -8102,10 +8379,17 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'lysmarine.local',
                                 selected: settings.host == 'lysmarine.local',
                                 onTap: () {
+                                  // Used to only fill the text field and
+                                  // wait for a separate "Guardar y
+                                  // reconectar" tap — picking a preset
+                                  // should just connect. Confirmed live
+                                  // 2026-09-02: tapping this looked like it
+                                  // did nothing.
                                   setSt(() {
                                     settings.host = 'lysmarine.local';
                                     hostController.text = settings.host;
                                   });
+                                  unawaited(doSave());
                                 },
                               ),
                               const SizedBox(width: 8),
@@ -8117,6 +8401,7 @@ class _DashboardState extends State<Dashboard> {
                                     settings.host = '100.85.109.61';
                                     hostController.text = settings.host;
                                   });
+                                  unawaited(doSave());
                                 },
                               ),
                             ],
@@ -8137,7 +8422,7 @@ class _DashboardState extends State<Dashboard> {
                           ),
                           gap,
                           OutlinedButton.icon(
-                            icon: scanning
+                            icon: _lanScanning
                                 ? const SizedBox(
                                     width: 16,
                                     height: 16,
@@ -8147,33 +8432,33 @@ class _DashboardState extends State<Dashboard> {
                                   )
                                 : const Icon(Icons.wifi_find, size: 18),
                             label: Text(
-                              scanning
-                                  ? 'Buscando… ($scanChecked/$scanTotal)'
+                              _lanScanning
+                                  ? 'Buscando… ($_lanScanChecked/$_lanScanTotal)'
                                   : 'Buscar Signal K en la red (puerto 3000)',
                             ),
-                            onPressed: scanning
+                            onPressed: _lanScanning
                                 ? null
                                 : () async {
                                     setSt(() {
-                                      scanning = true;
-                                      scanResults = [];
-                                      scanChecked = 0;
-                                      scanTotal = 0;
+                                      _lanScanning = true;
+                                      _lanScanResults = [];
+                                      _lanScanChecked = 0;
+                                      _lanScanTotal = 0;
                                     });
                                     try {
                                       final results = await scanLanForSignalK(
                                         3000,
                                         onProgress: (c, t) => setSt(() {
-                                          scanChecked = c;
-                                          scanTotal = t;
+                                          _lanScanChecked = c;
+                                          _lanScanTotal = t;
                                         }),
                                       );
                                       setSt(() {
-                                        scanResults = results;
-                                        scanning = false;
+                                        _lanScanResults = results;
+                                        _lanScanning = false;
                                       });
                                     } catch (e) {
-                                      setSt(() => scanning = false);
+                                      setSt(() => _lanScanning = false);
                                       if (context.mounted) {
                                         ScaffoldMessenger.of(
                                           context,
@@ -8188,9 +8473,9 @@ class _DashboardState extends State<Dashboard> {
                                     }
                                   },
                           ),
-                          if (!scanning &&
-                              scanResults.isEmpty &&
-                              scanChecked > 0)
+                          if (!_lanScanning &&
+                              _lanScanResults.isEmpty &&
+                              _lanScanChecked > 0)
                             const Padding(
                               padding: EdgeInsets.only(top: 6),
                               child: Text(
@@ -8198,13 +8483,13 @@ class _DashboardState extends State<Dashboard> {
                                 style: TextStyle(color: cMuted, fontSize: 12),
                               ),
                             ),
-                          if (scanResults.isNotEmpty)
+                          if (_lanScanResults.isNotEmpty)
                             Padding(
                               padding: const EdgeInsets.only(top: 6, bottom: 4),
                               child: Text(
-                                scanResults.length == 1
-                                    ? 'Encontrado: ${scanResults.first}'
-                                    : 'Encontrados ${scanResults.length}: ${scanResults.join(', ')}',
+                                _lanScanResults.length == 1
+                                    ? 'Encontrado: ${_lanScanResults.first}'
+                                    : 'Encontrados ${_lanScanResults.length}: ${_lanScanResults.join(', ')}',
                                 style: const TextStyle(
                                   color: cGreen,
                                   fontSize: 12,
@@ -8212,14 +8497,14 @@ class _DashboardState extends State<Dashboard> {
                                 ),
                               ),
                             ),
-                          if (scanResults.isNotEmpty)
+                          if (_lanScanResults.isNotEmpty)
                             Padding(
                               padding: const EdgeInsets.only(top: 6),
                               child: Wrap(
                                 spacing: 8,
                                 runSpacing: 8,
                                 children: [
-                                  for (final ip in scanResults)
+                                  for (final ip in _lanScanResults)
                                     _HostPresetChip(
                                       label: ip,
                                       selected: settings.host == ip,
@@ -8228,6 +8513,7 @@ class _DashboardState extends State<Dashboard> {
                                           settings.host = ip;
                                           hostController.text = ip;
                                         });
+                                        unawaited(doSave());
                                       },
                                     ),
                                 ],
@@ -9570,10 +9856,27 @@ class _DashboardState extends State<Dashboard> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _AppVersionCard(
-                              version: _pkgVersion,
-                              buildNumber: _pkgBuild,
-                              installSource: _installSourceLabel,
+                            GestureDetector(
+                              onLongPress: _adminRevealed
+                                  ? null
+                                  : () {
+                                      HapticFeedback.mediumImpact();
+                                      setSt(() => _adminRevealed = true);
+                                      setState(() {});
+                                      unawaited(
+                                        SharedPreferences.getInstance().then(
+                                          (p) => p.setBool(
+                                            'adminRevealed',
+                                            true,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                              child: _AppVersionCard(
+                                version: _pkgVersion,
+                                buildNumber: _pkgBuild,
+                                installSource: _installSourceLabel,
+                              ),
                             ),
                             if (lastCrashInfo != null) ...[
                               const SizedBox(height: 12),
@@ -10031,6 +10334,149 @@ class _DashboardState extends State<Dashboard> {
                       );
                     },
                   ),
+                  // ── Tab: Admin (hidden — long-press the version card above) ────────
+                  if (_adminRevealed)
+                    SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SettingsGroup(
+                            title: 'SERVIDORES GUARDADOS',
+                            icon: Icons.dns,
+                            children: [
+                              const Text(
+                                'Cambiar de servidor no toca la configuración '
+                                'de sensores de este barco — cada servidor '
+                                'guarda la suya propia.',
+                                style: TextStyle(color: cMuted, fontSize: 12),
+                              ),
+                              const SizedBox(height: 10),
+                              for (final s in settings.savedServers)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 4,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              s.name,
+                                              style: const TextStyle(
+                                                color: cText,
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                            Text(
+                                              '${s.host}:${s.port}',
+                                              style: const TextStyle(
+                                                color: cMuted,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      if (settings.host == s.host &&
+                                          settings.port == s.port)
+                                        const Padding(
+                                          padding: EdgeInsets.only(right: 8),
+                                          child: Icon(
+                                            Icons.check_circle,
+                                            color: cGreen,
+                                            size: 20,
+                                          ),
+                                        )
+                                      else
+                                        OutlinedButton(
+                                          onPressed: () => unawaited(
+                                            _switchToSavedServer(s),
+                                          ),
+                                          child: const Text('Conectar'),
+                                        ),
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.edit_outlined,
+                                          color: cMuted,
+                                          size: 18,
+                                        ),
+                                        onPressed: () async {
+                                          final edited =
+                                              await showDialog<SavedServer>(
+                                                context: context,
+                                                builder: (_) =>
+                                                    ServerEditDialog(
+                                                      initial: s,
+                                                    ),
+                                              );
+                                          if (edited == null) return;
+                                          setSt(() {
+                                            final i = settings.savedServers
+                                                .indexOf(s);
+                                            settings.savedServers[i] = edited;
+                                          });
+                                          setState(() {});
+                                          unawaited(_saveSettings());
+                                        },
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          color: cMuted,
+                                          size: 18,
+                                        ),
+                                        onPressed: () {
+                                          setSt(
+                                            () => settings.savedServers
+                                                .remove(s),
+                                          );
+                                          setState(() {});
+                                          unawaited(_saveSettings());
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              if (settings.savedServers.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 8),
+                                  child: Text(
+                                    'Sin servidores guardados.',
+                                    style: TextStyle(
+                                      color: cMuted,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
+                              const SizedBox(height: 10),
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.add, size: 16),
+                                label: const Text('Añadir servidor'),
+                                onPressed: () async {
+                                  final added =
+                                      await showDialog<SavedServer>(
+                                        context: context,
+                                        builder: (_) =>
+                                            const ServerEditDialog(),
+                                      );
+                                  if (added == null) return;
+                                  setSt(
+                                    () => settings.savedServers.add(added),
+                                  );
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
             ),

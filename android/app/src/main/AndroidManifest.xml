@@ -14,6 +14,11 @@
          Signal K's own position. -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <!-- multicast_dns (see lib/mdns_resolve/mdns_resolve_io.dart) resolves
+         .local hostnames like lysmarine.local ourselves, since Android's
+         own OS resolver can't — some devices/WiFi drivers otherwise filter
+         out multicast UDP packets by default without this. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
 
     <application
         android:label="REWIND Panel"

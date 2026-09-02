@@ -2072,6 +2072,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 --------------------------------------------------------------------------------
 cross_file
+multicast_dns
 path_provider
 path_provider_android
 path_provider_foundation

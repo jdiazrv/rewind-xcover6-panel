@@ -351,6 +351,100 @@ class CardShell extends StatelessWidget {
   );
 }
 
+// CFG → Admin: add or edit a saved Signal K server (see
+// Dashboard._switchToSavedServer). Plain text fields, no validation beyond
+// "name and host aren't empty" — this is an owner-only screen, not
+// user-facing input that needs guarding.
+class ServerEditDialog extends StatefulWidget {
+  const ServerEditDialog({super.key, this.initial});
+  final SavedServer? initial;
+
+  @override
+  State<ServerEditDialog> createState() => _ServerEditDialogState();
+}
+
+class _ServerEditDialogState extends State<ServerEditDialog> {
+  late final _nameCtrl = TextEditingController(text: widget.initial?.name ?? '');
+  late final _hostCtrl = TextEditingController(text: widget.initial?.host ?? '');
+  late final _portCtrl = TextEditingController(
+    text: '${widget.initial?.port ?? 3000}',
+  );
+  late final _userCtrl = TextEditingController(
+    text: widget.initial?.skUsername ?? '',
+  );
+  late final _passCtrl = TextEditingController(
+    text: widget.initial?.skPassword ?? '',
+  );
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _hostCtrl.dispose();
+    _portCtrl.dispose();
+    _userCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    backgroundColor: cPanel,
+    title: Text(widget.initial == null ? 'Añadir servidor' : 'Editar servidor'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _nameCtrl,
+            decoration: const InputDecoration(labelText: 'Nombre (ej. DRAGUEUR)'),
+          ),
+          TextField(
+            controller: _hostCtrl,
+            decoration: const InputDecoration(labelText: 'Host / IP'),
+          ),
+          TextField(
+            controller: _portCtrl,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Puerto'),
+          ),
+          TextField(
+            controller: _userCtrl,
+            decoration: const InputDecoration(labelText: 'Usuario Signal K (opcional)'),
+          ),
+          TextField(
+            controller: _passCtrl,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Contraseña (opcional)'),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancelar'),
+      ),
+      FilledButton(
+        onPressed: () {
+          final name = _nameCtrl.text.trim();
+          final host = _hostCtrl.text.trim();
+          if (name.isEmpty || host.isEmpty) return;
+          Navigator.of(context).pop(
+            SavedServer(
+              name: name,
+              host: host,
+              port: int.tryParse(_portCtrl.text.trim()) ?? 3000,
+              skUsername: _userCtrl.text.trim(),
+              skPassword: _passCtrl.text,
+            ),
+          );
+        },
+        child: const Text('Guardar'),
+      ),
+    ],
+  );
+}
+
 class WindArrow extends StatelessWidget {
   const WindArrow({super.key, required this.deg, required this.speed});
   final double? deg;
