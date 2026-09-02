@@ -1636,13 +1636,29 @@ class _DashboardState extends State<Dashboard> {
       await prefs.setString('anchorDeviceId', settings.anchorDeviceId);
     }
     if (_isSignalKWebapp) {
-      // Served from Signal K's own webapp mount — always this same origin.
-      // Never trust a cached host/port here: a device that previously
-      // visited a *different* Signal K server's webapp (different boat,
-      // different IP/hostname) would otherwise keep reconnecting to that
-      // stale host instead of the one it's actually being served from.
+      // Served from Signal K's own webapp mount — defaults to this same
+      // origin. Never trust a PLAIN cached host/port here: a device that
+      // previously visited a *different* Signal K server's webapp
+      // (different boat, different IP/hostname) would otherwise keep
+      // reconnecting to that stale host instead of the one it's actually
+      // being served from. BUT an override saved specifically FOR this
+      // exact origin is trusted — e.g. loaded the page via
+      // "lysmarine.local" (only resolves on the boat's own LAN) while
+      // actually reachable remotely, and manually pointed it at the boat's
+      // Tailscale IP instead in CFG → Conexión. Confirmed live 2026-09-02:
+      // there was previously no way to do this at all — host/port were
+      // hard-locked with no editable field shown.
       settings.host = Uri.base.host;
       if (Uri.base.hasPort) settings.port = Uri.base.port;
+      final overrideKey = 'webappHostOverride:${Uri.base.origin}';
+      final override = prefs.getString(overrideKey);
+      if (override != null) {
+        final parts = override.split(':');
+        if (parts.length == 2) {
+          settings.host = parts[0];
+          settings.port = int.tryParse(parts[1]) ?? settings.port;
+        }
+      }
     } else {
       // Android app / standalone (Netlify) web build: host/port are
       // user-configurable in CFG. On web, default to the page's own origin
@@ -7818,6 +7834,19 @@ class _DashboardState extends State<Dashboard> {
     Future<void> doSave() async {
       settings.host = hostController.text.trim();
       settings.port = int.tryParse(portController.text.trim()) ?? 3000;
+      if (_isSignalKWebapp) {
+        // Remembered per-origin (see _loadSettings) — the page you're
+        // actually looking at was loaded from Uri.base, but the real
+        // server may only be reachable at a different host/port from
+        // where you are right now (e.g. loaded via a .local mDNS name
+        // that only resolves on the boat's own LAN, while reachable
+        // remotely via its Tailscale IP instead).
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          'webappHostOverride:${Uri.base.origin}',
+          '${settings.host}:${settings.port}',
+        );
+      }
       settings.authBase64 = authController.text.trim();
       settings.influxHost = influxHostController.text.trim();
       settings.influxOrg = influxOrgController.text.trim().isEmpty
@@ -7873,21 +7902,94 @@ class _DashboardState extends State<Dashboard> {
                           gap,
                           Row(
                             children: [
-                              const Icon(
-                                Icons.check_circle,
-                                color: cGreen,
+                              Icon(
+                                settings.host == Uri.base.host
+                                    ? Icons.check_circle
+                                    : Icons.info_outline,
+                                color: settings.host == Uri.base.host
+                                    ? cGreen
+                                    : cCyan,
                                 size: 16,
                               ),
                               const SizedBox(width: 6),
                               Expanded(
                                 child: Text(
-                                  'Conectado automáticamente a ${settings.host}:${settings.port} — esta app se sirve desde tu propio servidor Signal K, así que no hace falta configurar host/puerto.',
+                                  settings.host == Uri.base.host
+                                      ? 'Servido desde ${Uri.base.host} — normalmente no hace falta tocar esto.'
+                                      : 'Esta página se sirve desde ${Uri.base.host}, pero apuntando manualmente a ${settings.host}:${settings.port}.',
                                   style: const TextStyle(
                                     color: cMuted,
                                     fontSize: 13,
                                   ),
                                 ),
                               ),
+                            ],
+                          ),
+                          gap,
+                          // A .local (mDNS) hostname only resolves on the
+                          // boat's own LAN — if you loaded this page that
+                          // way but are actually reachable remotely (e.g.
+                          // via Tailscale), there was previously no way to
+                          // point the app anywhere else at all. Confirmed
+                          // live 2026-09-02.
+                          const Text(
+                            'Si la conexión automática no funciona (por ejemplo, accediendo por '
+                            'red móvil/Tailscale a un servidor con nombre .local), pon aquí el '
+                            'host o IP por el que sí llegas:',
+                            style: TextStyle(color: cMuted, fontSize: 12),
+                          ),
+                          gap,
+                          TextField(
+                            controller: hostController,
+                            decoration: const InputDecoration(
+                              labelText: 'Host (o IP)',
+                              isDense: true,
+                            ),
+                            onChanged: (v) =>
+                                setSt(() => settings.host = v.trim()),
+                          ),
+                          gap,
+                          TextField(
+                            controller: portController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Puerto',
+                              isDense: true,
+                            ),
+                          ),
+                          gap,
+                          Row(
+                            children: [
+                              FilledButton.icon(
+                                icon: const Icon(Icons.save, size: 18),
+                                label: const Text('Guardar y reconectar'),
+                                onPressed: () => doSave(),
+                              ),
+                              const SizedBox(width: 8),
+                              if (settings.host != Uri.base.host ||
+                                  (Uri.base.hasPort &&
+                                      settings.port != Uri.base.port))
+                                TextButton(
+                                  onPressed: () async {
+                                    final prefs =
+                                        await SharedPreferences.getInstance();
+                                    await prefs.remove(
+                                      'webappHostOverride:${Uri.base.origin}',
+                                    );
+                                    setSt(() {
+                                      settings.host = Uri.base.host;
+                                      if (Uri.base.hasPort) {
+                                        settings.port = Uri.base.port;
+                                      }
+                                      hostController.text = settings.host;
+                                      portController.text =
+                                          '${settings.port}';
+                                    });
+                                    setState(() {});
+                                    unawaited(doSave());
+                                  },
+                                  child: const Text('Volver a automático'),
+                                ),
                             ],
                           ),
                         ] else ...[
