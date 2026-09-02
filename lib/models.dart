@@ -484,6 +484,7 @@ class SignalKModel {
   // exists, so unlike the 3 above there's no threshold fallback — stays
   // off until the bridge actually publishes a fault.
   bool? engineGlowPlugFaultAlarm;
+  DateTime? engineGlowPlugFaultAlarmUpdate;
   // Preheat-in-progress status (PGN 65264 — SPN 1494, Glow Plug Relay
   // Status). Not an alarm, just the normal "still warming the glow plugs"
   // state — drives the 'precal' lamp in real (non-SIMUL) mode.
@@ -584,6 +585,7 @@ class SignalKModel {
     engineLowOilAlarmUpdate = null;
     engineLowVoltAlarmUpdate = null;
     engineGlowPlugFaultAlarm = null;
+    engineGlowPlugFaultAlarmUpdate = null;
     enginePreheatActive = null;
     engineUnknownPgn = null;
     engineUnknownFrameCount = null;

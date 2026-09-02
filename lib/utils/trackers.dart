@@ -152,7 +152,7 @@ class _WindHistory {
 
 }
 
-class _PressureHistory {
+class PressureHistory {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(hours: 24);
 

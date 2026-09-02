@@ -57,6 +57,8 @@ part 'widgets/graph_dialog.dart';
 part 'widgets/misc_cards.dart';
 part 'widgets/alarm_and_shell.dart';
 part 'utils/trackers.dart';
+part 'signalk/ntfy_push.dart';
+part 'ais/closest_approach.dart';
 
 // Last uncaught error, if any — shown in CFG > Diagnóstico rather than only
 // living in logcat, since the tablet running this has no attached console
@@ -162,6 +164,8 @@ class _DashboardState extends State<Dashboard> {
   final signalK = SignalKModel();
   final weather = WeatherModel();
   final settings = SettingsModel();
+  late final _ntfyPush = _NtfyPushService(this);
+  late final _closestApproach = _ClosestApproachService(this);
   final _pageController = PageController();
 
   WebSocketChannel? channel;
@@ -876,7 +880,7 @@ class _DashboardState extends State<Dashboard> {
       }
     }
     if (settings.alarmAisEnabled) {
-      final closest = _closestApproachTarget();
+      final closest = _closestApproach.closestApproachTarget();
       final cpa = closest?.cpaNm;
       final tcpa = closest?.tcpaMin;
       // tcpa > 0 — a negative TCPA means the target's already at its
@@ -984,8 +988,15 @@ class _DashboardState extends State<Dashboard> {
     // Glow-plug/starter-relay fault (SPN 677/724, FMI 5) — deliberately
     // NOT gated by _engineRunning: this fault matters most *before* the
     // engine is turning, while it's still preheating, so waiting for
-    // "running" would miss the exact moment it's needed.
-    if (signalK.engineGlowPlugFaultAlarm == true) {
+    // "running" would miss the exact moment it's needed. Freshness-gated
+    // like the other 3 DM1 flags above — a bridge that stops publishing
+    // (engine/bus powered down) must not leave a stale "true" alarming
+    // forever.
+    final freshGlowPlugAlarm = _freshEngineFlag(
+      signalK.engineGlowPlugFaultAlarm,
+      signalK.engineGlowPlugFaultAlarmUpdate,
+    );
+    if (freshGlowPlugAlarm == true) {
       const key = 'engineGlowPlug';
       out.add((
         key: key,
@@ -1067,7 +1078,7 @@ class _DashboardState extends State<Dashboard> {
   );
 
   Future<void> _syncAlarmSound() async {
-    unawaited(_maybeSendNtfyAlarms());
+    unawaited(_ntfyPush._maybeSendNtfyAlarms());
     final shouldPlay = _alarmSoundShouldPlay;
     final asset = _alarmSoundAsset;
     if (shouldPlay &&
@@ -1085,391 +1096,10 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
-  // ntfy.sh push, per alarm key — client-side HTTP POST, no Signal K
-  // plugin involved (per explicit "no quiero pasar por el plugin de
-  // signalk" instruction). Which alarms push is just settings.ntfyAlarmKeys
-  // (checked off per-alarm in CFG); one shared "don't repeat within N min"
-  // window applies across all of them, keyed per alarm so one alarm's
-  // pushes don't suppress a different one's.
-  final Map<String, DateTime> _lastNtfyPushAt = {};
-
-  // Builds the actual numbers behind each alarm into the push body, not
-  // just its generic label — e.g. "GARREANDO" alone says nothing about how
-  // far out, how fast, or in which direction, and this is exactly the
-  // moment someone reading a phone notification wants that at a glance.
-  String _ntfyBodyForAlarm(String key, String label) {
-    switch (key) {
-      case 'anchorDrag':
-        final cfg = settings.anchorConfig;
-        final lat = _anchorEffectiveLat ?? signalK.latitude;
-        final lon = _anchorEffectiveLon ?? signalK.longitude;
-        final parts = <String>[
-          _anchorIsDragging ? 'GARREANDO' : 'FUERA DEL CÍRCULO',
-        ];
-        if (lat != null &&
-            lon != null &&
-            cfg.dropLat != null &&
-            cfg.dropLon != null) {
-          final r = bearingDistanceMeters(
-            cfg.dropLat!,
-            cfg.dropLon!,
-            lat,
-            lon,
-          );
-          parts.add(
-            '${r.distanceM.round()} m / ${cfg.radiusM.round()} m radio',
-          );
-          final heading = _freshHeading;
-          if (heading != null) {
-            final rel = ((r.bearingDeg - heading + 540) % 360) - 180;
-            parts.add(
-              '${rel.abs().round()}° ${rel >= 0 ? 'Er' : 'Br'}',
-            );
-          }
-        }
-        if (_anchorIsDragging && _anchorDragSpeedMPerMin != null) {
-          parts.add(
-            'alejándose ${_anchorDragSpeedMPerMin!.toStringAsFixed(1)} m/min',
-          );
-        }
-        // Garreando rarely happens in isolation — viento y profundidad son
-        // justo los dos datos que explican POR QUÉ se está garreando, así
-        // que van en la misma alarma en vez de obligar a mirar otra pantalla.
-        final aws = _freshWind(_dAws);
-        final awa = _freshWind(_dAwa);
-        if (aws != null) {
-          parts.add(
-            'AWS ${aws.toStringAsFixed(0)} kt'
-            '${_awsHistory.isGusting() ? ' (RACHA)' : ''}'
-            '${awa != null ? ' AWA ${awa.round()}°' : ''}',
-          );
-        }
-        final depth = _fresh(signalK.depthM);
-        final dropDepth = cfg.dropDepthM;
-        if (depth != null) {
-          parts.add(
-            'profundidad ${depth.toStringAsFixed(1)} m'
-            '${dropDepth != null ? ' (${dropDepth.toStringAsFixed(1)} m al fondear)' : ''}',
-          );
-        }
-        if (settings.anchorTotalChainLengthM > 0) {
-          parts.add('cadena ${settings.anchorTotalChainLengthM.round()} m');
-        }
-        return parts.join(' · ');
-      case 'anchorWind':
-        final aws = _freshWind(_dAws);
-        final twd = _freshWind(_dTwd);
-        final parts = <String>[
-          if (aws != null) '${aws.toStringAsFixed(0)} kt',
-          if (_awsHistory.isGusting()) 'RACHA',
-          if (twd != null) 'TWD ${twd.round()}°',
-          'umbral ${settings.alarmAnchorWindKn.round()} kt',
-        ];
-        return parts.join(' · ');
-      case 'anchorDepth':
-        final depth = _fresh(signalK.depthM);
-        final dropDepth = settings.anchorConfig.dropDepthM;
-        final parts = <String>[];
-        if (depth != null) parts.add('${depth.toStringAsFixed(1)} m ahora');
-        if (dropDepth != null) {
-          parts.add('${dropDepth.toStringAsFixed(1)} m al fondear');
-          if (depth != null) {
-            final delta = depth - dropDepth;
-            parts.add(
-              '${delta > 0 ? '+' : ''}${delta.toStringAsFixed(1)} m',
-            );
-          }
-        }
-        parts.add('margen ${settings.alarmAnchorDepthMarginM.toStringAsFixed(1)} m');
-        return parts.join(' · ');
-      case 'corredera':
-        final sog = _freshSog;
-        final stw = _freshStw;
-        final parts = <String>[
-          if (sog != null) 'SOG ${sog.toStringAsFixed(1)} kt',
-          'STW ${stw != null ? stw.toStringAsFixed(1) : '0.0'} kt',
-        ];
-        return parts.join(' · ');
-      default:
-        return label;
-    }
-  }
-
-  Future<void> _maybeSendNtfyForAlarm(String key, String label) async {
-    final topic = settings.ntfyTopic.trim();
-    if (topic.isEmpty || !settings.ntfyAlarmKeys.contains(key)) return;
-    final now = DateTime.now();
-    final last = _lastNtfyPushAt[key];
-    if (last != null &&
-        now.difference(last) < Duration(seconds: settings.ntfyMinIntervalSec)) {
-      return;
-    }
-    _lastNtfyPushAt[key] = now;
-    final vessel = signalK.vesselName ?? 'REWIND';
-    final detail = _ntfyBodyForAlarm(key, label);
-    try {
-      // ASCII-only header values — alarm labels and vessel names routinely
-      // have accents/em-dashes, which throw in Dart's http client if put
-      // directly in a header. The real message (any charset) goes in the
-      // UTF-8 body instead, same fix as the test-push button.
-      await http
-          .post(
-            Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
-            headers: const {
-              'Title': 'REWIND Panel - Alarma',
-              'Priority': 'urgent',
-              'Tags': 'warning',
-            },
-            body: '$vessel: $label\n$detail',
-          )
-          .timeout(const Duration(seconds: 8));
-    } catch (_) {
-      // Best-effort — a failed push shouldn't affect the on-device alarm.
-    }
-    // Genuinely awaited, not fire-and-forget — garreo is almost always
-    // noticed from the phone notification while the app is backgrounded,
-    // and Android can freeze/kill a backgrounded isolate's pending work the
-    // moment the awaited call above returns, so an unawaited follow-up here
-    // frequently never actually ran. Confirmed live 2026-09-01: the text
-    // alert always arrived, the attachment never did — this is why.
-    if (key == 'anchorDrag') {
-      await _sendNtfyMapSnapshot(topic);
-    }
-  }
-
-  Future<void> _sendNtfyMapSnapshot(String topic) async {
-    try {
-      // toImage() needs the engine's raster thread, which Android can
-      // starve/stall while the app is backgrounded — exactly when garreo
-      // is usually noticed. Without a timeout that hang sat in the awaited
-      // path all the way up into _maybeSendNtfyForAlarm, which is the
-      // likely reason the alarm itself started repeating outside its
-      // configured interval (confirmed live 2026-09-01) — a wedged Future
-      // here can outlive the app's own foreground/background cycle.
-      final bytes = await _renderAnchorSnapshotPng().timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => null,
-      );
-      if (bytes == null) {
-        lastCrashInfo =
-            '${DateTime.now()} ntfy snapshot: _renderAnchorSnapshotPng '
-            'returned null (dropLat/dropLon likely null)';
-        return;
-      }
-      await http
-          .put(
-            Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
-            headers: const {
-              'Filename': 'fondeo.png',
-              'Title': 'REWIND Panel - Posicion',
-            },
-            body: bytes,
-          )
-          .timeout(const Duration(seconds: 20));
-    } catch (e, st) {
-      // Previously silent — a failure here was indistinguishable from the
-      // attachment simply not being tried at all. Surfaced via
-      // CFG → Diagnóstico's "último error" card instead.
-      lastCrashInfo = '${DateTime.now()} ntfy snapshot failed:\n$e\n$st';
-    }
-  }
-
-  // Draws a self-contained schematic (not a live capture of the ANC screen
-  // — that only worked while ANC happened to be the visible tab, which
-  // isn't true most of the time an alarm actually fires, so the attachment
-  // silently never arrived) via a plain dart:ui Canvas. No widget needs to
-  // be mounted/laid out for this to work, so it's reliable regardless of
-  // which tab the app is showing. Bakes in the same numbers as the text
-  // push (distance/radius, drag speed, wind, depth) directly onto the
-  // image, per explicit request.
-  Future<Uint8List?> _renderAnchorSnapshotPng() async {
-    final cfg = settings.anchorConfig;
-    final dropLat = cfg.dropLat, dropLon = cfg.dropLon;
-    final lat = _anchorEffectiveLat ?? signalK.latitude;
-    final lon = _anchorEffectiveLon ?? signalK.longitude;
-    if (dropLat == null || dropLon == null) return null;
-
-    const w = 480.0, h = 560.0;
-    const mapH = 380.0;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w, h));
-    canvas.drawRect(const Rect.fromLTWH(0, 0, w, h), Paint()..color = cBg);
-
-    // ── Schematic: anchor at center, boat offset by real bearing/distance ──
-    final center = const Offset(w / 2, mapH / 2 + 20);
-    final rel = (lat != null && lon != null)
-        ? bearingDistanceMeters(dropLat, dropLon, lat, lon)
-        : null;
-    final radiusM = cfg.radiusM;
-    final maxSpanM = math.max(radiusM * 1.35, (rel?.distanceM ?? 0) * 1.25)
-        .clamp(15, 100000)
-        .toDouble();
-    final pxPerM = 130 / maxSpanM;
-
-    final circlePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = (rel != null && rel.distanceM > radiusM) ? cRed : cCyan;
-    if (cfg.shape == 'sector' &&
-        cfg.sectorStartDeg != null &&
-        cfg.sectorEndDeg != null) {
-      final startDeg = cfg.sectorStartDeg! - 90;
-      final sweep =
-          ((cfg.sectorEndDeg! - cfg.sectorStartDeg!) + 360) % 360;
-      canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radiusM * pxPerM),
-        startDeg * math.pi / 180,
-        sweep * math.pi / 180,
-        false,
-        circlePaint,
-      );
-    } else {
-      canvas.drawCircle(center, radiusM * pxPerM, circlePaint);
-    }
-    // Anchor mark.
-    canvas.drawCircle(center, 4, Paint()..color = cText);
-
-    // Boat mark, at its real bearing/distance from the anchor.
-    if (rel != null) {
-      final rad = rel.bearingDeg * math.pi / 180;
-      final boatOffset = Offset(
-        center.dx + math.sin(rad) * rel.distanceM * pxPerM,
-        center.dy - math.cos(rad) * rel.distanceM * pxPerM,
-      );
-      final boatColor = _anchorIsDragging ? cRed : cYellow;
-      final heading = _freshHeading;
-      canvas.save();
-      canvas.translate(boatOffset.dx, boatOffset.dy);
-      if (heading != null) canvas.rotate(heading * math.pi / 180);
-      final boatPath = Path()
-        ..moveTo(0, -12)
-        ..lineTo(8, 10)
-        ..lineTo(0, 5)
-        ..lineTo(-8, 10)
-        ..close();
-      canvas.drawPath(boatPath, Paint()..color = boatColor);
-      canvas.restore();
-    }
-
-    // ── Text block: same numbers as the ntfy text push ──────────────────
-    final lines = <String>[
-      signalK.vesselName ?? 'REWIND',
-      _anchorIsDragging ? 'GARREANDO' : 'Vigilancia de fondeo',
-    ];
-    if (rel != null) {
-      lines.add(
-        'Distancia: ${rel.distanceM.round()} m / radio ${radiusM.round()} m',
-      );
-    }
-    if (_anchorIsDragging && _anchorDragSpeedMPerMin != null) {
-      lines.add(
-        'Velocidad de garreo: ${_anchorDragSpeedMPerMin!.toStringAsFixed(1)} m/min',
-      );
-    }
-    final aws = _freshWind(_dAws);
-    final awa = _freshWind(_dAwa);
-    if (aws != null) {
-      lines.add(
-        'AWS: ${aws.toStringAsFixed(0)} kt'
-        '${_awsHistory.isGusting() ? ' (RACHA)' : ''}'
-        '${awa != null ? ' · AWA ${awa.round()}°' : ''}',
-      );
-    }
-    final depth = _fresh(signalK.depthM);
-    if (depth != null) {
-      lines.add(
-        'Profundidad: ${depth.toStringAsFixed(1)} m'
-        '${cfg.dropDepthM != null ? ' (${cfg.dropDepthM!.toStringAsFixed(1)} m al fondear)' : ''}',
-      );
-    }
-    if (settings.anchorTotalChainLengthM > 0) {
-      lines.add('Cadena disponible: ${settings.anchorTotalChainLengthM.round()} m');
-    }
-
-    var ty = mapH + 16;
-    for (var i = 0; i < lines.length; i++) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: lines[i],
-          style: TextStyle(
-            color: i == 0 ? cMuted : (i == 1 ? cYellow : cText),
-            fontSize: i == 1 ? 20 : 15,
-            fontWeight: i <= 1 ? FontWeight.w800 : FontWeight.w600,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: w - 32);
-      tp.paint(canvas, Offset(16, ty));
-      ty += tp.height + 6;
-    }
-
-    final picture = recorder.endRecording();
-    final image = await picture.toImage(w.round(), h.round());
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    return byteData?.buffer.asUint8List();
-  }
-
-  // Sends (rate-limited) a push for every currently-active, unmuted alarm
-  // whose key is checked in CFG → Alarmas.
-  Future<void> _maybeSendNtfyAlarms() async {
-    if (settings.ntfyTopic.trim().isEmpty || settings.ntfyAlarmKeys.isEmpty) {
-      return;
-    }
-    for (final a in _activeAlarms) {
-      if (a.muted) continue;
-      unawaited(_maybeSendNtfyForAlarm(a.key, a.label));
-    }
-  }
-
-  // Unconditional — bypasses the alarm-active and rate-limit checks, so
-  // CFG's "Enviar prueba" button can confirm the topic/connection actually
-  // work without needing to fake an alarm condition first.
-  Future<bool> _sendNtfyTestPush() async {
-    final topic = settings.ntfyTopic.trim();
-    if (topic.isEmpty) return false;
-    try {
-      // Title as a plain-ASCII header, everything boat-specific (vessel
-      // name may have accents) in the UTF-8 body instead — an HTTP header
-      // value with non-Latin1 characters (found live: the "—" em dash this
-      // used to put directly in Title) makes Dart's http client throw
-      // before the request is even sent, which is why this always failed.
-      final resp = await http
-          .post(
-            Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
-            headers: const {'Title': 'REWIND Panel - Prueba', 'Tags': 'test_tube'},
-            body:
-                'Prueba desde ${signalK.vesselName ?? "REWIND"}. Si ves esto, ntfy funciona.',
-          )
-          .timeout(const Duration(seconds: 8));
-      final ok = resp.statusCode == 200;
-      // Follow-up attachment (the large ship icon) so the test button also
-      // confirms the file-upload path — non-blocking, doesn't affect `ok`.
-      if (ok) unawaited(_sendNtfyTestAttachment(topic));
-      return ok;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  Future<void> _sendNtfyTestAttachment(String topic) async {
-    try {
-      final asset = boatIconById(settings.shipIconId).grandeAsset;
-      final bytes = await rootBundle.load(asset);
-      final filename = asset.split('/').last;
-      await http
-          .put(
-            Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
-            headers: {
-              'Filename': filename,
-              'Title': 'REWIND Panel - Prueba adjunto',
-            },
-            body: bytes.buffer.asUint8List(),
-          )
-          .timeout(const Duration(seconds: 20));
-    } catch (_) {
-      // Best-effort — the text test push already confirmed above.
-    }
-  }
+  // ntfy push subsystem (test button, per-alarm dispatch, map snapshot) —
+  // moved to lib/signalk/ntfy_push.dart (NtfyPushMixin) to shrink this
+  // file; behavior is unchanged, everything there has full access to this
+  // class's own fields the same way it did inline.
 
   void _muteAlarm(String key) {
     setState(() => _mutedAlarms.add(key));
@@ -1849,7 +1479,7 @@ class _DashboardState extends State<Dashboard> {
   // 30-min rolling history for wind trend + gusts (raw, undamped values)
   final _twsHistory = _WindHistory();
   final _awsHistory = _WindHistory();
-  final _pressureHistory = _PressureHistory();
+  final _pressureHistory = PressureHistory();
   bool _pressureTrendFromInflux = false;
   bool _loadingPressureTrend = false;
   final _depthTrend = _DepthTrendTracker();
@@ -2621,8 +2251,10 @@ class _DashboardState extends State<Dashboard> {
       // Glow-plug/starter-relay circuit fault (SPN 677 or 724, FMI 5) — a
       // DM1 fault with no numeric range, so no threshold fallback exists;
       // it's simply off until the bridge reports one.
-      h['$base.glowPlugFaultAlarm'] = (v) =>
-          signalK.engineGlowPlugFaultAlarm = v is bool ? v : null;
+      h['$base.glowPlugFaultAlarm'] = (v) {
+        signalK.engineGlowPlugFaultAlarm = v is bool ? v : null;
+        signalK.engineGlowPlugFaultAlarmUpdate = DateTime.now();
+      };
       // Preheat-in-progress status (PGN 65264 — SPN 1494), a normal
       // operating state, not a fault.
       h['$base.preheatActive'] = (v) =>
@@ -3742,8 +3374,17 @@ class _DashboardState extends State<Dashboard> {
   // normal fetch from the page itself, so the browser stores that cookie
   // automatically; nothing else needs to be done for the iframes to pick
   // it up on their own next load.
-  Future<void> _loginToSignalK() async {
-    if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return;
+  // Returns whether the login actually succeeded — used both as a fire-
+  // and-forget CFG status check (existing callers ignore the return value)
+  // and, since 2026-09-02, as a real pre-arm credential check for ANC's
+  // Fondear/Levar (see NativeAnchorView.onVerifyLogin): arming used to
+  // just check the username/password fields weren't empty, never that
+  // they actually worked, so a typo could arm the watch locally while the
+  // real Signal K publish silently failed from then on.
+  Future<bool> _loginToSignalK() async {
+    if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) {
+      return false;
+    }
     try {
       final uri = Uri.parse(
         'http://${settings.host}:${settings.port}/signalk/v1/auth/login',
@@ -3758,11 +3399,12 @@ class _DashboardState extends State<Dashboard> {
             }),
           )
           .timeout(const Duration(seconds: 8));
-      if (mounted) {
-        setState(() => _skLoginOk = response.statusCode == 200);
-      }
+      final ok = response.statusCode == 200;
+      if (mounted) setState(() => _skLoginOk = ok);
+      return ok;
     } catch (_) {
       if (mounted) setState(() => _skLoginOk = false);
+      return false;
     }
   }
 
@@ -5091,7 +4733,7 @@ class _DashboardState extends State<Dashboard> {
     final heel = _fresh(signalK.heelDeg);
     final positionFresh =
         _navFresh && signalK.latitude != null && signalK.longitude != null;
-    final closest = _closestApproachTarget();
+    final closest = _closestApproach.closestApproachTarget();
 
     switch (id) {
       case 'sog':
@@ -5475,7 +5117,7 @@ class _DashboardState extends State<Dashboard> {
   // Same "ficha" the AIS tab itself shows on tap — full data, not just the
   // CPA/TCPA summary this dialog used to have on its own.
   void _showCpaDetail(BuildContext context) {
-    final closest = _closestApproachTarget();
+    final closest = _closestApproach.closestApproachTarget();
     if (closest == null) {
       showDialog<void>(
         context: context,
@@ -5507,189 +5149,8 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  ({
-    AisTarget target,
-    double? cpaNm,
-    double? tcpaMin,
-    double? bearingDeg,
-    double? distNm,
-    String? crossing,
-  })?
-  _closestApproachTarget() {
-    final ownLat = signalK.latitude;
-    final ownLon = signalK.longitude;
-    final ownHeading = _freshHeading;
-    final ownCog = _freshCog ?? ownHeading;
-    final ownSog = _freshSog ?? 0;
-    ({
-      AisTarget target,
-      double? cpaNm,
-      double? tcpaMin,
-      double? bearingDeg,
-      double? distNm,
-      String? crossing,
-    })?
-    best;
-
-    for (final target in _visibleAisTargets.values) {
-      final last = target.lastUpdate;
-      if (last != null && DateTime.now().difference(last).inMinutes > 10) {
-        continue;
-      }
-      double? cpaNm = target.pluginCpaNm;
-      double? tcpaMin = target.pluginTcpaMin;
-      double? bearingDeg;
-      double? distNm;
-      String? crossing;
-
-      if (ownLat != null &&
-          ownLon != null &&
-          target.lat != null &&
-          target.lon != null) {
-        final rel = _bearingDistanceNm(
-          ownLat,
-          ownLon,
-          target.lat!,
-          target.lon!,
-        );
-        bearingDeg = rel.bearingDeg;
-        distNm = rel.distNm;
-
-        if ((cpaNm == null || tcpaMin == null) &&
-            ownCog != null &&
-            target.cogDeg != null &&
-            target.sogKn != null) {
-          final brg = rel.bearingDeg * math.pi / 180;
-          final rN = rel.distNm * math.cos(brg);
-          final rE = rel.distNm * math.sin(brg);
-          final ownCogRad = ownCog * math.pi / 180;
-          final tgtCogRad = target.cogDeg! * math.pi / 180;
-          final vN =
-              target.sogKn! * math.cos(tgtCogRad) -
-              ownSog * math.cos(ownCogRad);
-          final vE =
-              target.sogKn! * math.sin(tgtCogRad) -
-              ownSog * math.sin(ownCogRad);
-          final cpa = _cpa(rN, rE, vN, vE);
-          cpaNm ??= cpa?.cpaNm;
-          tcpaMin ??= cpa?.tcpaMin;
-          // Same "worth calling proa/popa" gate as the AIS tab's own list
-          // view (_aisShowsCrossing): only when the target is actually
-          // moving and will pass close, so a stopped/anchored contact or a
-          // wide-berth crossing doesn't get a misleading label.
-          if (ownHeading != null &&
-              (cpaNm ?? double.infinity) < 5 &&
-              target.sogKn! > 0.2) {
-            crossing = _crossingLabel(
-              rN,
-              rE,
-              vN,
-              vE,
-              ownHeading * math.pi / 180,
-            );
-          }
-        }
-      }
-
-      // Both CPA and TCPA must be known and within range at once — a
-      // target with only one of the two computed (e.g. distance known but
-      // no CPA yet) used to slip through on the other check alone, which
-      // is how a contact 30 NM out with a stray CPA reading could show up
-      // as "closest approach". Both thresholds are user-configurable
-      // (CFG → Pantalla → AIS).
-      if (cpaNm == null || tcpaMin == null) continue;
-      // A target 40 minutes out at its current CPA isn't a collision risk
-      // yet — don't let it steal the "closest approach" slot from something
-      // that's actually about to happen.
-      if (tcpaMin > settings.aisTcpaMaxMin) continue;
-      // A target that will pass 6 NM off isn't "the" closest approach either.
-      if (cpaNm > settings.aisCpaMaxNm) continue;
-      final candidate = (
-        target: target,
-        cpaNm: cpaNm,
-        tcpaMin: tcpaMin,
-        bearingDeg: bearingDeg,
-        distNm: distNm,
-        crossing: crossing,
-      );
-      if (best == null) {
-        best = candidate;
-        continue;
-      }
-      final cpaCmp = (candidate.cpaNm ?? double.infinity).compareTo(
-        best.cpaNm ?? double.infinity,
-      );
-      if (cpaCmp < 0 ||
-          (cpaCmp == 0 &&
-              (candidate.tcpaMin ?? double.infinity) <
-                  (best.tcpaMin ?? double.infinity))) {
-        best = candidate;
-      }
-    }
-    return best;
-  }
-
-  /// Where the relative track crosses our own heading line (dead ahead vs.
-  /// astern) — same geometry as the AIS tab's own crossing label, so "por
-  /// proa"/"por popa" means the same thing in both places.
-  String? _crossingLabel(
-    double relN,
-    double relE,
-    double vN,
-    double vE,
-    double headingRad,
-  ) {
-    final cosH = math.cos(headingRad), sinH = math.sin(headingRad);
-    final fwd0 = relN * cosH + relE * sinH;
-    final right0 = -relN * sinH + relE * cosH;
-    final vFwd = vN * cosH + vE * sinH;
-    final vRight = -vN * sinH + vE * cosH;
-    if (vRight.abs() < 0.05) return null;
-    final tStar = -right0 / vRight;
-    if (tStar < 0) return null;
-    return (fwd0 + vFwd * tStar) >= 0 ? 'POR PROA' : 'POR POPA';
-  }
-
-  ({double bearingDeg, double distNm}) _bearingDistanceNm(
-    double lat1,
-    double lon1,
-    double lat2,
-    double lon2,
-  ) {
-    const r = 3440.065; // nautical miles
-    final lat1r = lat1 * math.pi / 180;
-    final lat2r = lat2 * math.pi / 180;
-    final dLat = (lat2 - lat1) * math.pi / 180;
-    final dLon = (lon2 - lon1) * math.pi / 180;
-    final a =
-        math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1r) *
-            math.cos(lat2r) *
-            math.sin(dLon / 2) *
-            math.sin(dLon / 2);
-    final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-    final y = math.sin(dLon) * math.cos(lat2r);
-    final x =
-        math.cos(lat1r) * math.sin(lat2r) -
-        math.sin(lat1r) * math.cos(lat2r) * math.cos(dLon);
-    final brg = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
-    return (bearingDeg: brg, distNm: r * c);
-  }
-
-  ({double cpaNm, double tcpaMin})? _cpa(
-    double rN,
-    double rE,
-    double vN,
-    double vE,
-  ) {
-    final vv = vN * vN + vE * vE;
-    if (vv < 1e-6) return null;
-    final t = -(rN * vN + rE * vE) / vv;
-    if (t < 0) return null;
-    final cN = rN + vN * t;
-    final cE = rE + vE * t;
-    return (cpaNm: math.sqrt(cN * cN + cE * cE), tcpaMin: t * 60);
-  }
+  // Closest-approach/CPA calc — moved to lib/ais/closest_approach.dart
+  // (_ClosestApproachService) to shrink this file; behavior unchanged.
 
   String _aisTargetName(AisTarget target) =>
       target.name ?? target.mmsi ?? target.context.split('.').last;
@@ -5830,7 +5291,10 @@ class _DashboardState extends State<Dashboard> {
       signalK.engineLowVoltAlarm,
       signalK.engineLowVoltAlarmUpdate,
     ),
-    engineGlowPlugFaultAlarm: signalK.engineGlowPlugFaultAlarm,
+    engineGlowPlugFaultAlarm: _freshEngineFlag(
+      signalK.engineGlowPlugFaultAlarm,
+      signalK.engineGlowPlugFaultAlarmUpdate,
+    ),
     enginePreheatActive: signalK.enginePreheatActive,
     engineUnknownPgn: signalK.engineUnknownPgn,
     engineUnknownFrameCount: signalK.engineUnknownFrameCount,
@@ -8200,6 +7664,7 @@ class _DashboardState extends State<Dashboard> {
       });
       unawaited(_saveSettings());
     },
+    onVerifyLogin: _loginToSignalK,
     gpsFallbackConsent: settings.gpsFallbackConsent,
     onGpsFallbackConsentChanged: (allow) {
       setState(() => settings.gpsFallbackConsent = allow);
@@ -8459,7 +7924,7 @@ class _DashboardState extends State<Dashboard> {
                                       });
                                     } catch (e) {
                                       setSt(() => _lanScanning = false);
-                                      if (context.mounted) {
+                                      if (mounted) {
                                         ScaffoldMessenger.of(
                                           context,
                                         ).showSnackBar(
@@ -9190,7 +8655,7 @@ class _DashboardState extends State<Dashboard> {
                                 onPressed: settings.ntfyTopic.trim().isEmpty
                                     ? null
                                     : () async {
-                                        final ok = await _sendNtfyTestPush();
+                                        final ok = await _ntfyPush._sendNtfyTestPush();
                                         if (!ctx.mounted) return;
                                         ScaffoldMessenger.of(
                                           ctx,

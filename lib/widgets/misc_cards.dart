@@ -444,7 +444,7 @@ class PressureTrendCard extends StatelessWidget {
     required this.zoom,
   });
   final double? value;
-  final _PressureHistory history;
+  final PressureHistory history;
   final bool fromInflux;
   final void Function(
     String title,
@@ -1106,7 +1106,7 @@ class _PowerFlowConnectorState extends State<PowerFlowConnector>
           Expanded(
             child: AnimatedBuilder(
               animation: _controller,
-              builder: (_, __) => CustomPaint(
+              builder: (_, _) => CustomPaint(
                 painter: _PowerFlowConnectorPainter(
                   color: widget.color,
                   progress: _controller.value,

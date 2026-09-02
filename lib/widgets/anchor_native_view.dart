@@ -56,6 +56,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.skUsername,
     required this.skPassword,
     required this.onCredentialsChanged,
+    this.onVerifyLogin,
     required this.gpsFallbackConsent,
     required this.onGpsFallbackConsentChanged,
     required this.onEffectivePositionChanged,
@@ -111,6 +112,14 @@ class NativeAnchorView extends StatefulWidget {
   final String skUsername;
   final String skPassword;
   final void Function(String username, String password) onCredentialsChanged;
+  // A real POST /signalk/v1/auth/login, not just "are these fields
+  // non-empty" — Fondear/Levar used to arm/disarm locally on the strength
+  // of a non-empty username/password alone, so a typo'd credential could
+  // arm the watch while the actual Signal K publish silently failed from
+  // then on. Null means the caller doesn't support verification (treated
+  // as "trust the fields", the old behavior) — always provided in
+  // practice (see main.dart's _loginToSignalK).
+  final Future<bool> Function()? onVerifyLogin;
   final bool? gpsFallbackConsent;
   final ValueChanged<bool> onGpsFallbackConsentChanged;
   // Lets main.dart's "sin posición" alarm know this screen's own
@@ -615,17 +624,35 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       widget.skUsername.trim().isNotEmpty && widget.skPassword.isNotEmpty;
 
   Future<bool> _ensureLoggedIn() async {
-    if (_hasCredentials) return true;
-    final result = await showDialog<(String, String)>(
-      context: context,
-      builder: (ctx) => _LoginDialog(
-        initialUser: widget.skUsername,
-        initialPass: widget.skPassword,
-      ),
-    );
-    if (result == null) return false;
-    widget.onCredentialsChanged(result.$1, result.$2);
-    return result.$1.trim().isNotEmpty && result.$2.isNotEmpty;
+    if (!_hasCredentials) {
+      final result = await showDialog<(String, String)>(
+        context: context,
+        builder: (ctx) => _LoginDialog(
+          initialUser: widget.skUsername,
+          initialPass: widget.skPassword,
+        ),
+      );
+      if (result == null) return false;
+      widget.onCredentialsChanged(result.$1, result.$2);
+      if (result.$1.trim().isEmpty || result.$2.isEmpty) return false;
+    }
+    // Actually confirm the credentials work, not just that the fields
+    // aren't empty — a typo used to arm/disarm the watch locally while
+    // the real Signal K publish (which needs a valid login of its own)
+    // silently failed from then on.
+    final verify = widget.onVerifyLogin;
+    if (verify == null) return true;
+    final ok = await verify();
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se pudo iniciar sesión en Signal K — revisa usuario/contraseña.',
+          ),
+        ),
+      );
+    }
+    return ok;
   }
 
   Future<void> _dropAnchor() async {
