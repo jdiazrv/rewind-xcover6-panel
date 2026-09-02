@@ -2974,7 +2974,10 @@ class _DashboardState extends State<Dashboard> {
         signalK.twaDeg = n == null ? null : n * 57.2957795;
         _dTwa = _twaDamp.angle(signalK.twaDeg);
       case 'environment.wind.directionTrue':
-        signalK.twdDeg = n == null ? null : n * 57.2957795;
+        // Spec is 0..2π, but some sources (plugins deriving TWD from
+        // heading+TWA) emit a signed radian in -π..π instead — normalize so
+        // the UI never shows a negative degree. Reported live 2026-09-02.
+        signalK.twdDeg = n == null ? null : normalize360(n * 57.2957795);
         _dTwd = _twdDamp.angle(signalK.twdDeg);
       case 'environment.wind.speedTrue':
         signalK.twsKn = n == null ? null : n * 1.94384;
@@ -4441,15 +4444,22 @@ class _DashboardState extends State<Dashboard> {
     final showMotorPage =
         settings.motorPanelEnabled &&
         (_engineRunning || _kMotorPanelAlwaysVisible);
+    // settings.anchorConfig.armed, NOT signalK.anchorArmed — the latter is
+    // deliberately fed only by a truly foreign source (hoekens etc., see
+    // _onSignalKMessage's routing), never by this app's own state even
+    // when synced in from another install (Android/webapp) — that's the
+    // right field for the "disarm other plugin" banner, but wrong here:
+    // it meant arming from one install never showed "Fondeado" on
+    // another. Confirmed live 2026-09-02.
     final premiumScreens = <Widget>[
       _navPremiumSailPage(),
       if (showMotorPage) _navPremiumMotorPage(),
-      if (signalK.anchorArmed) _navPremiumAnchorPage(),
+      if (settings.anchorConfig.armed) _navPremiumAnchorPage(),
     ];
     final premiumLabels = <String>[
       'Vela',
       if (showMotorPage) 'Motor',
-      if (signalK.anchorArmed) 'Fondeado',
+      if (settings.anchorConfig.armed) 'Fondeado',
     ];
 
     // Exactly two classic pages, fixed: "Clásica 1" is your selected grid,

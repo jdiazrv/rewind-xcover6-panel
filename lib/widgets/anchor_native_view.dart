@@ -33,8 +33,20 @@ const _kMaxMapZoom = 19.0;
 
 // Own track: green fading with age (like hoekens' own trail), never blue —
 // a blue trail disappears against open water on the satellite layer.
-const _kTrackRecent = Color(0xff3ddc61);
-const _kTrackOld = Color(0xff1d4a28);
+// Three stops, not just two shades of the same green — green (just now)
+// fading through yellow (a while ago) to brown (oldest still shown) reads
+// as an actual age gradient at a glance instead of "some dark green,
+// some light green". Explicit per request 2026-09-02, applies to every
+// platform since it's the same shared Dart code.
+const _kTrackRecent = Color(0xff3ddc61); // green — just now
+const _kTrackMid = Color(0xffd4c23a); // yellow — a while ago
+const _kTrackOld = Color(0xff6b4a2a); // brown — oldest still shown
+
+// t=0 oldest point shown, t=1 most recent — two Color.lerp hops instead of
+// one, since Color.lerp itself only ever blends two colors.
+Color _trackAgeColor(double t) => t >= 0.5
+    ? (Color.lerp(_kTrackMid, _kTrackRecent, (t - 0.5) * 2) ?? _kTrackRecent)
+    : (Color.lerp(_kTrackOld, _kTrackMid, t * 2) ?? _kTrackMid);
 
 class NativeAnchorView extends StatefulWidget {
   const NativeAnchorView({
@@ -1015,13 +1027,9 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                           ),
                         ],
                         strokeWidth: 0.9,
-                        color:
-                            Color.lerp(
-                              _kTrackOld,
-                              _kTrackRecent,
-                              i / (widget.ownTrack.length - 1),
-                            ) ??
-                            _kTrackRecent,
+                        color: _trackAgeColor(
+                          i / (widget.ownTrack.length - 1),
+                        ),
                       ),
                   ],
                 ),

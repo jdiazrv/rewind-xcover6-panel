@@ -65,7 +65,10 @@ class _CollapsedHeaderBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    height: 24,
+    // 44 tall, not 24 — the old size was a real tap target of just 80x24,
+    // under the ~44pt minimum touch target and hard to hit on a phone.
+    // Reported live 2026-09-02 ("muy corto el boton para telefono").
+    height: 44,
     width: double.infinity,
     color: cBg,
     alignment: Alignment.topCenter,
@@ -76,8 +79,8 @@ class _CollapsedHeaderBar extends StatelessWidget {
         if (d.delta.dy > 0) onTap();
       },
       child: Container(
-        width: 80,
-        height: 24,
+        width: 88,
+        height: 44,
         alignment: Alignment.topCenter,
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.45),
