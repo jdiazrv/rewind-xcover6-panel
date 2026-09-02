@@ -2659,6 +2659,8 @@ class _DashboardState extends State<Dashboard> {
       'electrical.batteries.bowthruster.temperature',
       'electrical.venus.dcPower',
       'navigation.anchor.state',
+      'navigation.anchor.position',
+      'navigation.anchor.watchZone',
       'navigation.anchor.currentRadius',
       'navigation.anchor.maxRadius',
       'navigation.anchor.apparentBearing',
