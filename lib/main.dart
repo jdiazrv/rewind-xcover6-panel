@@ -171,6 +171,11 @@ class _DashboardState extends State<Dashboard> {
   WebSocketChannel? channel;
   int _connectGeneration = 0;
   Timer? reconnectTimer;
+  // Which host:port _connectSignalK() last targeted — null until the first
+  // attempt this session. Used to tell "switching to a different server"
+  // (needs a hard data reset) apart from "reconnecting to the SAME one
+  // after a blip" (must NOT wipe/flash the UI — see _connectSignalK).
+  String? _lastConnectHostPort;
   // Debounces the connected↔disconnected status flip: a brief drop that
   // reconnects on its own within this window (a WiFi roam blip, a flaky
   // link like Tailscale over a bad cell connection) shouldn't visibly
@@ -1518,10 +1523,23 @@ class _DashboardState extends State<Dashboard> {
   String? _pkgBuild;
   String? _installerStore;
   // CFG → Admin (saved-server switcher) stays hidden until a long-press on
-  // the version card in Diagnóstico reveals it — not meant for anyone but
-  // the owner to stumble onto. Persisted once unlocked: whoever has the
-  // tablet in hand already has the same access a visible tab would give.
+  // the version card in Diagnóstico reveals it. Deliberately NOT persisted
+  // — per explicit request, it must hide itself again every time the app
+  // restarts, not just once opted into forever.
   bool _adminRevealed = false;
+  // Per-host sensor/anchor config used to be keyed by literal "host:port" —
+  // but the SAME boat reached locally (lysmarine.local) vs. remotely
+  // (its Tailscale IP) has two different host:port pairs, so switching
+  // between "REWIND" and "REWIND (remoto)" looked like switching to a
+  // completely different boat and lost the sensor mapping each way. Keyed
+  // by the SavedServer's own NAME instead whenever one is active — two
+  // entries sharing the same name (e.g. both called "REWIND") are treated
+  // as the same boat's config regardless of which host reaches it. Falls
+  // back to host:port only for the very first connection, before Admin
+  // has ever been used to switch to a named entry.
+  String? _currentServerConfigKey;
+  String get _serverConfigKey =>
+      _currentServerConfigKey ?? '${settings.host}:${settings.port}';
   // LAN scan (CFG → Conexión → "Buscar en la red") result state — was
   // local to _settingsPage()'s build method, which runs fresh on every
   // Dashboard rebuild (i.e. constantly, on every live SK delta), wiping
@@ -1666,7 +1684,7 @@ class _DashboardState extends State<Dashboard> {
         SavedServer(name: 'QUINTO REAL', host: '100.73.92.66'),
       ];
     }
-    _adminRevealed = prefs.getBool('adminRevealed') ?? false;
+    // Deliberately not loaded from prefs — see the field's own doc comment.
     settings.gpsFallbackConsent = prefs.containsKey('gpsFallbackConsent')
         ? prefs.getBool('gpsFallbackConsent')
         : settings.gpsFallbackConsent;
@@ -1853,7 +1871,7 @@ class _DashboardState extends State<Dashboard> {
         /* keep empty if corrupted */
       }
     }
-    final hostKey = '${settings.host}:${settings.port}';
+    final hostKey = _serverConfigKey;
     final byHost = settings.sensorConfigJsonByHost[hostKey];
     if (byHost != null) {
       try {
@@ -1959,7 +1977,7 @@ class _DashboardState extends State<Dashboard> {
     // Keep the CURRENT server's entry in the per-host map up to date too,
     // so switching to another saved server and back restores this one
     // exactly — see CFG → Admin / _switchToSavedServer.
-    settings.sensorConfigJsonByHost['${settings.host}:${settings.port}'] =
+    settings.sensorConfigJsonByHost[_serverConfigKey] =
         settings.sensorConfig.toJson();
     await prefs.setString(
       'sensorConfigByHostJson',
@@ -1975,7 +1993,7 @@ class _DashboardState extends State<Dashboard> {
     );
     // Same per-host mirroring as sensorConfig above — see
     // _switchToSavedServer and anchorConfigJsonByHost's own doc comment.
-    settings.anchorConfigJsonByHost['${settings.host}:${settings.port}'] =
+    settings.anchorConfigJsonByHost[_serverConfigKey] =
         settings.anchorConfig.toJson();
     await prefs.setString(
       'anchorConfigByHostJson',
@@ -2174,6 +2192,9 @@ class _DashboardState extends State<Dashboard> {
     if (c.solarPath != null && c.solarPath!.isNotEmpty) {
       h[c.solarPath!] = (v) => signalK.solarW = _num(v);
     }
+    if (c.solarPath2 != null && c.solarPath2!.isNotEmpty) {
+      h[c.solarPath2!] = (v) => signalK.solarW2 = _num(v);
+    }
     if (c.fridge1Path != null && c.fridge1Path!.isNotEmpty) {
       h[c.fridge1Path!] = (v) => signalK.fridge1TempK = _num(v);
     }
@@ -2368,7 +2389,7 @@ class _DashboardState extends State<Dashboard> {
     // the sensor config just below. Confirmed live 2026-09-02: without
     // this, "armed" on one boat kept publishing as armed on whichever
     // server you switched to next.
-    final outgoingKey = '${settings.host}:${settings.port}';
+    final outgoingKey = _serverConfigKey;
     settings.sensorConfigJsonByHost[outgoingKey] =
         settings.sensorConfig.toJson();
     settings.anchorConfigJsonByHost[outgoingKey] =
@@ -2377,7 +2398,13 @@ class _DashboardState extends State<Dashboard> {
     settings.port = s.port;
     settings.skUsername = s.skUsername;
     settings.skPassword = s.skPassword;
-    final hostKey = '${s.host}:${s.port}';
+    // Keyed by the saved entry's NAME, not host:port — reaching the same
+    // boat locally vs. by Tailscale IP are two different SavedServer
+    // entries with two different hosts, but if they share a name (e.g.
+    // both called "REWIND") they must share one sensor/anchor config, not
+    // be treated as separate boats. Confirmed explicit request 2026-09-02.
+    _currentServerConfigKey = s.name;
+    final hostKey = _serverConfigKey;
     final savedSensor = settings.sensorConfigJsonByHost[hostKey];
     settings.sensorConfig = savedSensor != null
         ? SensorConfig.fromJson(savedSensor)
@@ -2490,22 +2517,39 @@ class _DashboardState extends State<Dashboard> {
       '[SK] _connectSignalK() called, gen=$myGeneration, '
       'host=${settings.host}:${settings.port}',
     );
-    // Wipe every live field, not just tanks — otherwise a value from
-    // whatever server was connected before (a different boat, or just a
-    // stale reading) keeps showing as if it were live on the new
-    // connection. Own-ship AIS identity resets too: a self MMSI/context
-    // learned from a previous server must never be trusted to identify
-    // "self" on a different one.
-    signalK.reset();
-    _aisTargets.clear();
-    _ownTrack.clear();
-    _selfContext = null;
-    _selfMmsi = null;
+    // Wiping every live field (and flashing "Conectando…") used to happen
+    // on EVERY call here, including the routine 5s-later retry after any
+    // brief disconnect — even one that re-establishes almost instantly.
+    // That's the right thing to do for a genuine server switch (a value
+    // from whatever boat was connected before must never keep showing as
+    // if it were live on the new one), but for a plain reconnect to the
+    // SAME server it meant the entire UI blanked to "--" and flashed
+    // "Conectando…" on every hiccup, however brief — confirmed live
+    // 2026-09-02 as a real, frequent annoyance ("muy molesto"). Only do
+    // the hard reset for an actual switch (or the very first connect this
+    // session) — a same-server reconnect instead leaves the last-known
+    // values on screen, which either get refreshed by fresh deltas within
+    // moments or naturally fall back to "--" through each value's own
+    // timestamp-based staleness check if the outage really does drag on.
+    final currentHostPort = '${settings.host}:${settings.port}';
+    final isServerSwitch =
+        _lastConnectHostPort != null && _lastConnectHostPort != currentHostPort;
+    final isFirstConnect = _lastConnectHostPort == null;
+    _lastConnectHostPort = currentHostPort;
+    if (isServerSwitch || isFirstConnect) {
+      signalK.reset();
+      _aisTargets.clear();
+      _ownTrack.clear();
+      _selfContext = null;
+      _selfMmsi = null;
+    }
     _buildDynamicHandlers();
     final uri = Uri.parse(
       'ws://${settings.host}:${settings.port}/signalk/v1/stream?subscribe=none',
     );
-    setState(() => signalK.status = 'Conectando…');
+    if (isServerSwitch || isFirstConnect) {
+      setState(() => signalK.status = 'Conectando…');
+    }
     try {
       channel = connectSignalKWs(uri, authBase64: settings.authBase64);
       channel!.stream.listen(
@@ -6818,8 +6862,17 @@ class _DashboardState extends State<Dashboard> {
       _metricColor(_mHouseVoltage, houseColor),
     ];
     final solarMetric = _mSolar;
+    final hasSolarPanel2 =
+        settings.sensorConfig.solarPath2 != null &&
+        settings.sensorConfig.solarPath2!.isNotEmpty;
     final hasSolar =
         settings.demoMode || (solarMetric != null && signalK.solarW != null);
+    // With a single panel this is unchanged — solarW already reads as "the
+    // total" since it's the only source. With two, the big number becomes
+    // the sum and the individual readings move to the subtitle.
+    final solarTotalW = hasSolarPanel2
+        ? (signalK.solarW ?? 0) + (signalK.solarW2 ?? 0)
+        : signalK.solarW;
     final hasDcLoads = settings.demoMode || signalK.dcW != null;
     final flowWidgets = <Widget>[];
     if (hasSolar) {
@@ -6828,9 +6881,11 @@ class _DashboardState extends State<Dashboard> {
           flex: 10,
           child: PowerFlowTile(
             title: 'Solar',
-            value: fmt(signalK.solarW, 0, ''),
+            value: fmt(solarTotalW, 0, ''),
             unit: 'W',
-            subtitle: 'solar',
+            subtitle: hasSolarPanel2
+                ? 'P1 ${fmt(signalK.solarW, 0, 'W')} · P2 ${fmt(signalK.solarW2, 0, 'W')}'
+                : 'solar',
             color: cYellow,
             icon: Icons.wb_sunny,
             zoom: _showZoom,
@@ -6841,7 +6896,7 @@ class _DashboardState extends State<Dashboard> {
       flowWidgets.add(
         PowerFlowConnector(
           color: cYellow,
-          watts: signalK.solarW,
+          watts: solarTotalW,
           label: 'carga',
           referenceWatts: 600,
         ),
@@ -9328,14 +9383,6 @@ class _DashboardState extends State<Dashboard> {
                                       HapticFeedback.mediumImpact();
                                       setSt(() => _adminRevealed = true);
                                       setState(() {});
-                                      unawaited(
-                                        SharedPreferences.getInstance().then(
-                                          (p) => p.setBool(
-                                            'adminRevealed',
-                                            true,
-                                          ),
-                                        ),
-                                      );
                                     },
                               child: _AppVersionCard(
                                 version: _pkgVersion,
@@ -9647,6 +9694,17 @@ class _DashboardState extends State<Dashboard> {
                                         path:
                                             sc.solarPath ?? '(sin configurar)',
                                       ),
+                                      if (sc.solarPath2 != null)
+                                        _diagRow(
+                                          'Solar 2',
+                                          signalK.solarW2 != null
+                                              ? '${signalK.solarW2!.round()} W'
+                                              : '--',
+                                          signalK.solarW2 != null
+                                              ? cOrange
+                                              : cMuted,
+                                          path: sc.solarPath2!,
+                                        ),
                                       _diagRow(
                                         'Bowthruster V',
                                         signalK.bowthrusterV != null

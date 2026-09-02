@@ -308,6 +308,11 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     ...?_discovery?.solarPaths,
     if (_cfg.solarPath != null) _cfg.solarPath,
   ];
+  List<String?> get _solarOptions2 => [
+    null,
+    ...?_discovery?.solarPaths,
+    if (_cfg.solarPath2 != null) _cfg.solarPath2,
+  ];
   List<String?> get _fridgeOptions => [
     null,
     ...?_discovery?.fridgePaths,
@@ -422,6 +427,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       }
     }
     if (path == _cfg.solarPath ||
+        path == _cfg.solarPath2 ||
         path == _cfg.fridge1Path ||
         path == _cfg.fridge2Path ||
         path == _cfg.depthPath ||
@@ -462,6 +468,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       prefix: true,
     );
     check('Solar', _cfg.solarPath);
+    check('Solar 2', _cfg.solarPath2);
     check('Nevera 1', _cfg.fridge1Path);
     check('Nevera 2', _cfg.fridge2Path);
     check('Profundidad', _cfg.depthPath);
@@ -821,6 +828,31 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               ],
                               onChanged: (v) =>
                                   setState(() => _cfg.solarPath = v),
+                            ),
+                            const SizedBox(height: 8),
+                            // Optional — only for boats with two independent
+                            // solar controllers. With just the first path set,
+                            // nothing changes: that reading already is "the
+                            // total". With both, PWR shows the sum plus each
+                            // panel's own reading.
+                            DropdownButtonFormField<String?>(
+                              initialValue: _cfg.solarPath2,
+                              decoration: const InputDecoration(
+                                labelText: 'Path del 2º controlador solar (opcional)',
+                                isDense: true,
+                              ),
+                              items: [
+                                for (final p in _solarOptions2)
+                                  DropdownMenuItem(
+                                    value: p,
+                                    child: Text(
+                                      p ?? 'Ninguno',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (v) =>
+                                  setState(() => _cfg.solarPath2 = v),
                             ),
                             const SizedBox(height: 12),
                             const Text('PROFUNDIDAD', style: lbl),

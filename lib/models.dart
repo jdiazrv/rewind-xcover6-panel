@@ -440,6 +440,7 @@ class SignalKModel {
   double? houseSoc; // 0-100 %
   double? houseTempK;
   double? solarW;
+  double? solarW2;
   double? dcW;
   double? startV;
   double? bowthrusterV;
@@ -565,6 +566,7 @@ class SignalKModel {
     houseSoc = null;
     houseTempK = null;
     solarW = null;
+    solarW2 = null;
     dcW = null;
     startV = null;
     bowthrusterV = null;
@@ -643,6 +645,7 @@ class SensorConfig {
     ..batteryHouseId = ''
     ..batteryStartId = ''
     ..solarPath = null
+    ..solarPath2 = null
     ..fridge1Path = null
     ..fridge2Path = null
     ..depthPath = null
@@ -654,6 +657,11 @@ class SensorConfig {
   String batteryHouseId = '278';
   String batteryStartId = '278-second';
   String? solarPath = 'electrical.venus.totalPanelPower';
+  // Optional second solar controller — when set, the PWR card shows both
+  // panels' individual output plus the sum as "total"; with just the one
+  // (solarPath2 null, the common case) that single value already reads as
+  // the total, unchanged from before.
+  String? solarPath2;
   String? fridge1Path = 'environment.fridge_1.temperature';
   String? fridge2Path = 'environment.fridge_2.temperature';
   String? depthPath = 'environment.depth.belowKeel';
@@ -695,6 +703,7 @@ class SensorConfig {
     'batteryHouseId': batteryHouseId,
     'batteryStartId': batteryStartId,
     'solarPath': solarPath,
+    'solarPath2': solarPath2,
     'fridge1Path': fridge1Path,
     'fridge2Path': fridge2Path,
     'depthPath': depthPath,
@@ -709,6 +718,7 @@ class SensorConfig {
     c.batteryHouseId = j['batteryHouseId'] as String? ?? c.batteryHouseId;
     c.batteryStartId = j['batteryStartId'] as String? ?? c.batteryStartId;
     c.solarPath = j['solarPath'] as String?;
+    c.solarPath2 = j['solarPath2'] as String?;
     c.fridge1Path = j['fridge1Path'] as String?;
     c.fridge2Path = j['fridge2Path'] as String?;
     c.depthPath = j['depthPath'] as String?;
