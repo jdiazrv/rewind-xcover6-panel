@@ -61,7 +61,7 @@
 <body>
 <div class="wrap">
   <h1>Política de privacidad de REWIND Panel</h1>
-  <p class="updated">Última actualización: 28 de agosto de 2026</p>
+  <p class="updated">Última actualización: 2 de septiembre de 2026</p>
 
   <div class="box">
     Resumen: REWIND Panel no recopila, almacena ni comparte tus datos personales.
@@ -87,6 +87,15 @@
     <li><strong>MarineTraffic</strong> — solo al abrir el detalle de un barco
     en la pantalla AIS, para intentar mostrar su foto pública por MMSI (un
     número de identificación de barco, no un dato personal tuyo).</li>
+    <li><strong>ntfy.sh</strong> (<a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh</a>) —
+    solo si activas los avisos push en Ajustes → Alarmas y configuras un
+    "topic". Cuando salta una alarma que hayas marcado para avisar, la app
+    envía directamente a ntfy.sh un mensaje de texto (con los datos de esa
+    alarma: por ejemplo posición/distancia/velocidad de garreo, viento o
+    profundidad) y, solo para la alarma de garreo, una imagen con la
+    posición del barco respecto al círculo de fondeo. Cualquiera que
+    conozca el nombre exacto de tu "topic" podría suscribirse a esos avisos
+    en ntfy.sh — elige un nombre no adivinable.</li>
   </ul>
   <p>Ninguno de estos datos pasa por servidores del desarrollador de la app:
   las conexiones son directas desde tu dispositivo a los servicios anteriores.</p>
@@ -112,6 +121,27 @@
   sensor de actitud propio. Esa lectura se usa solo en tiempo real, dentro
   de la propia app, para calcular y mostrar la escora y el cabeceo — no se
   almacena ni se envía a ningún servidor.</p>
+  <p><strong>Ubicación (GPS)</strong> — la pantalla de fondeo (ANC) usa
+  normalmente la posición que reporta tu servidor Signal K, no el GPS del
+  dispositivo. Solo si Signal K no tiene posición del barco, y solo tras
+  pedirte permiso explícito en pantalla, la app puede usar el GPS de tu
+  móvil/tablet como alternativa temporal mientras dure esa situación. Esa
+  posición se usa únicamente para calcular si el barco se ha salido del
+  círculo de fondeo (y se envía a Signal K y, si tienes avisos activados,
+  a ntfy.sh, igual que la posición normal) — no se guarda un historial de
+  tu ubicación personal en ningún otro sitio.</p>
+  <p><strong>Actividad física (podómetro)</strong> — solo mientras la
+  detección de "¿te has llevado el móvil?" está activa en la pantalla de
+  fondeo (para avisar si el móvil se aleja del barco mientras hace de
+  respaldo del GPS), la app puede leer el contador de pasos del sistema.
+  Es una lectura puntual, no se guarda ningún registro de tu actividad.</p>
+  <p><strong>Red WiFi</strong> — la misma detección de "¿te has llevado el
+  móvil?" puede comprobar el nombre (SSID) de la red WiFi a la que estás
+  conectado, para saber si sigues en la del propio barco. Ese nombre no se
+  envía a ningún servidor, solo se compara localmente en el dispositivo.
+  La app también usa multidifusión local (mDNS) para resolver el nombre
+  de tu servidor Signal K (por ejemplo "midominio.local") dentro de tu
+  propia red — no sale tráfico fuera de esa red local para esto.</p>
 
   <h2>Menores</h2>
   <p>La app no está dirigida a menores y no recopila intencionadamente datos

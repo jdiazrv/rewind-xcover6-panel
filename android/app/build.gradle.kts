@@ -67,10 +67,23 @@ android {
 
     buildTypes {
         release {
-            // Falls back to the debug keys only if key.properties/the keystore
-            // are missing (e.g. a fresh checkout) — Play Console rejects an
-            // upload signed with the debug key, so real releases need this.
-            signingConfig = if (keystorePropertiesFile.exists()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            // Used to silently fall back to the debug keys when
+            // key.properties/the keystore were missing — meant as a
+            // fresh-checkout convenience, but it meant a release build could
+            // end up debug-signed with no warning at all (Play Console would
+            // catch it on upload, but a sideloaded APK/AAB — this project's
+            // actual distribution path — never gets that check). Fail loudly
+            // instead: a real release key is a one-time setup, not something
+            // that should ever be silently substituted.
+            if (!keystorePropertiesFile.exists()) {
+                throw GradleException(
+                    "android/key.properties not found — release builds must be " +
+                    "signed with the real upload keystore, not the debug key. " +
+                    "See android/key.properties.example (or the project README) " +
+                    "for how to set it up."
+                )
+            }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

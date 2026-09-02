@@ -1,0 +1,10 @@
+storePassword=<the keystore's own password>
+keyPassword=<the release key's password (often the same as storePassword)>
+keyAlias=<the alias you gave the key when generating it, e.g. "upload">
+storeFile=<path to the .jks file, e.g. "app/upload-keystore.jks" (relative to android/) or an absolute path>
+
+# Copy this file to key.properties (same directory) and fill in the real
+# values — key.properties is gitignored and must never be committed. See
+# android/app/upload-keystore.jks (also gitignored) for the matching key,
+# or generate a new one with:
+#   keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
