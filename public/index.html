@@ -118,6 +118,29 @@
       new MutationObserver(window.rewindRemoveNetlifyBadge)
         .observe(document.body, { childList: true, subtree: true });
     });
+    // Known Flutter web (CanvasKit) issue: rotating a real phone — not just
+    // resizing a desktop window — leaves the engine's touch/hit-test
+    // transform out of sync with the canvas's actual new size for a beat
+    // while the browser's own chrome (address bar, etc.) finishes
+    // adjusting, which reads as "no button responds" until something else
+    // forces a relayout. Reported live 2026-09-02: portrait fine, rotating
+    // to landscape left every button dead. Forcing an explicit `resize`
+    // dispatch a moment after the OS reports the rotation is the standard
+    // workaround — it's what nudges CanvasKit into recomputing that
+    // transform against the settled viewport instead of a stale one.
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
+    });
+    if (window.visualViewport) {
+      let lastW = window.visualViewport.width;
+      window.visualViewport.addEventListener('resize', () => {
+        const w = window.visualViewport.width;
+        if (w !== lastW) {
+          lastW = w;
+          setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
+        }
+      });
+    }
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
