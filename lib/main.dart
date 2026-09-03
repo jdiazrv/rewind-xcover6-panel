@@ -7166,6 +7166,12 @@ class _DashboardState extends State<Dashboard> {
     'freshWater': Color(0xff81c6ef),
     'blackWater': Color(0xff7f42ee),
   };
+  // Fixed display order regardless of how tanks were added in CFG — "los
+  // tanques se tienen que ordenar diesel, agua y blackwater" (reported
+  // live 2026-09-03). Any type not in this list (shouldn't happen given
+  // _tankIcons/_tankColors only know these three) sorts after, in
+  // whatever order it was found.
+  static const _tankTypeOrder = ['fuel', 'freshWater', 'blackWater'];
 
   List<TankViewData> get tankOverview {
     final groups = <String, List<TankSlot>>{};
@@ -7178,7 +7184,7 @@ class _DashboardState extends State<Dashboard> {
     for (final t in settings.sensorConfig.tanks.where((t) => t.enabled)) {
       groups.putIfAbsent(t.groupLabel, () => []).add(t);
     }
-    return [
+    final out = [
       for (final entry in groups.entries)
         TankViewData(
           name: entry.key,
@@ -7187,6 +7193,33 @@ class _DashboardState extends State<Dashboard> {
           icon: _tankIcons[entry.value.first.type] ?? Icons.water_drop,
         ),
     ];
+    out.sort((a, b) {
+      final ai = _tankTypeOrder.indexOf(a.slots.first.type);
+      final bi = _tankTypeOrder.indexOf(b.slots.first.type);
+      return (ai < 0 ? _tankTypeOrder.length : ai).compareTo(
+        bi < 0 ? _tankTypeOrder.length : bi,
+      );
+    });
+    return out;
+  }
+
+  // "lo que tiene cada depósito de esa categoría y la capacidad" — a
+  // group with more than one tank (e.g. two diesel tanks under the same
+  // label) shows this under the aggregate number, one "id liters/capacity"
+  // segment per tank, so the breakdown is visible without tapping through
+  // to _showTankGroup. Null for a single-tank group, where the card's own
+  // number already IS that one tank's reading.
+  String? _tankBreakdown(TankViewData t) {
+    if (t.slots.length < 2) return null;
+    return t.slots
+        .map((s) {
+          final pct = signalK.tanks[s.tankKey];
+          final liters = (pct != null && s.capacityL > 0)
+              ? (s.capacityL * pct / 100).round()
+              : null;
+          return '${s.id} ${liters == null ? '--' : '$liters/${s.capacityL}L'}';
+        })
+        .join(' · ');
   }
 
   Widget _tankPage() {
@@ -7213,6 +7246,7 @@ class _DashboardState extends State<Dashboard> {
                     color: t.color,
                     icon: t.icon,
                     flexible: true,
+                    breakdown: _tankBreakdown(t),
                     onTap: () => _showTankGroup(t),
                   ),
                 ),

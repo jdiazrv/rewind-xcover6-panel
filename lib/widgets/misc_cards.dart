@@ -1843,6 +1843,7 @@ class TankCard extends StatelessWidget {
     required this.icon,
     this.large = false,
     this.flexible = false,
+    this.breakdown,
     this.onTap,
   });
   final String name;
@@ -1852,6 +1853,11 @@ class TankCard extends StatelessWidget {
   final IconData icon;
   final bool large;
   final bool flexible;
+  // "id liters/capacity" per tank, joined with " · " — set only when this
+  // card aggregates more than one physical tank under one label, so the
+  // per-tank breakdown is visible without tapping through to the detail
+  // dialog. Null for a single-tank card.
+  final String? breakdown;
   final VoidCallback? onTap;
 
   @override
@@ -1958,6 +1964,16 @@ class TankCard extends StatelessWidget {
                                   fontSize: large ? 14 : 13,
                                 ),
                               ),
+                              if (breakdown != null)
+                                Text(
+                                  breakdown!,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: cMuted,
+                                    fontSize: large ? 11 : 10,
+                                  ),
+                                ),
                             ],
                           ),
                         ),
