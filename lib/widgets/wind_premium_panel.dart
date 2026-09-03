@@ -175,6 +175,11 @@ Widget _readout({
   required String value,
   String? unit,
   double valueFontSize = 20,
+  // Peak gust (same statisticalGustWithAge() formula as the VNT classic
+  // grid's "r. NN" caption) — shown as a small muted line under the box
+  // instead of inside the LCD glass, so it reads as a secondary figure
+  // the way a real instrument prints peak gust under the main number.
+  String? gust,
 }) => SizedBox(
   width: _kReadoutWidth,
   child: Column(
@@ -183,6 +188,17 @@ Widget _readout({
       _readoutLabel(label),
       const SizedBox(height: 2),
       _eInkValue(value: value, unit: unit, valueFontSize: valueFontSize),
+      if (gust != null) ...[
+        const SizedBox(height: 1),
+        Text(
+          'r. $gust',
+          style: const TextStyle(
+            color: cMuted,
+            fontSize: 9,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
     ],
   ),
 );
@@ -198,7 +214,11 @@ class PremiumWindPanel extends StatelessWidget {
     this.twaDeg,
     this.awsKn,
     this.twsKn,
+    this.awsGustKn,
+    this.twsGustKn,
     this.twdDeg,
+    this.twdShiftStartDeg,
+    this.twdShiftSweepDeg,
     this.headingDeg,
     this.sogKn,
     this.stwKn,
@@ -210,7 +230,15 @@ class PremiumWindPanel extends StatelessWidget {
   final double? twaDeg;
   final double? awsKn;
   final double? twsKn;
+  final double? awsGustKn;
+  final double? twsGustKn;
   final double? twdDeg;
+  // Recent TWD swing (see _WindShiftTracker.range in trackers.dart),
+  // pre-resolved by the caller into a start bearing + positive sweep —
+  // painted as a faint sector band on the heading/TWD dial, both null if
+  // there isn't enough history yet or the wind's been dead steady.
+  final double? twdShiftStartDeg;
+  final double? twdShiftSweepDeg;
   final double? headingDeg;
   final double? sogKn;
   final double? stwKn;
@@ -253,9 +281,19 @@ class PremiumWindPanel extends StatelessWidget {
           ],
           readouts: [
             _readout(label: 'AWA', value: _deg(awaDeg), unit: '°'),
-            _readout(label: 'AWS', value: _kt(awsKn), unit: ' kt'),
+            _readout(
+              label: 'AWS',
+              value: _kt(awsKn),
+              unit: ' kt',
+              gust: awsGustKn == null ? null : _kt(awsGustKn),
+            ),
             const SizedBox(width: 20),
-            _readout(label: 'TWS', value: _kt(twsKn), unit: ' kt'),
+            _readout(
+              label: 'TWS',
+              value: _kt(twsKn),
+              unit: ' kt',
+              gust: twsGustKn == null ? null : _kt(twsGustKn),
+            ),
             _readout(label: 'TWA', value: _deg(twaDeg), unit: '°'),
           ],
           painter: _WindCompassPainter(
@@ -280,6 +318,8 @@ class PremiumWindPanel extends StatelessWidget {
             headingDeg: headingDeg,
             twdDeg: twdDeg,
             twdColor: _twdColor,
+            shiftStartDeg: twdShiftStartDeg,
+            shiftSweepDeg: twdShiftSweepDeg,
             shipIcon: shipIcon,
             faceLabel: 'TWD',
           ),
@@ -795,6 +835,8 @@ class _HeadingTwdPainter extends CustomPainter {
     required this.headingDeg,
     required this.twdDeg,
     required this.twdColor,
+    this.shiftStartDeg,
+    this.shiftSweepDeg,
     required this.shipIcon,
     required this.faceLabel,
   });
@@ -802,6 +844,9 @@ class _HeadingTwdPainter extends CustomPainter {
   final double? headingDeg;
   final double? twdDeg;
   final Color twdColor;
+  // Recent TWD swing — see PremiumWindPanel.twdShiftStartDeg/SweepDeg.
+  final double? shiftStartDeg;
+  final double? shiftSweepDeg;
   final ui.Image? shipIcon;
   final String faceLabel;
 
@@ -820,6 +865,31 @@ class _HeadingTwdPainter extends CustomPainter {
     final tickInner = r * 0.78;
     final minorInner = r * 0.82;
     const labels = {0: 'N', 90: 'E', 180: 'S', 270: 'W'};
+
+    // Wind-shift band — the faint sector between the smallest and largest
+    // TWD seen recently (see _WindShiftTracker in trackers.dart), sitting
+    // just outside the tick ring so it never competes with the degree
+    // labels underneath. Drawn before the ticks/arrow so both stay
+    // legible on top of it; a torus segment (two concentric arcs closed
+    // into one path), not a stroke, so its edges read as a clean sector
+    // rather than rounded pen strokes.
+    final shiftStart = shiftStartDeg, shiftSweep = shiftSweepDeg;
+    if (shiftStart != null && shiftSweep != null && shiftSweep > 0) {
+      final bandInner = tickOuter + s * 0.01;
+      final bandOuter = tickOuter + s * 0.075;
+      final startRad = _screenRad(shiftStart);
+      final sweepRad = shiftSweep * math.pi / 180;
+      final band = Path()
+        ..addArc(Rect.fromCircle(center: center, radius: bandOuter), startRad, sweepRad)
+        ..arcTo(
+          Rect.fromCircle(center: center, radius: bandInner),
+          startRad + sweepRad,
+          -sweepRad,
+          false,
+        )
+        ..close();
+      canvas.drawPath(band, Paint()..color = twdColor.withValues(alpha: 0.28));
+    }
 
     for (var deg = 0; deg < 360; deg += 30) {
       final a = _screenRad(deg.toDouble());
@@ -940,6 +1010,8 @@ class _HeadingTwdPainter extends CustomPainter {
       old.headingDeg != headingDeg ||
       old.twdDeg != twdDeg ||
       old.twdColor != twdColor ||
+      old.shiftStartDeg != shiftStartDeg ||
+      old.shiftSweepDeg != shiftSweepDeg ||
       old.shipIcon != shipIcon;
 }
 

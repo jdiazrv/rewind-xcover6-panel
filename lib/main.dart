@@ -1480,6 +1480,7 @@ class _DashboardState extends State<Dashboard> {
   final _awsDamp = _WindCircularDamper(tau: 3.0);
   final _awaDamp = _WindCircularDamper(tau: 3.0);
   double? _dTws, _dTwa, _dTwd, _dAws, _dAwa;
+  final _twdShiftHistory = _WindShiftTracker();
 
   // 30-min rolling history for wind trend + gusts (raw, undamped values)
   final _twsHistory = _WindHistory();
@@ -2981,6 +2982,7 @@ class _DashboardState extends State<Dashboard> {
         // the UI never shows a negative degree. Reported live 2026-09-02.
         signalK.twdDeg = n == null ? null : normalize360(n * 57.2957795);
         _dTwd = _twdDamp.angle(signalK.twdDeg);
+        _twdShiftHistory.add(_dTwd);
       case 'environment.wind.speedTrue':
         signalK.twsKn = n == null ? null : n * 1.94384;
         _dTws = _twsDamp.linear(signalK.twsKn);
@@ -3142,6 +3144,7 @@ class _DashboardState extends State<Dashboard> {
       _dTws = signalK.twsKn;
       _dTwa = normalizeRelativeAngle(signalK.twaDeg!);
       _dTwd = signalK.twdDeg;
+      _twdShiftHistory.add(_dTwd);
 
       // Environment
       signalK.waterTempK = 296.5 + osc(4000, 0.8, 0);
@@ -4260,6 +4263,21 @@ class _DashboardState extends State<Dashboard> {
   }
 
   Widget _windPage() {
+    // TWD is a true compass bearing, never negative — normalize360
+    // defensively in case the upstream value ever arrives as a small
+    // signed delta instead of a proper 0-360 heading.
+    final twdForDial = switch (_freshWind(_dTwd)) {
+      null => null,
+      final v => normalize360(v),
+    };
+    final twdShift = _twdShiftHistory.range(twdForDial);
+    // Pre-resolved into a plain start bearing + positive sweep so the
+    // widget (a standalone library, not part of main.dart) doesn't need
+    // normalizeRelativeAngle's own wrap-handling to draw the arc.
+    final twdShiftStartDeg = twdShift?.minDeg;
+    final twdShiftSweepDeg = twdShift == null
+        ? null
+        : normalizeRelativeAngle(twdShift.maxDeg - twdShift.minDeg);
     final pages = <Widget>[
       _windClassicGrid(),
       PremiumWindPanel(
@@ -4269,13 +4287,11 @@ class _DashboardState extends State<Dashboard> {
         ),
         awsKn: _freshWind(_dAws),
         twsKn: _freshWind(_dTws),
-        // TWD is a true compass bearing, never negative — normalize360
-        // defensively in case the upstream value ever arrives as a small
-        // signed delta instead of a proper 0-360 heading.
-        twdDeg: switch (_freshWind(_dTwd)) {
-          null => null,
-          final v => normalize360(v),
-        },
+        awsGustKn: _awsHistory.statisticalGustWithAge()?.value,
+        twsGustKn: _twsHistory.statisticalGustWithAge()?.value,
+        twdDeg: twdForDial,
+        twdShiftStartDeg: twdShiftStartDeg,
+        twdShiftSweepDeg: twdShiftSweepDeg,
         headingDeg: _freshHeading,
         sogKn: _freshSog,
         stwKn: _freshStw,

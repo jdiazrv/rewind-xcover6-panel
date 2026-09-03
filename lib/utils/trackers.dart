@@ -216,6 +216,56 @@ class PressureHistory {
   }
 }
 
+// Recent TWD swing — feeds the faint "wind shift" band drawn on the TWD
+// dial (PremiumWindPanel/_HeadingTwdPainter): the arc between the
+// smallest and largest true wind direction seen in the last [_window].
+// Tracked as a signed offset from the CURRENT reading (see range()), not
+// as absolute min/max bearings — a real shift window only ever spans a
+// few tens of degrees, so anchoring to "now" sidesteps the 0°/360° wrap
+// a naive absolute min/max would have to handle.
+class _WindShiftTracker {
+  final List<(DateTime, double)> _samples = [];
+  static const _window = Duration(minutes: 15);
+
+  void add(double? deg) {
+    if (deg == null) return;
+    final now = DateTime.now();
+    _samples.add((now, deg));
+    _trim(now);
+  }
+
+  void _trim(DateTime now) {
+    final cutoff = now.subtract(_window);
+    while (_samples.isNotEmpty && _samples.first.$1.isBefore(cutoff)) {
+      _samples.removeAt(0);
+    }
+  }
+
+  // The observed swing as two absolute bearings, or null once there's
+  // nothing worth drawing (barely any history yet, or the wind's been
+  // dead steady). Needs the live [currentDeg] to anchor the offset math
+  // to what's actually on screen right now, rather than drifting from
+  // whatever this tracker's own latest sample happened to be.
+  ({double minDeg, double maxDeg})? range(double? currentDeg) {
+    if (currentDeg == null || _samples.length < 2) return null;
+    var minOffset = 0.0, maxOffset = 0.0;
+    for (final s in _samples) {
+      final offset = normalizeRelativeAngle(s.$2 - currentDeg);
+      if (offset < minOffset) minOffset = offset;
+      if (offset > maxOffset) maxOffset = offset;
+    }
+    // A single spurious outlier (or a genuine near-full-circle swing)
+    // could otherwise blow the band out to something absurd to draw.
+    minOffset = minOffset.clamp(-90.0, 0.0);
+    maxOffset = maxOffset.clamp(0.0, 90.0);
+    if (maxOffset - minOffset < 1) return null;
+    return (
+      minDeg: normalize360(currentDeg + minOffset),
+      maxDeg: normalize360(currentDeg + maxOffset),
+    );
+  }
+}
+
 class _WindCircularDamper {
   final double tau; // time constant in seconds (higher = more smoothing)
   double? _s, _c; // sin / cos accumulators (for circular angles)
