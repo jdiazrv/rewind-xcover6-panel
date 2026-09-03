@@ -1116,6 +1116,24 @@ class _DashboardState extends State<Dashboard> {
     unawaited(_syncAlarmSound());
   }
 
+  // The shared alarm tone plays whenever ANY active alarm is unmuted, but
+  // the "Alarmas activas" dialog lists one row (and one Silenciar button)
+  // per DISTINCT condition — muting a single row does nothing to the
+  // sound if a second condition is also active at the same time (e.g.
+  // garreo + viento por encima del umbral, both firing together), which
+  // reads as "pulsé Silenciar y siguió sonando". Reported live
+  // 2026-09-03. This mutes every currently-active alarm in one tap,
+  // guaranteeing the sound actually stops regardless of how many
+  // distinct conditions are live.
+  void _muteAllActiveAlarms() {
+    setState(() {
+      for (final a in _activeAlarms) {
+        if (a.sound) _mutedAlarms.add(a.key);
+      }
+    });
+    unawaited(_syncAlarmSound());
+  }
+
   static const _anchorAlarmKeys = [
     'anchorDrag',
     'anchorDepth',
@@ -1403,6 +1421,19 @@ class _DashboardState extends State<Dashboard> {
                             ),
                           ),
                         ),
+                        // Guaranteed to actually stop the shared alarm
+                        // tone even with several distinct conditions
+                        // active at once — muting just one row below
+                        // doesn't, if another unmuted+sounding alarm is
+                        // still live.
+                        if (alarms.any((a) => a.sound && !a.muted))
+                          TextButton(
+                            onPressed: () {
+                              _muteAllActiveAlarms();
+                              setSt(() {});
+                            },
+                            child: const Text('Silenciar todo'),
+                          ),
                         IconButton(
                           icon: const Icon(Icons.close, color: cMuted),
                           onPressed: () => Navigator.of(ctx).pop(),
@@ -1631,9 +1662,19 @@ class _DashboardState extends State<Dashboard> {
     final prefs = await SharedPreferences.getInstance();
     settings.anchorDeviceId = prefs.getString('anchorDeviceId') ?? '';
     if (settings.anchorDeviceId.isEmpty) {
+      // NOT `1 << 32` — on Flutter web, dart2js compiles `<<` straight to
+      // JS's operator, which masks its shift count to 5 bits, so
+      // `1 << 32` silently becomes `1 << 0` = 1, not 4294967296 like on
+      // native Dart — Random.nextInt(1) is technically valid, but every
+      // OTHER web session so far actually hit `1 << 32` evaluating to 0
+      // (confirmed live 2026-09-03), throwing here uncaught and aborting
+      // the rest of _loadSettings() before host/port ever load, which
+      // left a fresh browser profile stuck on "Sin conectar" forever.
+      // 0xFFFFFFFF is a plain literal, not a shift, so it's identical on
+      // both platforms.
       settings.anchorDeviceId =
           '${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
-          '${math.Random().nextInt(1 << 32).toRadixString(36)}';
+          '${math.Random().nextInt(0xFFFFFFFF).toRadixString(36)}';
       await prefs.setString('anchorDeviceId', settings.anchorDeviceId);
     }
     if (_isSignalKWebapp) {

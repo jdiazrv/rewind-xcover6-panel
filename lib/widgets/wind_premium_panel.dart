@@ -203,11 +203,57 @@ Widget _readout({
   ),
 );
 
+// Shortest signed delta from one compass bearing to another, wrapped to
+// -180..180 — shared by the needle-easing animation below and the
+// wind-shift trail's segment-connecting geometry, so both always sweep
+// the short way around rather than the long way through the wrap.
+double _shortestAngleDelta(double from, double to) {
+  var d = (to - from) % 360;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return d;
+}
+
+// Eases one numeric value toward whatever the latest Signal K delta set
+// it to, instead of the widget snapping straight to each new value —
+// deltas arrive at most a couple of times a second, which without this
+// reads as the needle visibly hopping between positions rather than
+// swinging ("las flechas se mueven a saltos", reported live 2026-09-03).
+// [circular] values (angles) always take the shortest path around the
+// compass; [circular]=false values (speeds) lerp directly. Freezes at
+// its last value when fed null (no data) instead of snapping to 0.
+class _NeedleAnim {
+  _NeedleAnim({this.circular = true});
+  final bool circular;
+  double? _current;
+  Tween<double>? _tween;
+
+  double? valueAt(double easedT) {
+    if (_tween == null) return _current;
+    return _tween!.transform(easedT);
+  }
+
+  // Returns true if this value actually moved and the shared controller
+  // needs to (re)start.
+  bool retarget(double? target, double easedT) {
+    if (target == null) return false;
+    final from = valueAt(easedT) ?? target;
+    _current = target;
+    if (from == target) {
+      _tween = null;
+      return false;
+    }
+    final to = circular ? from + _shortestAngleDelta(from, target) : target;
+    _tween = Tween<double>(begin: from, end: to);
+    return true;
+  }
+}
+
 /// Wind compass (AWA/TWA) + heading/TWD compass + speed dial (SOG/STW), all
 /// on one screen — every plain number lives in its own e-ink readout above
 /// its dial ("fuera del círculo, mejor arriba que abajo"), not floating
 /// separately or overlapping the dial face.
-class PremiumWindPanel extends StatelessWidget {
+class PremiumWindPanel extends StatefulWidget {
   const PremiumWindPanel({
     super.key,
     this.awaDeg,
@@ -248,121 +294,217 @@ class PremiumWindPanel extends StatelessWidget {
   static const _stwColor = cCyan;
   static const _twdColor = cOrange;
 
-  String _deg(double? v) => v == null ? '--' : v.round().toString();
-  String _kt(double? v) => v == null ? '--' : v.toStringAsFixed(1);
+  @override
+  State<PremiumWindPanel> createState() => _PremiumWindPanelState();
+}
+
+class _PremiumWindPanelState extends State<PremiumWindPanel>
+    with SingleTickerProviderStateMixin {
+  late final _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 350),
+  )..addListener(() => setState(() {}));
+
+  final _awa = _NeedleAnim();
+  final _twa = _NeedleAnim();
+  final _twd = _NeedleAnim();
+  final _heading = _NeedleAnim();
+  final _sog = _NeedleAnim(circular: false);
+  final _stw = _NeedleAnim(circular: false);
+
+  // The animated value can legitimately sit outside its normal range
+  // mid-swing (see _NeedleAnim: it deliberately doesn't re-wrap the
+  // tween's endpoints, so a needle crossing the compass wrap sweeps
+  // smoothly through it instead of jumping) — fine for the painter's
+  // rotation, which is periodic anyway, but the on-screen number needs
+  // wrapping back or it can read e.g. "-2°"/"364°" mid-animation. True
+  // bearings (RUMBO, TWD) wrap to 0-360; relative angles (AWA, TWA) wrap
+  // to -180..180 instead — using the true-bearing wrap for them showed
+  // values "por encima de 180 y -180" (reported live 2026-09-03).
+  static String _degTrue(double? v) {
+    if (v == null) return '--';
+    final n = v.round() % 360;
+    return (n < 0 ? n + 360 : n).toString();
+  }
+
+  static String _degRelative(double? v) {
+    if (v == null) return '--';
+    var n = v.round() % 360;
+    if (n > 180) n -= 360;
+    if (n < -180) n += 360;
+    return n.toString();
+  }
+  static String _kt(double? v) => v == null ? '--' : v.toStringAsFixed(1);
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(8),
-    child: LayoutBuilder(
-      builder: (context, constraints) => Column(
-        children: [
-          // Pushes the whole row (LCDs + dials + legends together, as one
-          // group) down from the very top of the screen.
-          SizedBox(height: constraints.maxHeight * 0.10),
-          Expanded(child: _dialsRow()),
-        ],
-      ),
-    ),
-  );
+  void initState() {
+    super.initState();
+    _retargetAll();
+  }
 
-  Widget _dialsRow() => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Expanded(
-        flex: 5,
-        child: _DialColumn(
-          legend: [
-            _legendDot(_apparentColor, 'AWA'),
-            _legendDot(_trueColor, 'TWA'),
-          ],
-          readouts: [
-            _readout(label: 'AWA', value: _deg(awaDeg), unit: '°'),
-            _readout(
-              label: 'AWS',
-              value: _kt(awsKn),
-              unit: ' kt',
-              gust: awsGustKn == null ? null : _kt(awsGustKn),
+  @override
+  void didUpdateWidget(covariant PremiumWindPanel old) {
+    super.didUpdateWidget(old);
+    _retargetAll();
+  }
+
+  void _retargetAll() {
+    final t = Curves.easeOut.transform(_controller.value);
+    final moved = [
+      _awa.retarget(widget.awaDeg, t),
+      _twa.retarget(widget.twaDeg, t),
+      _twd.retarget(widget.twdDeg, t),
+      _heading.retarget(widget.headingDeg, t),
+      _sog.retarget(widget.sogKn, t),
+      _stw.retarget(widget.stwKn, t),
+    ].any((didMove) => didMove);
+    if (moved) {
+      _controller
+        ..value = 0
+        ..forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Curves.easeOut.transform(_controller.value);
+    final awaDeg = _awa.valueAt(t);
+    final twaDeg = _twa.valueAt(t);
+    final twdDeg = _twd.valueAt(t);
+    final headingDeg = _heading.valueAt(t);
+    final sogKn = _sog.valueAt(t);
+    final stwKn = _stw.valueAt(t);
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: LayoutBuilder(
+        builder: (context, constraints) => Column(
+          children: [
+            // Pushes the whole row (LCDs + dials + legends together, as
+            // one group) down from the very top of the screen.
+            SizedBox(height: constraints.maxHeight * 0.10),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 5,
+                    child: _DialColumn(
+                      legend: [
+                        _legendDot(PremiumWindPanel._apparentColor, 'AWA'),
+                        _legendDot(PremiumWindPanel._trueColor, 'TWA'),
+                      ],
+                      readouts: [
+                        _readout(label: 'AWA', value: _degRelative(awaDeg), unit: '°'),
+                        _readout(
+                          label: 'AWS',
+                          value: _kt(widget.awsKn),
+                          unit: ' kt',
+                          gust: widget.awsGustKn == null
+                              ? null
+                              : _kt(widget.awsGustKn),
+                        ),
+                        const SizedBox(width: 20),
+                        _readout(
+                          label: 'TWS',
+                          value: _kt(widget.twsKn),
+                          unit: ' kt',
+                          gust: widget.twsGustKn == null
+                              ? null
+                              : _kt(widget.twsGustKn),
+                        ),
+                        _readout(label: 'TWA', value: _degRelative(twaDeg), unit: '°'),
+                      ],
+                      painter: _WindCompassPainter(
+                        angle1: awaDeg,
+                        color1: PremiumWindPanel._apparentColor,
+                        angle2: twaDeg,
+                        color2: PremiumWindPanel._trueColor,
+                        shipIcon: widget.shipIcon,
+                        faceLabel: 'VIENTO',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 5,
+                    child: _DialColumn(
+                      legend: [_legendDot(PremiumWindPanel._twdColor, 'TWD')],
+                      readouts: [
+                        _readout(
+                          label: 'RUMBO',
+                          value: _degTrue(headingDeg),
+                          unit: '°',
+                        ),
+                      ],
+                      painter: _HeadingTwdPainter(
+                        headingDeg: headingDeg,
+                        twdDeg: twdDeg,
+                        twdColor: PremiumWindPanel._twdColor,
+                        shiftTrail: widget.twdShiftTrail,
+                        shipIcon: widget.shipIcon,
+                        faceLabel: 'TWD',
+                      ),
+                      // TWD's own readout lives inside the dial, between
+                      // the boat icon and the south tick — there's real
+                      // empty space there on a compass face, and this is
+                      // what real wind instruments do. Sized/positioned
+                      // to stay clear of both the rotated boat icon and
+                      // the TWD arrow even when heading and TWD are both
+                      // 180° (boat pointing south, arrow also pointing
+                      // south) — kept narrow and close to center, well
+                      // inside where the arrow's own tip sits.
+                      insideOverlay: (d) => Positioned(
+                        left: d * 0.40,
+                        right: d * 0.40,
+                        top: d * 0.66,
+                        height: d * 0.117,
+                        child: _eInkValue(
+                          value: _degTrue(twdDeg),
+                          unit: '°',
+                          valueFontSize: d * 0.075,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    // Smaller than the other two — "el reloj de
+                    // velocidad más pequeño si hace falta", to make room
+                    // for the heading dial.
+                    flex: 3,
+                    child: _DialColumn(
+                      legend: [
+                        _legendDot(PremiumWindPanel._sogColor, 'SOG'),
+                        _legendDot(PremiumWindPanel._stwColor, 'STW'),
+                      ],
+                      readouts: [
+                        _readout(label: 'SOG', value: _kt(sogKn), unit: ' kt'),
+                        _readout(label: 'STW', value: _kt(stwKn), unit: ' kt'),
+                      ],
+                      painter: _DualSpeedNeedlePainter(
+                        value1: sogKn,
+                        color1: PremiumWindPanel._sogColor,
+                        value2: stwKn,
+                        color2: PremiumWindPanel._stwColor,
+                        max: widget.maxSpeed,
+                        faceLabel: 'VELOCIDAD',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(width: 20),
-            _readout(
-              label: 'TWS',
-              value: _kt(twsKn),
-              unit: ' kt',
-              gust: twsGustKn == null ? null : _kt(twsGustKn),
-            ),
-            _readout(label: 'TWA', value: _deg(twaDeg), unit: '°'),
           ],
-          painter: _WindCompassPainter(
-            angle1: awaDeg,
-            color1: _apparentColor,
-            angle2: twaDeg,
-            color2: _trueColor,
-            shipIcon: shipIcon,
-            faceLabel: 'VIENTO',
-          ),
         ),
       ),
-      const SizedBox(width: 8),
-      Expanded(
-        flex: 5,
-        child: _DialColumn(
-          legend: [_legendDot(_twdColor, 'TWD')],
-          readouts: [
-            _readout(label: 'RUMBO', value: _deg(headingDeg), unit: '°'),
-          ],
-          painter: _HeadingTwdPainter(
-            headingDeg: headingDeg,
-            twdDeg: twdDeg,
-            twdColor: _twdColor,
-            shiftTrail: twdShiftTrail,
-            shipIcon: shipIcon,
-            faceLabel: 'TWD',
-          ),
-          // TWD's own readout lives inside the dial, between the boat
-          // icon and the south tick — there's real empty space there on
-          // a compass face, and this is what real wind instruments do.
-          // Sized/positioned to stay clear of both the rotated boat icon
-          // and the TWD arrow even when heading and TWD are both 180°
-          // (boat pointing south, arrow also pointing south) — kept
-          // narrow and close to center, well inside where the arrow's
-          // own tip sits.
-          insideOverlay: (d) => Positioned(
-            left: d * 0.40,
-            right: d * 0.40,
-            top: d * 0.66,
-            height: d * 0.117,
-            child: _eInkValue(
-              value: _deg(twdDeg),
-              unit: '°',
-              valueFontSize: d * 0.075,
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(width: 8),
-      Expanded(
-        // Smaller than the other two — "el reloj de velocidad más
-        // pequeño si hace falta", to make room for the new heading dial.
-        flex: 3,
-        child: _DialColumn(
-          legend: [_legendDot(_sogColor, 'SOG'), _legendDot(_stwColor, 'STW')],
-          readouts: [
-            _readout(label: 'SOG', value: _kt(sogKn), unit: ' kt'),
-            _readout(label: 'STW', value: _kt(stwKn), unit: ' kt'),
-          ],
-          painter: _DualSpeedNeedlePainter(
-            value1: sogKn,
-            color1: _sogColor,
-            value2: stwKn,
-            color2: _stwColor,
-            max: maxSpeed,
-            faceLabel: 'VELOCIDAD',
-          ),
-        ),
-      ),
-    ],
-  );
+    );
+  }
 }
 
 Widget _legendDot(Color color, String label) => Row(
@@ -770,7 +912,12 @@ class _WindCompassPainter extends CustomPainter {
 
     // AWA: full needle from the hub.
     if (angle1 != null) {
-      final a = _screenRad(angle1!.clamp(-150.0, 150.0));
+      // Clamped to the full ±180 a real AWA/TWA can reach (dead astern) —
+      // NOT the ±150 tick range above, which is just where the printed
+      // scale marks stop; the needle must still be able to swing into
+      // that unmarked gap when the wind genuinely is back there.
+      // Reported live 2026-09-03 ("solo llega 150, debe llegar a 180").
+      final a = _screenRad(angle1!.clamp(-180.0, 180.0));
       _paintNeedle(canvas, center, r, s, a, tickInner * 0.92, color1);
     }
 
@@ -779,7 +926,7 @@ class _WindCompassPainter extends CustomPainter {
     // reads as a distinct marker rather than a second clock hand sharing
     // the same pivot.
     if (angle2 != null) {
-      final a = _screenRad(angle2!.clamp(-150.0, 150.0));
+      final a = _screenRad(angle2!.clamp(-180.0, 180.0));
       final dir = Offset(math.cos(a), math.sin(a));
       final perp = Offset(-math.sin(a), math.cos(a));
       final outR = tickInner * 0.95;
@@ -863,20 +1010,29 @@ class _HeadingTwdPainter extends CustomPainter {
     // Wind-shift trail — the swept TWD path over the last window (see
     // _WindShiftTracker in trackers.dart), sitting just outside the tick
     // ring so it never competes with the degree labels underneath. Drawn
-    // as one thin wedge per sample (oldest first, so a freshly-revisited
-    // bearing's more-opaque wedge lands on top of any older one there) —
-    // a real trail, not a static envelope: it visibly expands wherever
-    // the needle has actually swept, and its oldest end simply fades out
-    // as those samples age past the window rather than staying fixed.
-    // Drawn before the ticks/arrow so both stay legible on top of it.
-    if (shiftTrail.isNotEmpty) {
+    // as one wedge PER GAP between consecutive samples (not one wedge per
+    // point) so the trail is a continuous connected ribbon tracing the
+    // exact path the needle swept, with no empty gaps and no coverage of
+    // bearings it never actually passed through — a fixed-width dot per
+    // sample left visible holes during a fast sweep (a large angular jump
+    // between two 5-second samples), which read as an isolated island of
+    // color nowhere near the current needle. Each segment's opacity comes
+    // from its NEWER endpoint, and segments are drawn oldest-to-newest so
+    // a freshly-revisited bearing's more-opaque redraw lands on top of
+    // any older, fainter one there. Drawn before the ticks/arrow so both
+    // stay legible on top of it.
+    if (shiftTrail.length >= 2) {
       final bandInner = tickOuter + s * 0.01;
       final bandOuter = tickOuter + s * 0.075;
-      const halfWidthDeg = 2.5;
-      final sweepRad = halfWidthDeg * 2 * math.pi / 180;
-      for (final (bearingDeg, ageFrac) in shiftTrail) {
+      const padDeg = 0.6; // slight overlap so segments never leave a seam
+      for (var i = 0; i < shiftTrail.length - 1; i++) {
+        final (fromDeg, _) = shiftTrail[i];
+        final (toDeg, ageFrac) = shiftTrail[i + 1];
         if (ageFrac <= 0) continue;
-        final startRad = _screenRad(bearingDeg - halfWidthDeg);
+        final delta = _shortestAngleDelta(fromDeg, toDeg);
+        final pad = delta >= 0 ? padDeg : -padDeg;
+        final startRad = _screenRad(fromDeg - pad);
+        final sweepRad = (delta + pad * 2) * math.pi / 180;
         final wedge = Path()
           ..addArc(Rect.fromCircle(center: center, radius: bandOuter), startRad, sweepRad)
           ..arcTo(
