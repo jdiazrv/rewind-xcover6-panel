@@ -217,8 +217,7 @@ class PremiumWindPanel extends StatelessWidget {
     this.awsGustKn,
     this.twsGustKn,
     this.twdDeg,
-    this.twdShiftStartDeg,
-    this.twdShiftSweepDeg,
+    this.twdShiftTrail = const [],
     this.headingDeg,
     this.sogKn,
     this.stwKn,
@@ -233,12 +232,10 @@ class PremiumWindPanel extends StatelessWidget {
   final double? awsGustKn;
   final double? twsGustKn;
   final double? twdDeg;
-  // Recent TWD swing (see _WindShiftTracker.range in trackers.dart),
-  // pre-resolved by the caller into a start bearing + positive sweep —
-  // painted as a faint sector band on the heading/TWD dial, both null if
-  // there isn't enough history yet or the wind's been dead steady.
-  final double? twdShiftStartDeg;
-  final double? twdShiftSweepDeg;
+  // Recent TWD swing (see _WindShiftTracker.trail in trackers.dart) —
+  // painted as a faint fading trail on the heading/TWD dial, empty if
+  // there isn't enough history yet.
+  final List<(double bearingDeg, double ageFrac)> twdShiftTrail;
   final double? headingDeg;
   final double? sogKn;
   final double? stwKn;
@@ -318,8 +315,7 @@ class PremiumWindPanel extends StatelessWidget {
             headingDeg: headingDeg,
             twdDeg: twdDeg,
             twdColor: _twdColor,
-            shiftStartDeg: twdShiftStartDeg,
-            shiftSweepDeg: twdShiftSweepDeg,
+            shiftTrail: twdShiftTrail,
             shipIcon: shipIcon,
             faceLabel: 'TWD',
           ),
@@ -835,8 +831,7 @@ class _HeadingTwdPainter extends CustomPainter {
     required this.headingDeg,
     required this.twdDeg,
     required this.twdColor,
-    this.shiftStartDeg,
-    this.shiftSweepDeg,
+    this.shiftTrail = const [],
     required this.shipIcon,
     required this.faceLabel,
   });
@@ -844,9 +839,8 @@ class _HeadingTwdPainter extends CustomPainter {
   final double? headingDeg;
   final double? twdDeg;
   final Color twdColor;
-  // Recent TWD swing — see PremiumWindPanel.twdShiftStartDeg/SweepDeg.
-  final double? shiftStartDeg;
-  final double? shiftSweepDeg;
+  // Recent TWD swing — see PremiumWindPanel.twdShiftTrail.
+  final List<(double bearingDeg, double ageFrac)> shiftTrail;
   final ui.Image? shipIcon;
   final String faceLabel;
 
@@ -866,29 +860,37 @@ class _HeadingTwdPainter extends CustomPainter {
     final minorInner = r * 0.82;
     const labels = {0: 'N', 90: 'E', 180: 'S', 270: 'W'};
 
-    // Wind-shift band — the faint sector between the smallest and largest
-    // TWD seen recently (see _WindShiftTracker in trackers.dart), sitting
-    // just outside the tick ring so it never competes with the degree
-    // labels underneath. Drawn before the ticks/arrow so both stay
-    // legible on top of it; a torus segment (two concentric arcs closed
-    // into one path), not a stroke, so its edges read as a clean sector
-    // rather than rounded pen strokes.
-    final shiftStart = shiftStartDeg, shiftSweep = shiftSweepDeg;
-    if (shiftStart != null && shiftSweep != null && shiftSweep > 0) {
+    // Wind-shift trail — the swept TWD path over the last window (see
+    // _WindShiftTracker in trackers.dart), sitting just outside the tick
+    // ring so it never competes with the degree labels underneath. Drawn
+    // as one thin wedge per sample (oldest first, so a freshly-revisited
+    // bearing's more-opaque wedge lands on top of any older one there) —
+    // a real trail, not a static envelope: it visibly expands wherever
+    // the needle has actually swept, and its oldest end simply fades out
+    // as those samples age past the window rather than staying fixed.
+    // Drawn before the ticks/arrow so both stay legible on top of it.
+    if (shiftTrail.isNotEmpty) {
       final bandInner = tickOuter + s * 0.01;
       final bandOuter = tickOuter + s * 0.075;
-      final startRad = _screenRad(shiftStart);
-      final sweepRad = shiftSweep * math.pi / 180;
-      final band = Path()
-        ..addArc(Rect.fromCircle(center: center, radius: bandOuter), startRad, sweepRad)
-        ..arcTo(
-          Rect.fromCircle(center: center, radius: bandInner),
-          startRad + sweepRad,
-          -sweepRad,
-          false,
-        )
-        ..close();
-      canvas.drawPath(band, Paint()..color = twdColor.withValues(alpha: 0.28));
+      const halfWidthDeg = 2.5;
+      final sweepRad = halfWidthDeg * 2 * math.pi / 180;
+      for (final (bearingDeg, ageFrac) in shiftTrail) {
+        if (ageFrac <= 0) continue;
+        final startRad = _screenRad(bearingDeg - halfWidthDeg);
+        final wedge = Path()
+          ..addArc(Rect.fromCircle(center: center, radius: bandOuter), startRad, sweepRad)
+          ..arcTo(
+            Rect.fromCircle(center: center, radius: bandInner),
+            startRad + sweepRad,
+            -sweepRad,
+            false,
+          )
+          ..close();
+        canvas.drawPath(
+          wedge,
+          Paint()..color = twdColor.withValues(alpha: 0.32 * ageFrac),
+        );
+      }
     }
 
     for (var deg = 0; deg < 360; deg += 30) {
@@ -1010,8 +1012,12 @@ class _HeadingTwdPainter extends CustomPainter {
       old.headingDeg != headingDeg ||
       old.twdDeg != twdDeg ||
       old.twdColor != twdColor ||
-      old.shiftStartDeg != shiftStartDeg ||
-      old.shiftSweepDeg != shiftSweepDeg ||
+      // Always a freshly-built list (see PremiumWindPanel.twdShiftTrail),
+      // so reference inequality is deliberate here, not a missed
+      // optimization: ageFrac keeps decaying with real time even when the
+      // underlying bearings haven't changed, and the fade needs to keep
+      // repainting to actually animate.
+      old.shiftTrail != shiftTrail ||
       old.shipIcon != shipIcon;
 }
 

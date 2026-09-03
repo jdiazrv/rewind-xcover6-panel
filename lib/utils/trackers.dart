@@ -216,20 +216,29 @@ class PressureHistory {
   }
 }
 
-// Recent TWD swing — feeds the faint "wind shift" band drawn on the TWD
-// dial (PremiumWindPanel/_HeadingTwdPainter): the arc between the
-// smallest and largest true wind direction seen in the last [_window].
-// Tracked as a signed offset from the CURRENT reading (see range()), not
-// as absolute min/max bearings — a real shift window only ever spans a
-// few tens of degrees, so anchoring to "now" sidesteps the 0°/360° wrap
-// a naive absolute min/max would have to handle.
+// Recent TWD swing — feeds the faint "wind shift" trail drawn on the TWD
+// dial (PremiumWindPanel/_HeadingTwdPainter). Kept as a plain sampled
+// path (bearing + age), not a min/max envelope: a real trail should
+// visibly expand wherever the needle has actually been and its oldest
+// end should fade away over time — see trail() below — which also
+// handles the wind swinging back and forth correctly, since a revisited
+// bearing simply gets a fresh, fully-opaque sample again instead of
+// staying "stuck" at whatever extreme it once reached.
 class _WindShiftTracker {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(minutes: 15);
+  // Throttled, not one sample per delta — TWD can update several times a
+  // second, and the painted trail only needs a point every few seconds to
+  // look continuous, so this keeps the buffer (and the per-frame paint
+  // cost) small regardless of how chatty the wind instrument is.
+  static const _minSpacing = Duration(seconds: 5);
 
   void add(double? deg) {
     if (deg == null) return;
     final now = DateTime.now();
+    if (_samples.isNotEmpty && now.difference(_samples.last.$1) < _minSpacing) {
+      return;
+    }
     _samples.add((now, deg));
     _trim(now);
   }
@@ -241,28 +250,21 @@ class _WindShiftTracker {
     }
   }
 
-  // The observed swing as two absolute bearings, or null once there's
-  // nothing worth drawing (barely any history yet, or the wind's been
-  // dead steady). Needs the live [currentDeg] to anchor the offset math
-  // to what's actually on screen right now, rather than drifting from
-  // whatever this tracker's own latest sample happened to be.
-  ({double minDeg, double maxDeg})? range(double? currentDeg) {
-    if (currentDeg == null || _samples.length < 2) return null;
-    var minOffset = 0.0, maxOffset = 0.0;
-    for (final s in _samples) {
-      final offset = normalizeRelativeAngle(s.$2 - currentDeg);
-      if (offset < minOffset) minOffset = offset;
-      if (offset > maxOffset) maxOffset = offset;
-    }
-    // A single spurious outlier (or a genuine near-full-circle swing)
-    // could otherwise blow the band out to something absurd to draw.
-    minOffset = minOffset.clamp(-90.0, 0.0);
-    maxOffset = maxOffset.clamp(0.0, 90.0);
-    if (maxOffset - minOffset < 1) return null;
-    return (
-      minDeg: normalize360(currentDeg + minOffset),
-      maxDeg: normalize360(currentDeg + maxOffset),
-    );
+  // The swept path as (bearing, ageFrac) pairs, oldest first — ageFrac
+  // 1.0 is "just now", fading linearly toward 0 at the window's far edge,
+  // for the painter to draw as a comet-style trail (older/lower alpha
+  // first, so a freshly-revisited bearing's opaque draw lands on top).
+  List<(double bearingDeg, double ageFrac)> trail() {
+    if (_samples.isEmpty) return const [];
+    final now = DateTime.now();
+    final windowMs = _window.inMilliseconds;
+    return [
+      for (final s in _samples)
+        (
+          s.$2,
+          (1 - now.difference(s.$1).inMilliseconds / windowMs).clamp(0.0, 1.0),
+        ),
+    ];
   }
 }
 

@@ -384,6 +384,7 @@ class SignalKModel {
   double? sogKn;
   double? stwKn;
   double? headingTrueDeg;
+  double? headingMagneticDeg;
   double? cogTrueDeg;
   // Each of these four also gets its own timestamp — navUpdate above is
   // shared by every navigation.* path, so a compass that dies while GPS
@@ -395,6 +396,7 @@ class SignalKModel {
   DateTime? sogKnUpdate;
   DateTime? stwKnUpdate;
   DateTime? headingTrueDegUpdate;
+  DateTime? headingMagneticDegUpdate;
   DateTime? cogTrueDegUpdate;
   double? heelDeg;
   double? pitchDeg;
@@ -524,12 +526,14 @@ class SignalKModel {
     sogKnUpdate = null;
     stwKnUpdate = null;
     headingTrueDegUpdate = null;
+    headingMagneticDegUpdate = null;
     cogTrueDegUpdate = null;
     latitude = null;
     longitude = null;
     sogKn = null;
     stwKn = null;
     headingTrueDeg = null;
+    headingMagneticDeg = null;
     cogTrueDeg = null;
     heelDeg = null;
     pitchDeg = null;

@@ -2628,6 +2628,7 @@ class _DashboardState extends State<Dashboard> {
       'navigation.speedOverGround',
       'navigation.speedThroughWater',
       'navigation.headingTrue',
+      'navigation.headingMagnetic',
       'navigation.courseOverGroundTrue',
       'navigation.attitude',
       'navigation.attitude.roll',
@@ -2925,6 +2926,16 @@ class _DashboardState extends State<Dashboard> {
       case 'navigation.headingTrue':
         signalK.headingTrueDeg = n == null ? null : n * 57.2957795;
         signalK.headingTrueDegUpdate = ts;
+      case 'navigation.headingMagnetic':
+        // Fallback only (see _freshHeading) — plenty of real setups only
+        // ever publish magnetic heading, and until now this app simply
+        // never listened for it, so "rumbo" went blank the moment true
+        // heading stopped arriving even with magnetic still live.
+        // Reported live 2026-09-03. Used raw, no variation correction
+        // applied (this app doesn't track magneticVariation at all yet),
+        // same pragmatic approach as the existing COG fallback elsewhere.
+        signalK.headingMagneticDeg = n == null ? null : n * 57.2957795;
+        signalK.headingMagneticDegUpdate = ts;
       case 'navigation.courseOverGroundTrue':
         signalK.cogTrueDeg = n == null ? null : n * 57.2957795;
         signalK.cogTrueDegUpdate = ts;
@@ -4031,7 +4042,8 @@ class _DashboardState extends State<Dashboard> {
   // because the shared timestamp masked it). Mirrors _freshEngine's
   // per-field-timestamp pattern.
   double? get _freshHeading =>
-      _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate);
+      _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate) ??
+      _freshEngine(signalK.headingMagneticDeg, signalK.headingMagneticDegUpdate);
   double? get _freshCog =>
       _freshEngine(signalK.cogTrueDeg, signalK.cogTrueDegUpdate);
   double? get _freshSog => _freshEngine(signalK.sogKn, signalK.sogKnUpdate);
@@ -4270,14 +4282,7 @@ class _DashboardState extends State<Dashboard> {
       null => null,
       final v => normalize360(v),
     };
-    final twdShift = _twdShiftHistory.range(twdForDial);
-    // Pre-resolved into a plain start bearing + positive sweep so the
-    // widget (a standalone library, not part of main.dart) doesn't need
-    // normalizeRelativeAngle's own wrap-handling to draw the arc.
-    final twdShiftStartDeg = twdShift?.minDeg;
-    final twdShiftSweepDeg = twdShift == null
-        ? null
-        : normalizeRelativeAngle(twdShift.maxDeg - twdShift.minDeg);
+    final twdShiftTrail = _twdShiftHistory.trail();
     final pages = <Widget>[
       _windClassicGrid(),
       PremiumWindPanel(
@@ -4290,8 +4295,7 @@ class _DashboardState extends State<Dashboard> {
         awsGustKn: _awsHistory.statisticalGustWithAge()?.value,
         twsGustKn: _twsHistory.statisticalGustWithAge()?.value,
         twdDeg: twdForDial,
-        twdShiftStartDeg: twdShiftStartDeg,
-        twdShiftSweepDeg: twdShiftSweepDeg,
+        twdShiftTrail: twdShiftTrail,
         headingDeg: _freshHeading,
         sogKn: _freshSog,
         stwKn: _freshStw,
