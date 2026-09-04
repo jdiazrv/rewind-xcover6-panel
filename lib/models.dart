@@ -35,6 +35,35 @@ import 'theme.dart';
   return (bearingDeg: brg, distanceM: r * c);
 }
 
+/// Whether a point [distanceM] from the drop position, at true bearing
+/// [bearingFromDropDeg] from it, counts as outside the anchor watch zone —
+/// circle: past the radius; sector: ALSO past the radius, or past the
+/// arc's span even while still inside it. Shared by the drag-alarm engine
+/// (main.dart's _isOutsideAnchorZone) and the ANC screen's own live
+/// "outside" status (anchor_native_view.dart) so the two can never
+/// disagree about the same zone — the screen used to only ever compare
+/// distance to radius, so a sector watch could show a calm "FONDEADO"
+/// while the real alarm correctly fired for being outside the arc.
+bool isOutsideWatchZone({
+  required double distanceM,
+  required double radiusM,
+  required String shape,
+  double? bearingFromDropDeg,
+  double? sectorStartDeg,
+  double? sectorEndDeg,
+}) {
+  if (distanceM > radiusM) return true;
+  if (shape != 'sector') return false;
+  if (bearingFromDropDeg == null ||
+      sectorStartDeg == null ||
+      sectorEndDeg == null) {
+    return false;
+  }
+  final span = (sectorEndDeg - sectorStartDeg + 360) % 360;
+  final rel = (bearingFromDropDeg - sectorStartDeg + 360) % 360;
+  return rel > span;
+}
+
 class GraphPoint {
   const GraphPoint({required this.time, required this.value});
   final DateTime time;

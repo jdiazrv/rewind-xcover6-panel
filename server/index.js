@@ -83,40 +83,51 @@ function isOutsideZone(dropLat, dropLon, lat, lon, zone) {
   return rel > span;
 }
 
-function sendNtfy(topic, title, body) {
+function sendNtfy(app, topic, title, body) {
   return new Promise((resolve) => {
     if (!topic || !topic.trim()) {
       resolve();
       return;
     }
-    const payload = Buffer.from(body, 'utf8');
-    const req = https.request(
-      {
-        hostname: 'ntfy.sh',
-        path: `/${encodeURIComponent(topic.trim())}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Content-Length': payload.length,
-          // ASCII-only header values — vessel names / messages routinely
-          // have accents, which some HTTP client fail on in headers (same
-          // reason the app's own ntfy push keeps this out of the title
-          // where it can, see lib/signalk/ntfy_push.dart).
-          Title: title,
-          Priority: 'urgent',
-          Tags: 'warning',
+    // Node's http client validates header VALUES as Latin-1/ASCII and
+    // throws synchronously (ERR_INVALID_CHAR) on anything outside that —
+    // https.request() itself can throw here, not just emit 'error' async.
+    // Caught once already (an em dash in a hardcoded title slipped past
+    // review); this try/catch is the backstop for the next mistake like
+    // it, so a bad header value degrades to "push silently skipped"
+    // rather than an unhandled rejection.
+    try {
+      const payload = Buffer.from(body, 'utf8');
+      const req = https.request(
+        {
+          hostname: 'ntfy.sh',
+          path: `/${encodeURIComponent(topic.trim())}`,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Length': payload.length,
+            // Plain-ASCII only — the real content (any charset) goes in
+            // the body instead, which has no such restriction. See the
+            // call site for why.
+            Title: title,
+            Priority: 'urgent',
+            Tags: 'warning',
+          },
+          timeout: 8000,
         },
-        timeout: 8000,
-      },
-      (res) => {
-        res.resume(); // drain, we don't care about the body
-        resolve();
-      },
-    );
-    req.on('error', () => resolve()); // best-effort — never throw
-    req.on('timeout', () => req.destroy());
-    req.write(payload);
-    req.end();
+        (res) => {
+          res.resume(); // drain, we don't care about the body
+          resolve();
+        },
+      );
+      req.on('error', () => resolve()); // best-effort — never throw
+      req.on('timeout', () => req.destroy());
+      req.write(payload);
+      req.end();
+    } catch (err) {
+      app.debug(`ntfy push failed: ${err && err.message}`);
+      resolve();
+    }
   });
 }
 
@@ -164,12 +175,25 @@ module.exports = function (app) {
   let unsubscribes = [];
   let checkTimer = null;
   let armed = false;
+  let armedAtMs = null;
   let dropPosition = null; // {latitude, longitude}
   let zone = null; // {type, radius, startDeg?, endDeg?}
-  let foreignArmed = false;
-  let foreignSourceLabel = null;
+  // Every DISTINCT foreign source currently reporting itself armed — a
+  // Set, not a single flag, so if two different third-party anchor
+  // plugins both happen to be armed and one of them disarms, we correctly
+  // keep standing down for the other rather than resuming just because
+  // the one we happened to be tracking went away.
+  const foreignArmedSources = new Set();
   let lastNotifKey = null; // `${state}|${message}` — dedup only, not a lock
   let lastPushAt = 0;
+  // GPS glitch filter — mirrors lib/main.dart's own alarmAnchorFilterGlitches
+  // (same GLITCH_JUMP_M default as its alarmAnchorGlitchJumpM). A single
+  // implausible jump gets ignored rather than trusted as "the boat is now
+  // there", the same way the app's own check does.
+  let lastGoodPosition = null;
+  const GRACE_MS = 10000;
+  const GLITCH_JUMP_M = 50; // matches SettingsModel.alarmAnchorGlitchJumpM's default
+  const POSITION_MAX_AGE_MS = 60000;
 
   function sourceLabelOf(update) {
     if (typeof update.$source === 'string') return update.$source;
@@ -227,20 +251,37 @@ module.exports = function (app) {
             const nowArmed = value === 'on';
             if (nowArmed !== armed) {
               armed = nowArmed;
-              if (!armed) clearAlarmIfAny('disarmed');
+              if (armed) {
+                armedAtMs = Date.now();
+                lastGoodPosition = null; // fresh watch — don't compare against wherever the last one was
+              } else {
+                clearAlarmIfAny('disarmed');
+              }
             }
           } else if (path === 'navigation.anchor.position') {
-            dropPosition =
-              value && typeof value === 'object' ? value : null;
+            const next = value && typeof value === 'object' ? value : null;
+            if (
+              !next ||
+              !dropPosition ||
+              next.latitude !== dropPosition.latitude ||
+              next.longitude !== dropPosition.longitude
+            ) {
+              lastGoodPosition = null; // the anchor itself moved — don't compare the boat's next fix against the old spot
+            }
+            dropPosition = next;
           } else if (path === 'navigation.anchor.watchZone') {
             zone = value && typeof value === 'object' ? value : null;
           }
         } else if (isForeign && path === 'navigation.anchor.state') {
-          const nowForeignArmed = value === 'on';
-          if (nowForeignArmed !== foreignArmed) {
-            foreignArmed = nowForeignArmed;
-            foreignSourceLabel = nowForeignArmed ? label : null;
-            if (foreignArmed) {
+          const wasAnyForeignArmed = foreignArmedSources.size > 0;
+          if (value === 'on') {
+            foreignArmedSources.add(label);
+          } else {
+            foreignArmedSources.delete(label);
+          }
+          const isAnyForeignArmed = foreignArmedSources.size > 0;
+          if (isAnyForeignArmed !== wasAnyForeignArmed) {
+            if (isAnyForeignArmed) {
               app.setPluginStatus(
                 `Standing down — "${label}" has its own anchor watch armed`,
               );
@@ -255,9 +296,44 @@ module.exports = function (app) {
   }
 
   async function checkDragging() {
-    if (!armed || foreignArmed || !dropPosition || !zone) return;
-    const pos = app.getSelfPath('navigation.position.value');
+    if (!armed || foreignArmedSources.size > 0 || !dropPosition || !zone) {
+      return;
+    }
+    // 10s grace after arming/re-dropping — mirrors lib/main.dart's own
+    // anchorGraceOk: the drop itself (or a GPS fix settling in) shouldn't
+    // immediately read as garreo.
+    if (armedAtMs != null && Date.now() - armedAtMs < GRACE_MS) return;
+
+    // Full node, not just .value — need the timestamp to know how stale
+    // this fix actually is. A GPS feed that died an hour ago but happened
+    // to leave the boat's last-known fix sitting outside the zone would
+    // otherwise alarm forever on data nobody trusts anymore; one that died
+    // with the boat INSIDE the zone would otherwise silently never alarm
+    // again either way. Either way, a position too old to trust is treated
+    // the same as no position at all: skip this check.
+    const posNode = app.getSelfPath('navigation.position');
+    const pos = posNode && posNode.value;
     if (!pos || pos.latitude == null || pos.longitude == null) return;
+    if (posNode.timestamp) {
+      const ageMs = Date.now() - Date.parse(posNode.timestamp);
+      if (Number.isFinite(ageMs) && ageMs > POSITION_MAX_AGE_MS) return;
+    }
+
+    // GPS glitch filter — mirrors alarmAnchorFilterGlitches: a single
+    // implausible jump from the last position we actually trusted doesn't
+    // get adopted or alarmed on, the same way the app's own check ignores
+    // it rather than trusting it.
+    if (lastGoodPosition) {
+      const jump = bearingDistance(
+        lastGoodPosition.latitude,
+        lastGoodPosition.longitude,
+        pos.latitude,
+        pos.longitude,
+      ).distanceM;
+      if (jump > GLITCH_JUMP_M) return;
+    }
+    lastGoodPosition = pos;
+
     const outside = isOutsideZone(
       dropPosition.latitude,
       dropPosition.longitude,
@@ -285,12 +361,22 @@ module.exports = function (app) {
     const now = Date.now();
     if (now - lastPushAt >= minIntervalMs) {
       lastPushAt = now;
-      const vesselName =
-        (app.getSelfPath('name.value')) || 'REWIND';
+      // Fixed, plain-ASCII title — NOT interpolating the vessel name (or
+      // the em dash) in here, since ntfy.sh's Title goes out as a raw HTTP
+      // header and Node's http client rejects non-ASCII header content
+      // outright (confirmed live: `https.request` throws
+      // ERR_INVALID_CHAR synchronously for a "—" in a header value,
+      // silently failing the whole push, every time, since this was
+      // inside a Promise executor with no surrounding try/catch of its
+      // own). Same reason lib/signalk/ntfy_push.dart's Title is always a
+      // plain constant — any real charset content (vessel name included)
+      // belongs in the body instead, which has no such restriction.
+      const vesselName = app.getSelfPath('name.value') || 'REWIND';
       await sendNtfy(
+        app,
         cfg.ntfyTopic,
-        `${vesselName} — Garreando`,
-        `${message}\n(aviso del vigilante de respaldo, sin ningún dispositivo conectado)`,
+        'REWIND Panel - Garreando',
+        `${vesselName}: ${message}\n(aviso del vigilante de respaldo, sin ningún dispositivo conectado)`,
       );
     }
   }
@@ -298,12 +384,13 @@ module.exports = function (app) {
   plugin.start = function (options) {
     plugin.configuration = options || {};
     armed = false;
+    armedAtMs = null;
     dropPosition = null;
     zone = null;
-    foreignArmed = false;
-    foreignSourceLabel = null;
+    foreignArmedSources.clear();
     lastNotifKey = null;
     lastPushAt = 0;
+    lastGoodPosition = null;
 
     app.subscriptionmanager.subscribe(
       {

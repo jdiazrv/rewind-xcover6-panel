@@ -541,12 +541,22 @@ class _DashboardState extends State<Dashboard> {
       _lastPublishedAnchorNotification = notifKey;
       values.add({
         'path': 'notifications.navigation.anchor',
-        'value': {
-          'state': notifState,
-          'message': notifMessage,
-          'method': dragging ? ['sound', 'visual'] : ['visual'],
-          'timestamp': DateTime.now().toUtc().toIso8601String(),
-        },
+        // null for the 'normal' case — NOT a {state: 'normal', ...} object
+        // — is the actual Signal K convention for "no active notification
+        // here anymore" (see server/index.js's own setNotification for the
+        // same fix, applied there first). A still-present object, even
+        // with state 'normal', reads as "still active" to at least Signal
+        // K's own admin UI, so raising the anchor from THIS app could
+        // leave a stale notification visible exactly like the plugin bug
+        // this mirrors. Confirmed live 2026-09-04.
+        'value': notifState == 'normal'
+            ? null
+            : {
+                'state': notifState,
+                'message': notifMessage,
+                'method': dragging ? ['sound', 'visual'] : ['visual'],
+                'timestamp': DateTime.now().toUtc().toIso8601String(),
+              },
       });
     }
     ch.sink.add(
@@ -673,7 +683,20 @@ class _DashboardState extends State<Dashboard> {
         final armed = value == 'on';
         if (cfg.armed != armed) {
           cfg.armed = armed;
-          cfg.armedOrMovedAt = DateTime.now();
+          // NOT `cfg.armedOrMovedAt = DateTime.now()` — _publishAnchorDelta
+          // always sends state, position, and watchZone together in one
+          // batch, state first (see the values list it builds), and this
+          // ran BEFORE position/watchZone's own _isStaleAnchorEdit check —
+          // stamping "now" here meant that check compared the sender's
+          // real (necessarily slightly earlier) movedAtMs against a
+          // timestamp this device had just set to THIS INSTANT, so it
+          // rejected the position/watchZone from THE SAME MESSAGE as
+          // "stale" almost every time. A remote arm always carries a
+          // position in the same batch, and that case's own
+          // _adoptAnchorEditTime already keeps armedOrMovedAt current (off
+          // the sender's real edit time, more accurate than "now" here
+          // anyway) — so this line was both wrong and redundant. Confirmed
+          // live 2026-09-04, caught by code review before it shipped.
           changed = true;
         }
       case 'navigation.anchor.position':
@@ -864,13 +887,14 @@ class _DashboardState extends State<Dashboard> {
     _lastAnchorCheckLat = lat;
     _lastAnchorCheckLon = lon;
     final r = bearingDistanceMeters(dropLat, dropLon, lat, lon);
-    if (r.distanceM > cfg.radiusM) return true;
-    if (cfg.shape != 'sector') return false;
-    final start = cfg.sectorStartDeg, end = cfg.sectorEndDeg;
-    if (start == null || end == null) return false;
-    final span = (end - start + 360) % 360;
-    final rel = (r.bearingDeg - start + 360) % 360;
-    return rel > span;
+    return isOutsideWatchZone(
+      distanceM: r.distanceM,
+      radiusM: cfg.radiusM,
+      shape: cfg.shape,
+      bearingFromDropDeg: r.bearingDeg,
+      sectorStartDeg: cfg.sectorStartDeg,
+      sectorEndDeg: cfg.sectorEndDeg,
+    );
   }
 
   void _routeNotification(String path, dynamic value) {
@@ -7886,8 +7910,17 @@ class _DashboardState extends State<Dashboard> {
       unawaited(_publishAnchorDelta());
       _syncAnchorPublishTimer();
     },
-    ownLat: signalK.latitude,
-    ownLon: signalK.longitude,
+    // Gated on connected, NOT just non-null — signalK.latitude/longitude
+    // can still hold a moment-old value right after a disconnect (nothing
+    // clears them until the next _connectSignalK() actually runs). An
+    // ungated stale fix here meant _hasSkPosition stayed true through a
+    // real disconnect, which blocked both the screen's own device-GPS
+    // fallback offer and its distance/outside readout from ever
+    // reflecting that the position was no longer live. Reported live
+    // 2026-09-04. Mirrors the exact same guard _isOutsideAnchorZone
+    // already uses for the alarm engine itself.
+    ownLat: signalK.connected ? signalK.latitude : null,
+    ownLon: signalK.connected ? signalK.longitude : null,
     skConnected: signalK.connected,
     // Deliberately just heading, not the usual `?? _freshCog` fallback used
     // elsewhere — the anchor screen's own fallback (bow pointing at the

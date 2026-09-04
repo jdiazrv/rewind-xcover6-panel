@@ -890,10 +890,15 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       widget.onEffectivePositionChanged(lat, lon);
     });
     final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
-    final distanceM =
+    // Bearing FROM the drop point TO the boat — same direction
+    // bearingDistanceMeters(dropLat, dropLon, lat, lon) gives main.dart's
+    // own _isOutsideAnchorZone for its sector check, so this screen's
+    // "outside" verdict below can use the identical convention.
+    final fromDrop =
         (lat != null && lon != null && dropLat != null && dropLon != null)
-        ? bearingDistanceMeters(dropLat, dropLon, lat, lon).distanceM
+        ? bearingDistanceMeters(dropLat, dropLon, lat, lon)
         : null;
+    final distanceM = fromDrop?.distanceM;
     // True bearing from the bow to the anchor — hoekens' navigation.anchor.
     // bearingTrue equivalent, shown alongside distance/radius so the status
     // card carries the same parameters the plugin used to publish.
@@ -901,7 +906,21 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         (lat != null && lon != null && dropLat != null && dropLon != null)
         ? bearingDistanceMeters(lat, lon, dropLat, dropLon).bearingDeg
         : null;
-    final outside = distanceM != null && distanceM > widget.config.radiusM;
+    // isOutsideWatchZone (models.dart), NOT a bare distance>radius check —
+    // for a sector watch, that alone missed being outside the arc while
+    // still inside the radius, so this screen could show a calm
+    // "FONDEADO" while the real alarm (main.dart's _isOutsideAnchorZone,
+    // same function) correctly fired. Reported live 2026-09-04.
+    final outside = distanceM != null
+        ? isOutsideWatchZone(
+            distanceM: distanceM,
+            radiusM: widget.config.radiusM,
+            shape: widget.config.shape,
+            bearingFromDropDeg: fromDrop?.bearingDeg,
+            sectorStartDeg: widget.config.sectorStartDeg,
+            sectorEndDeg: widget.config.sectorEndDeg,
+          )
+        : false;
     // Mirrors main.dart's own 10s grace window on the drag alarm (must
     // match — see _isOutsideAnchorZone) so the countdown shown here is
     // actually counting down to when the alarm can really fire, not some
