@@ -66,8 +66,17 @@ function isOutsideZone(dropLat, dropLon, lat, lon, zone) {
   const radius = Number(zone && zone.radius);
   if (!Number.isFinite(radius) || distanceM > radius) return true;
   if (!zone || zone.type !== 'sector') return false;
-  const start = Number(zone.startAngle);
-  const end = Number(zone.endAngle);
+  // startDeg/endDeg, NOT startAngle/endAngle — matching what
+  // lib/main.dart's _publishAnchorDelta actually puts in
+  // navigation.anchor.watchZone (hoekens-anchor-alarm's OWN sector zone
+  // uses startAngle/endAngle instead, easy to mix up — this plugin only
+  // ever reads OUR app's own published shape, never hoekens'). Wrong
+  // field names here meant a sector watch's arc was silently never
+  // enforced — every check fell through to "no valid angles, treat as
+  // inside" — until this was caught by reading the actual publish code
+  // directly. Reported live 2026-09-04.
+  const start = Number(zone.startDeg);
+  const end = Number(zone.endDeg);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
   const span = ((end - start) % 360 + 360) % 360;
   const rel = ((bearingDeg - start) % 360 + 360) % 360;
@@ -156,7 +165,7 @@ module.exports = function (app) {
   let checkTimer = null;
   let armed = false;
   let dropPosition = null; // {latitude, longitude}
-  let zone = null; // {type, radius, startAngle?, endAngle?}
+  let zone = null; // {type, radius, startDeg?, endDeg?}
   let foreignArmed = false;
   let foreignSourceLabel = null;
   let lastNotifKey = null; // `${state}|${message}` — dedup only, not a lock

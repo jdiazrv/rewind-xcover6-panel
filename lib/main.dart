@@ -435,7 +435,22 @@ class _DashboardState extends State<Dashboard> {
     Map<String, dynamic>? position;
     Map<String, dynamic>? watchZone;
     if (cfg.armed && cfg.dropLat != null && cfg.dropLon != null) {
-      position = {'latitude': cfg.dropLat, 'longitude': cfg.dropLon};
+      // movedAtMs is when THIS VALUE last actually changed (armedOrMovedAt),
+      // not when this particular delta was sent — every armed device
+      // republishes its own local copy every 5s (_syncAnchorPublishTimer),
+      // so without this a device holding a stale copy would, on its next
+      // tick, overwrite a genuinely newer edit from elsewhere just by
+      // publishing "more recently". _applyRemoteAnchorState below only
+      // adopts an incoming position/watchZone when its movedAtMs is at
+      // least as new as this device's own. Reported live 2026-09-04
+      // ("modifico en el dispositivo pero a los 5 segundos vuelve a la
+      // posición anterior").
+      final movedAtMs = cfg.armedOrMovedAt?.millisecondsSinceEpoch;
+      position = {
+        'latitude': cfg.dropLat,
+        'longitude': cfg.dropLon,
+        'movedAtMs': ?movedAtMs,
+      };
       currentRadius = cfg.radiusM;
       maxRadius = cfg.initialRadiusM ?? cfg.radiusM;
       watchZone = {
@@ -443,6 +458,7 @@ class _DashboardState extends State<Dashboard> {
         'radius': cfg.radiusM,
         if (cfg.shape == 'sector') 'startDeg': cfg.sectorStartDeg,
         if (cfg.shape == 'sector') 'endDeg': cfg.sectorEndDeg,
+        'movedAtMs': ?movedAtMs,
       };
       final lat = _anchorEffectiveLat ?? signalK.latitude;
       final lon = _anchorEffectiveLon ?? signalK.longitude;
@@ -621,6 +637,34 @@ class _DashboardState extends State<Dashboard> {
   // logic actually read, so anchoring from one install shows as anchored
   // on every other install too. Called once per path per incoming delta
   // item (see _onSignalKMessage) — cheap, and each path is independent.
+  // A stale device's own periodic republish (_syncAnchorPublishTimer fires
+  // every 5s on EVERY currently-armed install) carries whatever position/
+  // radius IT last knew locally — without this check, that stale republish
+  // arriving after a genuinely newer edit from elsewhere would win purely
+  // by being "the most recent message", reverting the fresh edit. Reported
+  // live 2026-09-04 ("modifico... a los 5 segundos vuelve a la posición
+  // anterior"). Only rejects when BOTH timestamps are known and the
+  // incoming one is strictly older — a missing timestamp (shouldn't
+  // happen once every install is on this version, but an older install
+  // during a mixed-version rollout wouldn't send one) is treated as
+  // "trust it", the old behavior.
+  bool _isStaleAnchorEdit(AnchorConfig cfg, int? incomingMovedAtMs) {
+    if (incomingMovedAtMs == null || cfg.armedOrMovedAt == null) return false;
+    return incomingMovedAtMs < cfg.armedOrMovedAt!.millisecondsSinceEpoch;
+  }
+
+  // Adopts movedAtMs into cfg.armedOrMovedAt when it's newer than what we
+  // already have, so this device's OWN next republish carries the correct,
+  // now-synced last-changed time too — not just the position/radius values
+  // themselves.
+  void _adoptAnchorEditTime(AnchorConfig cfg, int? incomingMovedAtMs) {
+    if (incomingMovedAtMs == null) return;
+    final incoming = DateTime.fromMillisecondsSinceEpoch(incomingMovedAtMs);
+    if (cfg.armedOrMovedAt == null || incoming.isAfter(cfg.armedOrMovedAt!)) {
+      cfg.armedOrMovedAt = incoming;
+    }
+  }
+
   bool _applyRemoteAnchorState(String path, dynamic value) {
     final cfg = settings.anchorConfig;
     var changed = false;
@@ -634,6 +678,8 @@ class _DashboardState extends State<Dashboard> {
         }
       case 'navigation.anchor.position':
         if (value is Map) {
+          final movedAtMs = value['movedAtMs'] as int?;
+          if (_isStaleAnchorEdit(cfg, movedAtMs)) break;
           final lat = _num(value['latitude']);
           final lon = _num(value['longitude']);
           if (lat != null && lon != null &&
@@ -642,9 +688,12 @@ class _DashboardState extends State<Dashboard> {
             cfg.dropLon = lon;
             changed = true;
           }
+          _adoptAnchorEditTime(cfg, movedAtMs);
         }
       case 'navigation.anchor.watchZone':
         if (value is Map) {
+          final movedAtMs = value['movedAtMs'] as int?;
+          if (_isStaleAnchorEdit(cfg, movedAtMs)) break;
           final shape = value['type'] as String?;
           final radius = _num(value['radius']);
           if (shape != null && cfg.shape != shape) {
@@ -662,6 +711,7 @@ class _DashboardState extends State<Dashboard> {
             cfg.sectorEndDeg = endDeg;
             changed = true;
           }
+          _adoptAnchorEditTime(cfg, movedAtMs);
         }
     }
     if (changed) {
@@ -2699,8 +2749,25 @@ class _DashboardState extends State<Dashboard> {
       _sendSignalKSubscription();
       // Resumes publishing navigation.anchor.* if the watch was already
       // armed from a previous session (app restart, reconnect) — not just
-      // on the next config change from the ANC screen itself.
-      unawaited(_publishAnchorDelta());
+      // on the next config change from the ANC screen itself. BUT: this
+      // device's own local anchorConfig could be stale (it may have been
+      // offline while a DIFFERENT device moved the anchor, changed the
+      // radius, or raised it) — publishing it immediately would win the
+      // "last write" race purely by being the one that happened to
+      // reconnect just now, clobbering a genuinely newer change from
+      // wherever else made it. The subscribe request just above triggers
+      // Signal K to replay the CURRENT retained value for every
+      // subscribed path, which — if some other device is actually the
+      // latest author — arrives as a normal delta and updates this
+      // device's local anchorConfig via _applyRemoteAnchorState before
+      // this fires. Waiting briefly for that replay first means the
+      // republish below only ever reaffirms whatever turns out to
+      // actually be current, on any platform/device, rather than a stale
+      // local copy. Reported live 2026-09-04 ("el último que modifica...
+      // es el que modifica ubicación/radio/levar/fondear").
+      unawaited(
+        Future.delayed(const Duration(seconds: 2), _publishAnchorDelta),
+      );
       unawaited(_syncOwnAnchorPluginConfig());
       _syncAnchorPublishTimer();
       // A fresh connection always starts unsubscribed from AIS — re-derive
