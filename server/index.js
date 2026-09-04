@@ -162,11 +162,13 @@ module.exports = function (app) {
         type: 'number',
         title: 'How often to check the boat against the watch zone (seconds)',
         default: 15,
+        minimum: 5,
       },
       pushMinIntervalSec: {
         type: 'number',
         title: 'Minimum seconds between repeated ntfy pushes while dragging',
         default: 60,
+        minimum: 10,
       },
     },
   };
@@ -191,8 +193,16 @@ module.exports = function (app) {
   // implausible jump gets ignored rather than trusted as "the boat is now
   // there", the same way the app's own check does.
   let lastGoodPosition = null;
+  // A jump beyond GLITCH_JUMP_M that hasn't been corroborated yet — see
+  // its use in checkDragging below. {lat, lon, streak} | null.
+  let pendingGlitch = null;
   const GRACE_MS = 10000;
   const GLITCH_JUMP_M = 50; // matches SettingsModel.alarmAnchorGlitchJumpM's default
+  // Consecutive readings that must agree with EACH OTHER (not with the
+  // stale baseline) before a jump past GLITCH_JUMP_M is trusted as real
+  // movement rather than a one-off GPS glitch.
+  const GLITCH_CONFIRM_STREAK = 2;
+  const GLITCH_CONFIRM_TOLERANCE_M = 30;
   const POSITION_MAX_AGE_MS = 60000;
 
   function sourceLabelOf(update) {
@@ -254,6 +264,7 @@ module.exports = function (app) {
               if (armed) {
                 armedAtMs = Date.now();
                 lastGoodPosition = null; // fresh watch — don't compare against wherever the last one was
+                pendingGlitch = null;
               } else {
                 clearAlarmIfAny('disarmed');
               }
@@ -267,6 +278,7 @@ module.exports = function (app) {
               next.longitude !== dropPosition.longitude
             ) {
               lastGoodPosition = null; // the anchor itself moved — don't compare the boat's next fix against the old spot
+              pendingGlitch = null;
             }
             dropPosition = next;
           } else if (path === 'navigation.anchor.watchZone') {
@@ -305,24 +317,44 @@ module.exports = function (app) {
     if (armedAtMs != null && Date.now() - armedAtMs < GRACE_MS) return;
 
     // Full node, not just .value — need the timestamp to know how stale
-    // this fix actually is. A GPS feed that died an hour ago but happened
-    // to leave the boat's last-known fix sitting outside the zone would
-    // otherwise alarm forever on data nobody trusts anymore; one that died
-    // with the boat INSIDE the zone would otherwise silently never alarm
-    // again either way. Either way, a position too old to trust is treated
-    // the same as no position at all: skip this check.
+    // this fix actually is. A position too old to trust is treated the
+    // same as no position at all for the containment check below — but
+    // unlike before, this no longer just silently stops checking: this
+    // plugin's whole reason to exist is to keep watching when nothing
+    // else is, so losing its own position feed is exactly the failure
+    // mode it must not go quiet about. Verified real via external audit,
+    // fixed 2026-09-04.
     const posNode = app.getSelfPath('navigation.position');
     const pos = posNode && posNode.value;
-    if (!pos || pos.latitude == null || pos.longitude == null) return;
-    if (posNode.timestamp) {
-      const ageMs = Date.now() - Date.parse(posNode.timestamp);
-      if (Number.isFinite(ageMs) && ageMs > POSITION_MAX_AGE_MS) return;
+    const posAgeMs =
+      posNode && posNode.timestamp
+        ? Date.now() - Date.parse(posNode.timestamp)
+        : null;
+    const positionMissing = !pos || pos.latitude == null || pos.longitude == null;
+    const positionStale =
+      !positionMissing && Number.isFinite(posAgeMs) && posAgeMs > POSITION_MAX_AGE_MS;
+    if (positionMissing || positionStale) {
+      setNotification(
+        'alert',
+        positionMissing
+          ? 'Vigilante de fondeo: sin posición del barco'
+          : `Vigilante de fondeo: posición obsoleta (${Math.round(posAgeMs / 1000)}s)`,
+      );
+      return;
     }
 
     // GPS glitch filter — mirrors alarmAnchorFilterGlitches: a single
-    // implausible jump from the last position we actually trusted doesn't
-    // get adopted or alarmed on, the same way the app's own check ignores
-    // it rather than trusting it.
+    // implausible jump from the last position we actually trusted isn't
+    // adopted immediately, since a bad GPS fix can produce exactly this.
+    // But a genuine sustained drag ALSO produces exactly this on its first
+    // reading — rejecting every jump forever without ever re-baselining
+    // left the alarm permanently blind to any real drag whose first fix
+    // happened to land more than GLITCH_JUMP_M away, which is precisely a
+    // severe garreo. Now requires GLITCH_CONFIRM_STREAK consecutive
+    // readings that agree with EACH OTHER (not with the stale baseline)
+    // before trusting the new position — a real drag keeps producing
+    // readings near where the boat actually now is, a one-off glitch
+    // doesn't. Verified real via external audit, fixed 2026-09-04.
     if (lastGoodPosition) {
       const jump = bearingDistance(
         lastGoodPosition.latitude,
@@ -330,7 +362,21 @@ module.exports = function (app) {
         pos.latitude,
         pos.longitude,
       ).distanceM;
-      if (jump > GLITCH_JUMP_M) return;
+      if (jump > GLITCH_JUMP_M) {
+        if (
+          pendingGlitch &&
+          bearingDistance(pendingGlitch.lat, pendingGlitch.lon, pos.latitude, pos.longitude)
+            .distanceM <= GLITCH_CONFIRM_TOLERANCE_M
+        ) {
+          pendingGlitch.streak++;
+        } else {
+          pendingGlitch = { lat: pos.latitude, lon: pos.longitude, streak: 1 };
+        }
+        if (pendingGlitch.streak < GLITCH_CONFIRM_STREAK) return;
+        pendingGlitch = null; // confirmed — trust it from here on
+      } else {
+        pendingGlitch = null; // agrees with the trusted baseline again
+      }
     }
     lastGoodPosition = pos;
 
@@ -357,7 +403,12 @@ module.exports = function (app) {
     setNotification('emergency', message);
 
     const cfg = plugin.configuration || {};
-    const minIntervalMs = 1000 * (Number(cfg.pushMinIntervalSec) || 60);
+    // Clamped, not just schema-hinted — the schema's `minimum` only guides
+    // Signal K's own admin form, it doesn't stop a hand-edited config file
+    // (or one saved before this schema existed) from carrying a zero or
+    // negative value, which would turn this into a near-continuous push
+    // loop. Verified real via external audit, fixed 2026-09-04.
+    const minIntervalMs = 1000 * Math.max(10, Number(cfg.pushMinIntervalSec) || 60);
     const now = Date.now();
     if (now - lastPushAt >= minIntervalMs) {
       lastPushAt = now;
@@ -391,6 +442,7 @@ module.exports = function (app) {
     lastNotifKey = null;
     lastPushAt = 0;
     lastGoodPosition = null;
+    pendingGlitch = null;
 
     app.subscriptionmanager.subscribe(
       {
@@ -402,8 +454,11 @@ module.exports = function (app) {
       handleAnchorDelta,
     );
 
+    // Same clamp as pushMinIntervalSec above — a zero/negative
+    // checkIntervalSec would otherwise create a near-continuous setInterval
+    // loop.
     const intervalMs =
-      1000 * (Number(plugin.configuration.checkIntervalSec) || 15);
+      1000 * Math.max(5, Number(plugin.configuration.checkIntervalSec) || 15);
     checkTimer = setInterval(() => {
       checkDragging().catch((err) => app.debug(String(err)));
     }, intervalMs);

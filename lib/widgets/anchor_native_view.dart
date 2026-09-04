@@ -280,7 +280,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 1.10;
             if (required > c.radiusM) c.radiusM = required;
           }
-          c.armedOrMovedAt = DateTime.now();
+          c.armedOrMovedAt = skNow();
         });
       } else if (mode == 'radius' && _dragRadiusM != null) {
         _updateConfig((c) {
@@ -294,7 +294,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
               c.sectorEndDeg = _dragSectorEndDeg! % 360;
             }
           }
-          c.armedOrMovedAt = DateTime.now();
+          c.armedOrMovedAt = skNow();
         });
       }
       _editMode = null;
@@ -689,7 +689,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.initialRadiusM = c.radiusM;
       // 10s grace period before the drag alarm can fire — the drop itself
       // (or a GPS fix settling in) shouldn't immediately read as garreo.
-      c.armedOrMovedAt = DateTime.now();
+      c.armedOrMovedAt = skNow();
     });
   }
 
@@ -747,7 +747,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.dropLon = dest.longitude;
       c.dropDepthM ??= widget.depthM;
       c.droppedAt ??= DateTime.now();
-      c.armedOrMovedAt = DateTime.now();
+      c.armedOrMovedAt = skNow();
     });
   }
 

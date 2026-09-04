@@ -70,41 +70,50 @@ part 'widgets/saved_server_row.dart';
 // screen the error widget was mounted under, when Flutter reports one.
 String? lastCrashInfo;
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-
-  FlutterError.onError = (details) {
-    lastCrashInfo =
-        '${DateTime.now()}\n${details.exceptionAsString()}\n${details.stack}';
-    FlutterError.presentError(details);
-  };
-  // A build error's default ErrorWidget shows nothing useful in a release
-  // build (just a blank/grey box) — this is exactly the "crash with no
-  // explanation" complaint, most often hit on ANC given how much of that
-  // screen's state (drag handles, live geometry) can go momentarily
-  // inconsistent. Show the actual message inline instead.
-  ErrorWidget.builder = (details) {
-    lastCrashInfo =
-        '${DateTime.now()}\n${details.exceptionAsString()}\n${details.stack}';
-    return Container(
-      color: const Color(0xff3a0a0a),
-      padding: const EdgeInsets.all(16),
-      alignment: Alignment.center,
-      child: Text(
-        'Error de pantalla:\n${details.exceptionAsString()}',
-        style: const TextStyle(color: Colors.white, fontSize: 13),
-        textAlign: TextAlign.center,
-      ),
-    );
-  };
-
+void main() {
+  // Everything — including ensureInitialized() and the async orientation/
+  // system-UI setup — now runs INSIDE the guarded zone, not just runApp().
+  // Previously ensureInitialized() ran in the default zone while runApp()
+  // ran in a different (guarded) one; Flutter's web engine logs this as a
+  // "Zone mismatch" and it can make async error handling behave
+  // unpredictably. Verified via external audit, confirmed real 2026-09-04.
   runZonedGuarded(
-    () => runApp(const RewindApp()),
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
+      FlutterError.onError = (details) {
+        lastCrashInfo =
+            '${DateTime.now()}\n${details.exceptionAsString()}\n${details.stack}';
+        FlutterError.presentError(details);
+      };
+      // A build error's default ErrorWidget shows nothing useful in a
+      // release build (just a blank/grey box) — this is exactly the
+      // "crash with no explanation" complaint, most often hit on ANC given
+      // how much of that screen's state (drag handles, live geometry) can
+      // go momentarily inconsistent. Show the actual message inline
+      // instead.
+      ErrorWidget.builder = (details) {
+        lastCrashInfo =
+            '${DateTime.now()}\n${details.exceptionAsString()}\n${details.stack}';
+        return Container(
+          color: const Color(0xff3a0a0a),
+          padding: const EdgeInsets.all(16),
+          alignment: Alignment.center,
+          child: Text(
+            'Error de pantalla:\n${details.exceptionAsString()}',
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+            textAlign: TextAlign.center,
+          ),
+        );
+      };
+
+      runApp(const RewindApp());
+    },
     (error, stack) {
       lastCrashInfo = '${DateTime.now()}\n$error\n$stack';
       debugPrint('[UNCAUGHT] $error\n$stack');
@@ -180,6 +189,19 @@ class _DashboardState extends State<Dashboard> {
   // (needs a hard data reset) apart from "reconnecting to the SAME one
   // after a blip" (must NOT wipe/flash the UI — see _connectSignalK).
   String? _lastConnectHostPort;
+  // The .local name currently configured (settings.host itself gets
+  // overwritten with whatever IP it resolves to — see _connectSignalK's
+  // mDNS block), and the IP that name last resolved to. Together these
+  // let every reconnect re-resolve fresh instead of trusting the first
+  // resolved IP forever: if DHCP later hands that IP to a different
+  // device, the app used to keep hammering it with no way back to the
+  // original name. Both null once settings.host is set to something that
+  // is neither our own remembered .local name nor the IP we ourselves
+  // last resolved it to (a manual edit, a saved-server switch) — stops
+  // "helpfully" re-resolving a name that's no longer actually configured.
+  // Verified real via external audit, fixed 2026-09-04.
+  String? _mdnsOriginalHost;
+  String? _mdnsResolvedHost;
   // Debounces the connected↔disconnected status flip: a brief drop that
   // reconnects on its own within this window (a WiFi roam blip, a flaky
   // link like Tailscale over a bad cell connection) shouldn't visibly
@@ -332,6 +354,11 @@ class _DashboardState extends State<Dashboard> {
   bool _anchorIsDragging = false;
   double? _anchorDragSpeedMPerMin;
   Timer? _anchorPublishTimer;
+  // Debounces CFG > Alarmas' ntfy topic field pushing to the server plugin
+  // — see its onChanged handler. Without this, the plugin's own copy of
+  // the topic only ever refreshed on the next reconnect, so the backup
+  // watchdog could keep pushing to a topic the user had already changed.
+  Timer? _ntfyTopicSyncDebounce;
   // Last notification actually sent — the notification itself is only
   // re-published when this changes, not every 5s tick like the live
   // telemetry values. Publishing an identical "Watching" notification with
@@ -847,6 +874,13 @@ class _DashboardState extends State<Dashboard> {
   // big "glitch" and silently disable the drag alarm until restart.
   double? _lastAnchorCheckLat, _lastAnchorCheckLon;
   DateTime? _lastAnchorCheckArmedAt;
+  // A jump beyond alarmAnchorGlitchJumpM that hasn't been corroborated by a
+  // further, mutually-agreeing reading yet — mirrors server/index.js's own
+  // pendingGlitch. See its use in _isOutsideAnchorZone below.
+  double? _pendingGlitchLat, _pendingGlitchLon;
+  int _pendingGlitchStreak = 0;
+  static const _glitchConfirmStreak = 2;
+  static const _glitchConfirmToleranceM = 30.0;
   // Set once a real position (Signal K or the device-GPS fallback) has
   // actually been seen since the app started. The "fondeado sin posición"
   // alarm below must fire when a position was there and got lost — a real
@@ -883,6 +917,9 @@ class _DashboardState extends State<Dashboard> {
       _lastAnchorCheckArmedAt = cfg.armedOrMovedAt;
       _lastAnchorCheckLat = null;
       _lastAnchorCheckLon = null;
+      _pendingGlitchLat = null;
+      _pendingGlitchLon = null;
+      _pendingGlitchStreak = 0;
     }
     if (settings.alarmAnchorFilterGlitches &&
         _lastAnchorCheckLat != null &&
@@ -894,7 +931,39 @@ class _DashboardState extends State<Dashboard> {
         lon,
       ).distanceM;
       if (jump > settings.alarmAnchorGlitchJumpM) {
-        return false; // suspicious single-fix jump — don't trust it, don't adopt it
+        // A single implausible jump could be a GPS glitch — OR the first
+        // reading of a genuine sustained drag, which ALSO looks exactly
+        // like this. Rejecting every such jump forever (without ever
+        // re-baselining) left the alarm permanently blind to any real
+        // drag whose first fix landed more than alarmAnchorGlitchJumpM
+        // away — precisely a severe garreo. Now requires
+        // _glitchConfirmStreak consecutive readings that agree with EACH
+        // OTHER (not with the stale baseline) before trusting the new
+        // position: a real drag keeps producing readings near where the
+        // boat actually now is, a one-off glitch doesn't. Verified real
+        // via external audit, fixed 2026-09-04.
+        if (_pendingGlitchLat != null &&
+            bearingDistanceMeters(
+                  _pendingGlitchLat!,
+                  _pendingGlitchLon!,
+                  lat,
+                  lon,
+                ).distanceM <=
+                _glitchConfirmToleranceM) {
+          _pendingGlitchStreak++;
+        } else {
+          _pendingGlitchLat = lat;
+          _pendingGlitchLon = lon;
+          _pendingGlitchStreak = 1;
+        }
+        if (_pendingGlitchStreak < _glitchConfirmStreak) {
+          return false; // not yet corroborated — don't trust it, don't adopt it
+        }
+        _pendingGlitchLat = null;
+        _pendingGlitchLon = null;
+        _pendingGlitchStreak = 0; // confirmed — fall through and adopt it
+      } else {
+        _pendingGlitchStreak = 0; // agrees with the trusted baseline again
       }
     }
     _lastAnchorCheckLat = lat;
@@ -2605,6 +2674,7 @@ class _DashboardState extends State<Dashboard> {
                 : {'Authorization': 'Basic ${settings.authBase64}'},
           )
           .timeout(const Duration(seconds: 8));
+      skRecordServerDate(response);
       if (response.statusCode != 200) return;
       final name = jsonDecode(response.body);
       if (name is String && name.isNotEmpty && mounted) {
@@ -2741,17 +2811,40 @@ class _DashboardState extends State<Dashboard> {
     // ourselves via mDNS and swap settings.host for the real IP once
     // known — every other place that reads settings.host (REST calls,
     // InfluxDB, AIS...) then just works with zero further changes.
-    if (settings.host.toLowerCase().endsWith('.local')) {
-      setState(() => signalK.status = 'Resolviendo ${settings.host}…');
-      final resolved = await resolveMdnsHost(settings.host);
+    //
+    // Re-resolved on EVERY connect, not just once — a router's DHCP can
+    // hand the same .local name's IP to a different device later, and the
+    // app used to just keep reconnecting to that now-stale IP forever with
+    // no way back to the original name (settings.host itself no longer
+    // even looked like a .local name to re-trigger this block). See
+    // _mdnsOriginalHost/_mdnsResolvedHost's own doc comment. Verified real
+    // via external audit, fixed 2026-09-04.
+    final hostLower = settings.host.toLowerCase();
+    if (hostLower.endsWith('.local')) {
+      _mdnsOriginalHost = settings.host;
+      _mdnsResolvedHost = null;
+    } else if (settings.host != _mdnsResolvedHost) {
+      // Not our own remembered name, and not the IP we ourselves last
+      // resolved it to either — settings.host was pointed somewhere else
+      // entirely (a manual edit, a saved-server switch). Stop trying to
+      // "helpfully" re-resolve a name that's no longer what's configured.
+      _mdnsOriginalHost = null;
+      _mdnsResolvedHost = null;
+    }
+    if (_mdnsOriginalHost != null) {
+      setState(() => signalK.status = 'Resolviendo $_mdnsOriginalHost…');
+      final resolved = await resolveMdnsHost(_mdnsOriginalHost!);
       if (myGeneration != _connectGeneration) return; // superseded meanwhile
       if (resolved != null) {
-        debugPrint('[SK] mDNS resolved ${settings.host} -> $resolved');
-        settings.host = resolved;
-        _hostController?.text = settings.host;
-        unawaited(_saveSettings());
+        _mdnsResolvedHost = resolved;
+        if (resolved != settings.host) {
+          debugPrint('[SK] mDNS resolved $_mdnsOriginalHost -> $resolved');
+          settings.host = resolved;
+          _hostController?.text = settings.host;
+          unawaited(_saveSettings());
+        }
       } else {
-        debugPrint('[SK] mDNS resolution failed for ${settings.host}');
+        debugPrint('[SK] mDNS resolution failed for $_mdnsOriginalHost');
       }
     }
     debugPrint(
@@ -4196,6 +4289,7 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer?.cancel();
     _staleWatchdog?.cancel();
     _anchorPublishTimer?.cancel();
+    _ntfyTopicSyncDebounce?.cancel();
     _anchorPublishChannel?.sink.close();
     _phoneHeelTracker?.stop();
     channel?.sink.close();
@@ -8270,9 +8364,16 @@ class _DashboardState extends State<Dashboard> {
                   // ── Tab: Conexión (Signal K) ─────────────────────────────────────
                   SingleChildScrollView(
                     padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
+                    // Capped like CFG > Alarmas' own form — left
+                    // unconstrained, these fields stretched across a
+                    // tablet's full landscape width, leaving a lot of
+                    // empty space instead of reading as a form. Reported
+                    // via external audit, fixed 2026-09-04.
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 480),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                         if (_isSignalKWebapp) ...[
                           const Text('SIGNAL K', style: lbl),
                           gap,
@@ -8601,6 +8702,7 @@ class _DashboardState extends State<Dashboard> {
                           ),
                         ],
                       ],
+                      ),
                     ),
                   ),
                   // ── Tab: Sensores ──────────────────────────────────────────────────
@@ -9107,6 +9209,19 @@ class _DashboardState extends State<Dashboard> {
                                 onChanged: (v) {
                                   settings.ntfyTopic = v;
                                   unawaited(_saveSettings());
+                                  // Reported live 2026-09-04: changing the
+                                  // topic here didn't reach the server
+                                  // plugin's own backup watchdog until the
+                                  // next reconnect. Debounced (not synced
+                                  // on every keystroke) since this is a
+                                  // REST call to the boat's own server.
+                                  _ntfyTopicSyncDebounce?.cancel();
+                                  _ntfyTopicSyncDebounce = Timer(
+                                    const Duration(seconds: 1),
+                                    () => unawaited(
+                                      _syncOwnAnchorPluginConfig(),
+                                    ),
+                                  );
                                 },
                               ),
                               const SizedBox(height: 10),

@@ -1,10 +1,82 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import 'attitude_sensor.dart';
 import 'data_api.dart';
 import 'theme.dart';
+
+// How far ahead/behind the connected Signal K server's own clock this
+// device's clock is (server − device) — refreshed opportunistically from
+// the `Date` response header on ordinary REST calls (see main.dart's
+// _fetchVesselName, the call site of skRecordServerDate). The anchor
+// watch's cross-device "last write wins" arbitration
+// (AnchorConfig.armedOrMovedAt, set from both main.dart and
+// anchor_native_view.dart) stamps edits with skNow() instead of a raw
+// DateTime.now(), so two devices whose own clocks disagree still order
+// their edits consistently against the ONE server clock they both
+// actually talk to, rather than against each other's potentially-skewed
+// local time. Lives here (not main.dart) so anchor_native_view.dart — a
+// separate library that only imports models.dart/theme.dart, not a `part
+// of` file — can reach it too. Verified real via external audit, fixed
+// 2026-09-04.
+Duration skClockOffset = Duration.zero;
+DateTime skNow() => DateTime.now().toUtc().add(skClockOffset);
+
+// RFC 7231 preferred HTTP-date format only (what every HTTP server this
+// app talks to actually sends, including Signal K's), e.g.
+// "Sun, 06 Nov 1994 08:49:37 GMT" — not a general RFC 7231 parser (the
+// obsolete asctime()/RFC 850 alternate forms are never seen in practice
+// here), and deliberately not using dart:io's HttpDate.parse, which isn't
+// available on web.
+final _httpDateRe = RegExp(
+  r'^\w+, (\d{2}) (\w{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$',
+);
+const _httpDateMonths = {
+  'Jan': 1,
+  'Feb': 2,
+  'Mar': 3,
+  'Apr': 4,
+  'May': 5,
+  'Jun': 6,
+  'Jul': 7,
+  'Aug': 8,
+  'Sep': 9,
+  'Oct': 10,
+  'Nov': 11,
+  'Dec': 12,
+};
+DateTime? _parseHttpDate(String s) {
+  final m = _httpDateRe.firstMatch(s.trim());
+  if (m == null) return null;
+  final month = _httpDateMonths[m.group(2)];
+  if (month == null) return null;
+  return DateTime.utc(
+    int.parse(m.group(3)!),
+    month,
+    int.parse(m.group(1)!),
+    int.parse(m.group(4)!),
+    int.parse(m.group(5)!),
+    int.parse(m.group(6)!),
+  );
+}
+
+// Updates skClockOffset from an HTTP response's `Date` header, when
+// present and parseable — call sites are ordinary REST calls this app
+// already makes (see _fetchVesselName), not a dedicated round trip of its
+// own. Second-precision only (HTTP dates carry no finer resolution) and
+// ignores request/response latency entirely — nowhere near NTP-grade, but
+// easily good enough to correct the many-minutes-to-hours clock drift that
+// actually causes cross-device anchor conflicts, at zero extra network
+// cost.
+void skRecordServerDate(http.BaseResponse response) {
+  final raw = response.headers['date'];
+  if (raw == null) return;
+  final serverNow = _parseHttpDate(raw);
+  if (serverNow == null) return;
+  skClockOffset = serverNow.difference(DateTime.now().toUtc());
+}
 
 /// Great-circle bearing/distance between two points — shared by the AIS
 /// radar (ais_view.dart, in nautical miles) and the native anchor watch

@@ -54,18 +54,55 @@ class PlatformWebView extends StatefulWidget {
 
 class _PlatformWebViewState extends State<PlatformWebView> {
   late final WebViewController _controller;
+  // The Signal K origin this WebView is currently pointed at — checked
+  // against on every navigation (see onNavigationRequest below), and kept
+  // in sync with widget.url whenever that changes (didUpdateWidget), e.g.
+  // switching Signal K servers.
+  String? _allowedOrigin;
+
+  static String? _originOf(String url) {
+    try {
+      final uri = Uri.parse(url);
+      if (!uri.hasAuthority) return null;
+      return uri.origin;
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    _allowedOrigin = _originOf(widget.url);
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (_) => widget.onPageStarted?.call(),
-          onPageFinished: (_) {
-            _loginIfConfigured();
+          onPageFinished: (url) {
+            // Belt-and-suspenders alongside onNavigationRequest below:
+            // only ever inject the Signal K password into a page actually
+            // served by that same origin. See _loginIfConfigured's own doc
+            // comment for why this matters.
+            if (_allowedOrigin == null || _originOf(url) == _allowedOrigin) {
+              _loginIfConfigured();
+            }
             widget.onPageFinished?.call();
+          },
+          // Freeboard (or whatever's embedded here) is allowed to navigate
+          // freely WITHIN its own Signal K origin — but never off it. Left
+          // unrestricted before, a redirect or an external link the
+          // embedded page opens could land the credential-carrying fetch
+          // in _loginIfConfigured below against a completely different
+          // origin's own /signalk/v1/auth/login path, sending the boat's
+          // real Signal K password there. Verified real via external
+          // audit, fixed 2026-09-04.
+          onNavigationRequest: (request) {
+            if (_allowedOrigin == null ||
+                _originOf(request.url) == _allowedOrigin) {
+              return NavigationDecision.navigate;
+            }
+            return NavigationDecision.prevent;
           },
           onWebResourceError: (_) => widget.onError?.call(),
         ),
@@ -141,6 +178,7 @@ class _PlatformWebViewState extends State<PlatformWebView> {
   void didUpdateWidget(PlatformWebView old) {
     super.didUpdateWidget(old);
     if (old.url != widget.url) {
+      _allowedOrigin = _originOf(widget.url);
       _controller.loadRequest(
         Uri.parse(widget.url),
         headers: widget.headers ?? const {},

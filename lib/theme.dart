@@ -5,7 +5,13 @@ const cBg = Color(0xff071015);
 const cPanel = Color(0xff17232b);
 const cPanel2 = Color(0xff20313a);
 const cText = Color(0xfff3fbff);
-const cMuted = Color(0xff9fb3bd);
+// Lightened from 0xff9fb3bd — still comfortably within the palette's cool
+// blue-grey family, but with real headroom for direct-sunlight outdoor use
+// (a boat's mounted tablet), where perceived contrast drops well below
+// what a WCAG ratio computed against the panel's own dark background
+// already showed as acceptable indoors. Reported via external audit,
+// fixed 2026-09-04.
+const cMuted = Color(0xffb7c8d1);
 const cCyan = Color(0xff19c7e8);
 const cGreen = Color(0xff4bd06f);
 const cOrange = Color(0xffffa329);

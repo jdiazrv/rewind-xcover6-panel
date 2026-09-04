@@ -53,7 +53,15 @@ class _SavedServerRowState extends State<SavedServerRow> {
   }
 
   Future<void> _probe() async {
-    if (!await isVpnActive()) {
+    // false = platform confirmed no VPN transport (Android only) — skip
+    // the probe, it can't possibly reach a Tailscale-only address. null =
+    // "can't tell" (web, iOS, anything without the platform channel) — run
+    // the probe anyway rather than assuming the worst; true = confirmed
+    // VPN active. Previously null was treated the same as false, which
+    // made every row on web/iOS claim "requiere VPN" unconditionally
+    // regardless of actual connectivity. Verified real via external
+    // audit, fixed 2026-09-04.
+    if (await isVpnActive() == false) {
       if (mounted) setState(() => _state = _ProbeState.needsVpn);
       return;
     }
