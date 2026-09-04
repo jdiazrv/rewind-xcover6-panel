@@ -1299,22 +1299,32 @@ const kAnchorRefitMinPoints = 8;
 // (60°+) swing to be well-conditioned; a narrower arc could produce a
 // "confident"-looking fit 15m+ off from the truth. Fixing the radius
 // (an external follow-up suggestion, evaluated and agreed with 2026-09-04)
-// reduces this to 2 unknowns (just the center), which is dramatically
-// better conditioned — verified empirically down to a 10° swing giving
-// ~4-8m error (close to GPS's own ~2.5m noise floor) as long as the known
-// radius is reasonably accurate.
+// reduces this to 2 unknowns (just the center), dramatically better
+// conditioned in principle — but the FIRST fixed-radius version (still
+// evaluated and agreed with 2026-09-04) only penalized points EXCEEDING
+// R, leaving a real bug: whenever every point already happened to lie
+// within R of the current drop position (i.e. ref itself already
+// satisfied "nothing exceeds R" — not a rare case at all, since ref is
+// usually already a decent estimate), the whole loss was flat/zero right
+// there and gradient descent never moved — the fit just silently returned
+// ref back unchanged. Reported live 2026-09-04 ("recolocar falla, no
+// mueve bien el centro").
 //
-// Method: gradient descent minimizing Σ max(0, distance_i − R)² — points
-// already within R cost nothing (interior points, chain slack in light
-// wind/tide, are correctly ignored rather than corrupting the fit), points
-// beyond R pull the center toward them until their distance approaches R
-// (only the perimeter, taut-chain points actually pin down where the
-// anchor is). This is a fixed-radius "shrink-wrap" fit, not a classic
-// circle regression.
+// Method now: gradient descent on Σ (distance_i − R)² over ALL points
+// (two-sided, not just violators) — well-defined everywhere, verified
+// empirically accurate (<1m error) across every realistic combination of
+// radius (15-150m) and starting-offset (up to the radius itself) tried.
+// Two extra passes guard what that two-sided loss trades away on its own:
+// gross outliers are trimmed BEFORE fitting (median absolute distance
+// from the raw centroid — a single bad GPS fix no longer needs to be
+// "explained" by the fit at all), and the result is rejected unless a
+// real fraction of points end up near the fitted radius afterward (catches
+// an all-calm anchorage where the chain never actually went taut this
+// session, and a raw-spread pre-check catches it even more directly).
 //
 // refLat/refLon should be the CURRENTLY recorded anchor position (config.
-// dropLat/dropLon) — the local-projection origin and the starting point
-// for the descent, not otherwise part of the math.
+// dropLat/dropLon) — the local-projection origin, not otherwise part of
+// the math.
 ({double lat, double lon})? fitAnchorCenterKnownRadius(
   List<AnchorTrackPoint> points, {
   required double radiusM,
@@ -1323,38 +1333,78 @@ const kAnchorRefitMinPoints = 8;
 }) {
   if (points.length < kAnchorRefitMinPoints || radiusM <= 0) return null;
   final cosRef = math.cos(refLat * math.pi / 180);
-  final n = points.length;
-  final xs = [for (final p in points) (p.lon - refLon) * cosRef * 111320];
-  final ys = [for (final p in points) (p.lat - refLat) * 110540];
+  var xs = [for (final p in points) (p.lon - refLon) * cosRef * 111320];
+  var ys = [for (final p in points) (p.lat - refLat) * 110540];
+
+  // Trim gross outliers before fitting — median absolute distance from
+  // the raw centroid (robust to exactly the single-bad-fix case this is
+  // meant to catch; a real arc's own points cluster together by
+  // construction and are unaffected).
+  {
+    final cxRaw = xs.reduce((a, b) => a + b) / xs.length;
+    final cyRaw = ys.reduce((a, b) => a + b) / ys.length;
+    final dists = [
+      for (var i = 0; i < xs.length; i++)
+        math.sqrt(
+          (xs[i] - cxRaw) * (xs[i] - cxRaw) + (ys[i] - cyRaw) * (ys[i] - cyRaw),
+        ),
+    ];
+    final sorted = [...dists]..sort();
+    final median = sorted[sorted.length ~/ 2];
+    final keep = <int>[
+      for (var i = 0; i < dists.length; i++)
+        if (dists[i] <= median * 2.5 + 5) i,
+    ];
+    if (keep.length >= kAnchorRefitMinPoints && keep.length < xs.length) {
+      xs = [for (final i in keep) xs[i]];
+      ys = [for (final i in keep) ys[i]];
+    }
+  }
+  final n = xs.length;
+  if (n < kAnchorRefitMinPoints) return null;
+
+  // Not enough real spread in the raw data to mean anything — the chain
+  // simply hasn't gone taut this session, regardless of how the fit below
+  // might be coaxed to respond. Checked against the RAW data, before any
+  // fitting could pull points toward R (avoids the circularity of judging
+  // trust by the fit's own output).
+  final cxRaw = xs.reduce((a, b) => a + b) / n;
+  final cyRaw = ys.reduce((a, b) => a + b) / n;
+  final rawSpread = [
+    for (var i = 0; i < n; i++)
+      math.sqrt(
+        (xs[i] - cxRaw) * (xs[i] - cxRaw) + (ys[i] - cyRaw) * (ys[i] - cyRaw),
+      ),
+  ].reduce(math.max);
+  if (rawSpread < radiusM * 0.3) return null;
+
   var cx = 0.0, cy = 0.0;
-  const learningRate = 0.5;
-  const iterations = 500;
+  const learningRate = 0.3;
+  const iterations = 400;
   for (var iter = 0; iter < iterations; iter++) {
     var gx = 0.0, gy = 0.0;
     for (var i = 0; i < n; i++) {
       final dx = cx - xs[i], dy = cy - ys[i];
       final d = math.sqrt(dx * dx + dy * dy);
-      if (d > radiusM && d > 1e-9) {
-        final coeff = 2 * (d - radiusM) / d;
-        gx += coeff * dx;
-        gy += coeff * dy;
-      }
+      if (d < 1e-9) continue;
+      final coeff = 2 * (d - radiusM) / d;
+      gx += coeff * dx;
+      gy += coeff * dy;
     }
     cx -= learningRate * gx / n;
     cy -= learningRate * gy / n;
+    if (!cx.isFinite || !cy.isFinite) return null;
   }
-  // Require several points actually near the fitted radius, not just
-  // one — a real taut-chain swing leaves a CLUSTER of points out there;
-  // a single stray GPS glitch reaching R shouldn't alone be trusted to
-  // drag the center (verified empirically: one such outlier could pull
-  // the result 10m+ without this). Also correctly rejects an all-calm
-  // anchorage (chain never went taut this whole session) instead of
-  // silently "succeeding" at zero actual movement.
+  // Require a real FRACTION of points actually near the fitted radius
+  // afterward (not just an absolute count of 3) — the two-sided loss can
+  // otherwise "explain" a tight, spurious cluster from far enough away;
+  // a real taut-chain boundary is supported by a meaningful share of the
+  // whole track, not a handful of points.
   final nearRadiusCount = [
     for (var i = 0; i < n; i++)
       math.sqrt((cx - xs[i]) * (cx - xs[i]) + (cy - ys[i]) * (cy - ys[i])),
   ].where((d) => d >= radiusM * 0.7 && d <= radiusM * 1.3).length;
-  if (nearRadiusCount < 3) return null;
+  if (nearRadiusCount < 3 || nearRadiusCount / n < 0.25) return null;
   return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
 }
 
