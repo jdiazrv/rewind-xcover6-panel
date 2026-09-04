@@ -5,15 +5,16 @@ allprojects {
     }
 }
 
-// Redirected to an absolute path fully outside the Dropbox-synced project
-// tree (not the usual "../../build" relative to the project root): this
-// project's build/ kept getting fought over by Dropbox's sync engine
-// (constantly re-materializing deleted files, renaming our directory into
-// "Copia en conflicto..." files) — moving Gradle's actual output out of the
-// synced tree entirely sidesteps that regardless of what any other synced
-// device does.
-val newBuildDir: Directory =
-    rootProject.layout.projectDirectory.dir("/Users/juandiaz/FlutterBuilds/rewind_xcover6_panel")
+// Keep Flutter's standard build directory by default so `flutter build apk`
+// can locate and report its artifact. Developers affected by Dropbox build
+// churn can still opt into an external directory for direct Gradle builds:
+// REWIND_BUILD_DIR=/absolute/path ./gradlew assembleRelease
+val externalBuildDir = providers.environmentVariable("REWIND_BUILD_DIR").orNull
+val newBuildDir: Directory = if (externalBuildDir.isNullOrBlank()) {
+    rootProject.layout.projectDirectory.dir("../build")
+} else {
+    rootProject.layout.projectDirectory.dir(externalBuildDir)
+}
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {

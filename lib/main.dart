@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -174,6 +175,7 @@ class Dashboard extends StatefulWidget {
 }
 
 class _DashboardState extends State<Dashboard> {
+  static const _secureStorage = FlutterSecureStorage();
   final signalK = SignalKModel();
   final weather = WeatherModel();
   final settings = SettingsModel();
@@ -320,6 +322,7 @@ class _DashboardState extends State<Dashboard> {
   TextEditingController? _skPasswordController;
   TextEditingController? _anchorWifiSsidController;
   TextEditingController? _bucketController;
+  TextEditingController? _archiveBucketController;
   TextEditingController? _influxHostController;
   TextEditingController? _influxOrgController;
   TextEditingController? _influxTokenController;
@@ -517,10 +520,7 @@ class _DashboardState extends State<Dashboard> {
       {'path': 'navigation.anchor.watchZone', 'value': watchZone},
       {'path': 'navigation.anchor.currentRadius', 'value': currentRadius},
       {'path': 'navigation.anchor.maxRadius', 'value': maxRadius},
-      {
-        'path': 'navigation.anchor.distanceFromBow',
-        'value': distanceFromBow,
-      },
+      {'path': 'navigation.anchor.distanceFromBow', 'value': distanceFromBow},
       {'path': 'navigation.anchor.bearingTrue', 'value': bearingTrueRad},
       {
         'path': 'navigation.anchor.apparentBearing',
@@ -554,7 +554,10 @@ class _DashboardState extends State<Dashboard> {
       final parts = <String>[];
       final lat = _anchorEffectiveLat ?? signalK.latitude;
       final lon = _anchorEffectiveLon ?? signalK.longitude;
-      if (lat != null && lon != null && cfg.dropLat != null && cfg.dropLon != null) {
+      if (lat != null &&
+          lon != null &&
+          cfg.dropLat != null &&
+          cfg.dropLon != null) {
         final r = bearingDistanceMeters(cfg.dropLat!, cfg.dropLon!, lat, lon);
         parts.add('${r.distanceM.round()}m/${cfg.radiusM.round()}m');
       }
@@ -625,7 +628,9 @@ class _DashboardState extends State<Dashboard> {
   // server without our plugin installed/enabled 404s harmlessly, and a
   // failure here must never affect this app's own anchor watch.
   Future<void> _syncOwnAnchorPluginConfig() async {
-    if (settings.demoMode) return; // never touch the real server's plugin from DEMO
+    if (settings.demoMode) {
+      return; // never touch the real server's plugin from DEMO
+    }
     if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return;
     final base =
         'http://${settings.host}:${settings.port}/plugins/rewind-xcover6-panel/config';
@@ -753,7 +758,8 @@ class _DashboardState extends State<Dashboard> {
           if (_isStaleAnchorEdit(cfg, movedAtMs)) break;
           final lat = _num(value['latitude']);
           final lon = _num(value['longitude']);
-          if (lat != null && lon != null &&
+          if (lat != null &&
+              lon != null &&
               (cfg.dropLat != lat || cfg.dropLon != lon)) {
             cfg.dropLat = lat;
             cfg.dropLon = lon;
@@ -1056,7 +1062,9 @@ class _DashboardState extends State<Dashboard> {
         settings.anchorConfig.armedOrMovedAt == null ||
         DateTime.now().difference(settings.anchorConfig.armedOrMovedAt!) >
             const Duration(seconds: 10);
-    if (settings.anchorConfig.armed && anchorGraceOk && _isOutsideAnchorZone()) {
+    if (settings.anchorConfig.armed &&
+        anchorGraceOk &&
+        _isOutsideAnchorZone()) {
       const key = 'anchorDrag';
       out.add((
         key: key,
@@ -1438,8 +1446,7 @@ class _DashboardState extends State<Dashboard> {
     'anchorNoPosition',
   ];
 
-  bool get _anchorAlarmsMuted =>
-      _anchorAlarmKeys.every(_mutedAlarms.contains);
+  bool get _anchorAlarmsMuted => _anchorAlarmKeys.every(_mutedAlarms.contains);
 
   void _toggleAnchorAlarmsMuted() {
     setState(() {
@@ -1906,6 +1913,7 @@ class _DashboardState extends State<Dashboard> {
     _skPasswordController?.text = settings.skPassword;
     _anchorWifiSsidController?.text = settings.anchorBoatWifiSsid;
     _bucketController?.text = settings.influxBucket;
+    _archiveBucketController?.text = settings.influxArchiveBucket;
     _influxHostController?.text = settings.influxHost;
     _influxOrgController?.text = settings.influxOrg;
     _influxTokenController?.text = settings.influxToken;
@@ -1953,6 +1961,44 @@ class _DashboardState extends State<Dashboard> {
         ],
       ),
     );
+  }
+
+  Future<String> _readCredential(
+    SharedPreferences prefs,
+    String secureKey,
+    String legacyKey,
+  ) async {
+    // Browser storage served over a boat's plain HTTP origin cannot provide
+    // the same OS-backed protection as Android Keystore. Keep the compatible
+    // browser behavior, but migrate every native install out of preferences.
+    if (kIsWeb) return prefs.getString(legacyKey) ?? '';
+    try {
+      final secured = await _secureStorage.read(key: secureKey);
+      if (secured != null) return secured;
+      final legacy = prefs.getString(legacyKey) ?? '';
+      if (legacy.isNotEmpty) {
+        await _secureStorage.write(key: secureKey, value: legacy);
+        await prefs.remove(legacyKey);
+      }
+      return legacy;
+    } catch (error, stack) {
+      lastCrashInfo = '${DateTime.now()}\nSecure storage: $error\n$stack';
+      return prefs.getString(legacyKey) ?? '';
+    }
+  }
+
+  Future<void> _writeCredential(
+    SharedPreferences prefs,
+    String secureKey,
+    String legacyKey,
+    String value,
+  ) async {
+    if (kIsWeb) {
+      await prefs.setString(legacyKey, value);
+      return;
+    }
+    await _secureStorage.write(key: secureKey, value: value);
+    await prefs.remove(legacyKey);
   }
 
   Future<void> _loadSettings() async {
@@ -2010,9 +2056,21 @@ class _DashboardState extends State<Dashboard> {
           prefs.getInt('port') ??
           (kIsWeb && Uri.base.hasPort ? Uri.base.port : settings.port);
     }
-    settings.authBase64 = prefs.getString('auth') ?? settings.authBase64;
-    settings.skUsername = prefs.getString('skUsername') ?? settings.skUsername;
-    settings.skPassword = prefs.getString('skPassword') ?? settings.skPassword;
+    settings.authBase64 = await _readCredential(
+      prefs,
+      'signalK.basicAuth',
+      'auth',
+    );
+    settings.skUsername = await _readCredential(
+      prefs,
+      'signalK.username',
+      'skUsername',
+    );
+    settings.skPassword = await _readCredential(
+      prefs,
+      'signalK.password',
+      'skPassword',
+    );
     final savedServersJson = prefs.getString('savedServers');
     if (savedServersJson != null) {
       try {
@@ -2049,6 +2107,53 @@ class _DashboardState extends State<Dashboard> {
         SavedServer(name: 'QUINTO REAL', host: '100.73.92.66'),
       ];
     }
+    if (!kIsWeb) {
+      final securedServers = await _readCredential(
+        prefs,
+        'signalK.savedServerCredentials',
+        'savedServerCredentials',
+      );
+      if (securedServers.isNotEmpty) {
+        try {
+          final credentials =
+              jsonDecode(securedServers) as Map<String, dynamic>;
+          for (final server in settings.savedServers) {
+            final entry = credentials['${server.host}:${server.port}'];
+            if (entry is Map<String, dynamic>) {
+              server.skUsername = entry['username'] as String? ?? '';
+              server.skPassword = entry['password'] as String? ?? '';
+            }
+          }
+        } catch (_) {
+          // Keep any legacy credentials already read with the server list.
+        }
+      } else if (settings.savedServers.any(
+        (server) =>
+            server.skUsername.isNotEmpty || server.skPassword.isNotEmpty,
+      )) {
+        await _writeCredential(
+          prefs,
+          'signalK.savedServerCredentials',
+          'savedServerCredentials',
+          jsonEncode({
+            for (final server in settings.savedServers)
+              '${server.host}:${server.port}': {
+                'username': server.skUsername,
+                'password': server.skPassword,
+              },
+          }),
+        );
+      }
+      // Remove credentials embedded by older builds once they have been
+      // migrated to Android Keystore / the native platform keychain.
+      await prefs.setString(
+        'savedServers',
+        jsonEncode([
+          for (final server in settings.savedServers)
+            {'name': server.name, 'host': server.host, 'port': server.port},
+        ]),
+      );
+    }
     // Deliberately not loaded from prefs — see the field's own doc comment.
     settings.gpsFallbackConsent = prefs.containsKey('gpsFallbackConsent')
         ? prefs.getBool('gpsFallbackConsent')
@@ -2061,8 +2166,14 @@ class _DashboardState extends State<Dashboard> {
         prefs.getString('historySource') ?? settings.historySource;
     settings.influxHost = prefs.getString('influxHost') ?? settings.influxHost;
     settings.influxOrg = prefs.getString('influxOrg') ?? settings.influxOrg;
-    settings.influxToken =
-        prefs.getString('influxToken') ?? settings.influxToken;
+    final storedInfluxToken = await _readCredential(
+      prefs,
+      'influx.token',
+      'influxToken',
+    );
+    if (storedInfluxToken.isNotEmpty) {
+      settings.influxToken = storedInfluxToken;
+    }
     settings.influxBucket =
         prefs.getString('influxBucket') ?? settings.influxBucket;
     settings.influxArchiveBucket =
@@ -2321,9 +2432,24 @@ class _DashboardState extends State<Dashboard> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('host', settings.host);
     await prefs.setInt('port', settings.port);
-    await prefs.setString('auth', settings.authBase64);
-    await prefs.setString('skUsername', settings.skUsername);
-    await prefs.setString('skPassword', settings.skPassword);
+    await _writeCredential(
+      prefs,
+      'signalK.basicAuth',
+      'auth',
+      settings.authBase64,
+    );
+    await _writeCredential(
+      prefs,
+      'signalK.username',
+      'skUsername',
+      settings.skUsername,
+    );
+    await _writeCredential(
+      prefs,
+      'signalK.password',
+      'skPassword',
+      settings.skPassword,
+    );
     if (settings.gpsFallbackConsent != null) {
       await prefs.setBool('gpsFallbackConsent', settings.gpsFallbackConsent!);
     }
@@ -2332,7 +2458,12 @@ class _DashboardState extends State<Dashboard> {
     await prefs.setString('historySource', settings.historySource);
     await prefs.setString('influxHost', settings.influxHost);
     await prefs.setString('influxOrg', settings.influxOrg);
-    await prefs.setString('influxToken', settings.influxToken);
+    await _writeCredential(
+      prefs,
+      'influx.token',
+      'influxToken',
+      settings.influxToken,
+    );
     await prefs.setString('influxBucket', settings.influxBucket);
     await prefs.setString('influxArchiveBucket', settings.influxArchiveBucket);
     await prefs.setString(
@@ -2342,24 +2473,44 @@ class _DashboardState extends State<Dashboard> {
     // Keep the CURRENT server's entry in the per-host map up to date too,
     // so switching to another saved server and back restores this one
     // exactly — see CFG → Admin / _switchToSavedServer.
-    settings.sensorConfigJsonByHost[_serverConfigKey] =
-        settings.sensorConfig.toJson();
+    settings.sensorConfigJsonByHost[_serverConfigKey] = settings.sensorConfig
+        .toJson();
     await prefs.setString(
       'sensorConfigByHostJson',
       jsonEncode(settings.sensorConfigJsonByHost),
     );
     await prefs.setString(
       'savedServers',
-      jsonEncode([for (final s in settings.savedServers) s.toJson()]),
+      jsonEncode([
+        for (final server in settings.savedServers)
+          if (kIsWeb)
+            server.toJson()
+          else
+            {'name': server.name, 'host': server.host, 'port': server.port},
+      ]),
     );
+    if (!kIsWeb) {
+      await _writeCredential(
+        prefs,
+        'signalK.savedServerCredentials',
+        'savedServerCredentials',
+        jsonEncode({
+          for (final server in settings.savedServers)
+            '${server.host}:${server.port}': {
+              'username': server.skUsername,
+              'password': server.skPassword,
+            },
+        }),
+      );
+    }
     await prefs.setString(
       'anchorConfigJson',
       jsonEncode(settings.anchorConfig.toJson()),
     );
     // Same per-host mirroring as sensorConfig above — see
     // _switchToSavedServer and anchorConfigJsonByHost's own doc comment.
-    settings.anchorConfigJsonByHost[_serverConfigKey] =
-        settings.anchorConfig.toJson();
+    settings.anchorConfigJsonByHost[_serverConfigKey] = settings.anchorConfig
+        .toJson();
     await prefs.setString(
       'anchorConfigByHostJson',
       jsonEncode(settings.anchorConfigJsonByHost),
@@ -2422,10 +2573,7 @@ class _DashboardState extends State<Dashboard> {
       settings.anchorTotalChainLengthM,
     );
     await prefs.setString('ntfyTopic', settings.ntfyTopic);
-    await prefs.setStringList(
-      'ntfyAlarmKeys',
-      settings.ntfyAlarmKeys.toList(),
-    );
+    await prefs.setStringList('ntfyAlarmKeys', settings.ntfyAlarmKeys.toList());
     await prefs.setInt('ntfyMinIntervalSec', settings.ntfyMinIntervalSec);
     await prefs.setBool(
       'anchorDetectPhoneLeftByMotion',
@@ -2757,10 +2905,10 @@ class _DashboardState extends State<Dashboard> {
     // this, "armed" on one boat kept publishing as armed on whichever
     // server you switched to next.
     final outgoingKey = _serverConfigKey;
-    settings.sensorConfigJsonByHost[outgoingKey] =
-        settings.sensorConfig.toJson();
-    settings.anchorConfigJsonByHost[outgoingKey] =
-        settings.anchorConfig.toJson();
+    settings.sensorConfigJsonByHost[outgoingKey] = settings.sensorConfig
+        .toJson();
+    settings.anchorConfigJsonByHost[outgoingKey] = settings.anchorConfig
+        .toJson();
     settings.host = s.host;
     settings.port = s.port;
     settings.skUsername = s.skUsername;
@@ -3754,8 +3902,7 @@ class _DashboardState extends State<Dashboard> {
         final node = leaves[path];
         final nameVal = node is Map ? node['value'] : null;
         if (nameVal is String && nameVal.isNotEmpty) {
-          result.batteryNames[battNameMatch.group(1)!] = nameVal
-              .toLowerCase();
+          result.batteryNames[battNameMatch.group(1)!] = nameVal.toLowerCase();
         }
       }
       final lowerPath = path.toLowerCase();
@@ -4366,6 +4513,7 @@ class _DashboardState extends State<Dashboard> {
     _skUsernameController?.dispose();
     _skPasswordController?.dispose();
     _bucketController?.dispose();
+    _archiveBucketController?.dispose();
     _influxHostController?.dispose();
     _influxOrgController?.dispose();
     _influxTokenController?.dispose();
@@ -4441,7 +4589,10 @@ class _DashboardState extends State<Dashboard> {
   // per-field-timestamp pattern.
   double? get _freshHeading =>
       _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate) ??
-      _freshEngine(signalK.headingMagneticDeg, signalK.headingMagneticDegUpdate);
+      _freshEngine(
+        signalK.headingMagneticDeg,
+        signalK.headingMagneticDegUpdate,
+      );
   double? get _freshCog =>
       _freshEngine(signalK.cogTrueDeg, signalK.cogTrueDegUpdate);
   double? get _freshSog => _freshEngine(signalK.sogKn, signalK.sogKnUpdate);
@@ -4537,102 +4688,102 @@ class _DashboardState extends State<Dashboard> {
       onPointerDown: (_) => unawaited(_maybeUnlockWebAudio()),
       behavior: HitTestBehavior.translucent,
       child: Scaffold(
-      body: SafeArea(
-        // Translucent, not opaque: an ancestor GestureDetector's onTap
-        // still fires alongside whatever descendant (buttons, lamp chips,
-        // AIS targets…) also handles the same tap — this doesn't steal
-        // taps from page content, it just also reveals the header when
-        // it's hidden. Only wired up while there's something to reveal.
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: _headerHidden ? _revealHeader : null,
-          child: Stack(
-            children: [
-              Column(
-                children: [
-                  ClipRect(
-                    child: (_headerHidden && kIsWeb)
-                        ? _CollapsedHeaderBar(onTap: _revealHeader)
-                        : AnimatedAlign(
-                            duration: const Duration(milliseconds: 300),
-                            alignment: Alignment.topCenter,
-                            heightFactor: _headerHidden ? 0.0 : 1.0,
-                            child: _Header(
-                              pages: pages,
-                              selected: page,
-                              status: signalK.status,
-                              ok: signalK.connected,
-                              alarmPageIds: _alarmPageIds,
-                              alarmCount: _activeAlarms.length,
-                              onBellTap: () => _showAlarmsList(context),
-                              onSelect: (i) {
-                                _onPageChange(i);
-                                _pageController.animateToPage(
-                                  i,
-                                  duration: const Duration(milliseconds: 300),
-                                  curve: Curves.easeInOut,
-                                );
-                              },
+        body: SafeArea(
+          // Translucent, not opaque: an ancestor GestureDetector's onTap
+          // still fires alongside whatever descendant (buttons, lamp chips,
+          // AIS targets…) also handles the same tap — this doesn't steal
+          // taps from page content, it just also reveals the header when
+          // it's hidden. Only wired up while there's something to reveal.
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _headerHidden ? _revealHeader : null,
+            child: Stack(
+              children: [
+                Column(
+                  children: [
+                    ClipRect(
+                      child: (_headerHidden && kIsWeb)
+                          ? _CollapsedHeaderBar(onTap: _revealHeader)
+                          : AnimatedAlign(
+                              duration: const Duration(milliseconds: 300),
+                              alignment: Alignment.topCenter,
+                              heightFactor: _headerHidden ? 0.0 : 1.0,
+                              child: _Header(
+                                pages: pages,
+                                selected: page,
+                                status: signalK.status,
+                                ok: signalK.connected,
+                                alarmPageIds: _alarmPageIds,
+                                alarmCount: _activeAlarms.length,
+                                onBellTap: () => _showAlarmsList(context),
+                                onSelect: (i) {
+                                  _onPageChange(i);
+                                  _pageController.animateToPage(
+                                    i,
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeInOut,
+                                  );
+                                },
+                              ),
+                            ),
+                    ),
+                    Expanded(
+                      child: PageView(
+                        controller: _pageController,
+                        onPageChanged: _onPageChange,
+                        children: [for (final p in pages) p.$3],
+                      ),
+                    ),
+                  ],
+                ),
+                if (_headerHidden && !kIsWeb)
+                  // Web: the floating overlay handle sits over the WebView's
+                  // <iframe>, which is a separate browser document and can
+                  // swallow the tap at the OS/DOM level regardless of Flutter's
+                  // own widget stacking — so on web we use _CollapsedHeaderBar
+                  // instead, which reserves real (non-overlapping) layout space.
+                  Positioned.fill(
+                    child: Align(
+                      alignment: const Alignment(
+                        0.7,
+                        -1,
+                      ), // 15% left of the right edge
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _revealHeader,
+                        onVerticalDragUpdate: (d) {
+                          if (d.delta.dy > 0) _revealHeader();
+                        },
+                        onHorizontalDragUpdate: (d) {
+                          if (d.delta.dx.abs() > 0) _revealHeader();
+                        },
+                        child: Container(
+                          width: 80,
+                          height: 24,
+                          alignment: Alignment.topCenter,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.45),
+                            borderRadius: const BorderRadius.vertical(
+                              bottom: Radius.circular(12),
                             ),
                           ),
-                  ),
-                  Expanded(
-                    child: PageView(
-                      controller: _pageController,
-                      onPageChanged: _onPageChange,
-                      children: [for (final p in pages) p.$3],
-                    ),
-                  ),
-                ],
-              ),
-              if (_headerHidden && !kIsWeb)
-                // Web: the floating overlay handle sits over the WebView's
-                // <iframe>, which is a separate browser document and can
-                // swallow the tap at the OS/DOM level regardless of Flutter's
-                // own widget stacking — so on web we use _CollapsedHeaderBar
-                // instead, which reserves real (non-overlapping) layout space.
-                Positioned.fill(
-                  child: Align(
-                    alignment: const Alignment(
-                      0.7,
-                      -1,
-                    ), // 15% left of the right edge
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _revealHeader,
-                      onVerticalDragUpdate: (d) {
-                        if (d.delta.dy > 0) _revealHeader();
-                      },
-                      onHorizontalDragUpdate: (d) {
-                        if (d.delta.dx.abs() > 0) _revealHeader();
-                      },
-                      child: Container(
-                        width: 80,
-                        height: 24,
-                        alignment: Alignment.topCenter,
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.45),
-                          borderRadius: const BorderRadius.vertical(
-                            bottom: Radius.circular(12),
-                          ),
-                        ),
-                        child: Container(
-                          width: 48,
-                          height: 4,
-                          margin: const EdgeInsets.only(top: 8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.7),
-                            borderRadius: BorderRadius.circular(2),
+                          child: Container(
+                            width: 48,
+                            height: 4,
+                            margin: const EdgeInsets.only(top: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.7),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
     if (!useNight) return scaffold;
@@ -8186,81 +8337,81 @@ class _DashboardState extends State<Dashboard> {
   Widget _nativeAnchorPage() {
     final windDebug = _awsHistory.gustDebugSnapshot();
     return NativeAnchorView(
-    config: settings.anchorConfig,
-    onConfigChanged: (cfg) {
-      setState(() => settings.anchorConfig = cfg);
-      unawaited(_saveSettings());
-      unawaited(_publishAnchorDelta());
-      _syncAnchorPublishTimer();
-    },
-    // Gated on connected, NOT just non-null — signalK.latitude/longitude
-    // can still hold a moment-old value right after a disconnect (nothing
-    // clears them until the next _connectSignalK() actually runs). An
-    // ungated stale fix here meant _hasSkPosition stayed true through a
-    // real disconnect, which blocked both the screen's own device-GPS
-    // fallback offer and its distance/outside readout from ever
-    // reflecting that the position was no longer live. Reported live
-    // 2026-09-04. Mirrors the exact same guard _isOutsideAnchorZone
-    // already uses for the alarm engine itself.
-    ownLat: signalK.connected ? signalK.latitude : null,
-    ownLon: signalK.connected ? signalK.longitude : null,
-    skConnected: signalK.connected,
-    // Deliberately just heading, not the usual `?? _freshCog` fallback used
-    // elsewhere — the anchor screen's own fallback (bow pointing at the
-    // anchor with no heading) is more meaningful at anchor than COG, which
-    // is noisy-to-meaningless at near-zero SOG.
-    // _freshHeading itself falls back to null after 5s without a new delta
-    // (the engine-alarm staleness rule) — fine for RPM, wrong for heading:
-    // a compass reading a boat swinging gently at anchor can go many
-    // seconds between deltas without being stale at all, which is exactly
-    // why "fondear" only offset by heading the first time (heading fresh
-    // right after motoring in) and stopped doing it on a second drop taken
-    // moments later at rest. Falls back to the raw last-known value here.
-    headingDeg: _freshHeading ?? signalK.headingTrueDeg,
-    sogKn: _freshSog,
-    depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
-    awaDeg: _freshWind(_dAwa),
-    awsKn: _freshWind(_dAws),
-    twdDeg: _freshWind(_dTwd),
-    windMeanKn: windDebug.meanKn,
-    windStddevKn: windDebug.stddevKn,
-    windPeak3sKn: windDebug.peak3sKn,
-    windGustFloorKn: windDebug.floorKn,
-    gustKn: _awsHistory.statisticalGustWithAge()?.value,
-    gustAgeMin: _awsHistory.statisticalGustWithAge()?.age.inMinutes,
-    isGusting: _awsHistory.isGusting(),
-    aisTargets: _visibleAisTargets.values.toList(),
-    ownTrack: _ownTrack.points,
-    skUsername: settings.skUsername,
-    skPassword: settings.skPassword,
-    onCredentialsChanged: (user, pass) {
-      setState(() {
-        settings.skUsername = user;
-        settings.skPassword = pass;
-      });
-      unawaited(_saveSettings());
-    },
-    onVerifyLogin: _loginToSignalK,
-    gpsFallbackConsent: settings.gpsFallbackConsent,
-    onGpsFallbackConsentChanged: (allow) {
-      setState(() => settings.gpsFallbackConsent = allow);
-      unawaited(_saveSettings());
-    },
-    onEffectivePositionChanged: (lat, lon) {
-      _anchorEffectiveLat = lat;
-      _anchorEffectiveLon = lon;
-    },
-    onDragStatusChanged: (outside, isDragging, dragSpeedMPerMin) {
-      _anchorIsDragging = isDragging;
-      _anchorDragSpeedMPerMin = dragSpeedMPerMin;
-    },
-    detectPhoneLeftByMotion: settings.anchorDetectPhoneLeftByMotion,
-    detectPhoneLeftBySteps: settings.anchorDetectPhoneLeftBySteps,
-    detectPhoneLeftByWifi: settings.anchorDetectPhoneLeftByWifi,
-    boatWifiSsid: settings.anchorBoatWifiSsid,
-    shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
-    alarmsMuted: _anchorAlarmsMuted,
-    onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
+      config: settings.anchorConfig,
+      onConfigChanged: (cfg) {
+        setState(() => settings.anchorConfig = cfg);
+        unawaited(_saveSettings());
+        unawaited(_publishAnchorDelta());
+        _syncAnchorPublishTimer();
+      },
+      // Gated on connected, NOT just non-null — signalK.latitude/longitude
+      // can still hold a moment-old value right after a disconnect (nothing
+      // clears them until the next _connectSignalK() actually runs). An
+      // ungated stale fix here meant _hasSkPosition stayed true through a
+      // real disconnect, which blocked both the screen's own device-GPS
+      // fallback offer and its distance/outside readout from ever
+      // reflecting that the position was no longer live. Reported live
+      // 2026-09-04. Mirrors the exact same guard _isOutsideAnchorZone
+      // already uses for the alarm engine itself.
+      ownLat: signalK.connected ? signalK.latitude : null,
+      ownLon: signalK.connected ? signalK.longitude : null,
+      skConnected: signalK.connected,
+      // Deliberately just heading, not the usual `?? _freshCog` fallback used
+      // elsewhere — the anchor screen's own fallback (bow pointing at the
+      // anchor with no heading) is more meaningful at anchor than COG, which
+      // is noisy-to-meaningless at near-zero SOG.
+      // _freshHeading itself falls back to null after 5s without a new delta
+      // (the engine-alarm staleness rule) — fine for RPM, wrong for heading:
+      // a compass reading a boat swinging gently at anchor can go many
+      // seconds between deltas without being stale at all, which is exactly
+      // why "fondear" only offset by heading the first time (heading fresh
+      // right after motoring in) and stopped doing it on a second drop taken
+      // moments later at rest. Falls back to the raw last-known value here.
+      headingDeg: _freshHeading ?? signalK.headingTrueDeg,
+      sogKn: _freshSog,
+      depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
+      awaDeg: _freshWind(_dAwa),
+      awsKn: _freshWind(_dAws),
+      twdDeg: _freshWind(_dTwd),
+      windMeanKn: windDebug.meanKn,
+      windStddevKn: windDebug.stddevKn,
+      windPeak3sKn: windDebug.peak3sKn,
+      windGustFloorKn: windDebug.floorKn,
+      gustKn: _awsHistory.statisticalGustWithAge()?.value,
+      gustAgeMin: _awsHistory.statisticalGustWithAge()?.age.inMinutes,
+      isGusting: _awsHistory.isGusting(),
+      aisTargets: _visibleAisTargets.values.toList(),
+      ownTrack: _ownTrack.points,
+      skUsername: settings.skUsername,
+      skPassword: settings.skPassword,
+      onCredentialsChanged: (user, pass) {
+        setState(() {
+          settings.skUsername = user;
+          settings.skPassword = pass;
+        });
+        unawaited(_saveSettings());
+      },
+      onVerifyLogin: _loginToSignalK,
+      gpsFallbackConsent: settings.gpsFallbackConsent,
+      onGpsFallbackConsentChanged: (allow) {
+        setState(() => settings.gpsFallbackConsent = allow);
+        unawaited(_saveSettings());
+      },
+      onEffectivePositionChanged: (lat, lon) {
+        _anchorEffectiveLat = lat;
+        _anchorEffectiveLon = lon;
+      },
+      onDragStatusChanged: (outside, isDragging, dragSpeedMPerMin) {
+        _anchorIsDragging = isDragging;
+        _anchorDragSpeedMPerMin = dragSpeedMPerMin;
+      },
+      detectPhoneLeftByMotion: settings.anchorDetectPhoneLeftByMotion,
+      detectPhoneLeftBySteps: settings.anchorDetectPhoneLeftBySteps,
+      detectPhoneLeftByWifi: settings.anchorDetectPhoneLeftByWifi,
+      boatWifiSsid: settings.anchorBoatWifiSsid,
+      shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
+      alarmsMuted: _anchorAlarmsMuted,
+      onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
     );
   }
 
@@ -8292,13 +8443,13 @@ class _DashboardState extends State<Dashboard> {
   // ─── Settings page ──────────────────────────────────────────────────────────
 
   Widget _settingsPage() {
-    // First time CFG is opened with no topic set yet, default it to
-    // "SV_<nombre del barco>" — only once vesselName is actually known,
-    // and only ever fills a blank field, never overwrites a chosen one.
-    if (settings.ntfyTopic.isEmpty &&
-        signalK.vesselName != null &&
-        signalK.vesselName!.isNotEmpty) {
-      settings.ntfyTopic = 'SV_${signalK.vesselName!.replaceAll(' ', '_')}';
+    // A topic is effectively a bearer secret on the public ntfy service.
+    // Never derive it from the vessel name: that is predictable and can
+    // expose alarm/location details to anyone who guesses it.
+    if (settings.ntfyTopic.isEmpty && settings.anchorDeviceId.isNotEmpty) {
+      final compactId = settings.anchorDeviceId.replaceAll('-', '');
+      settings.ntfyTopic =
+          'rw-${compactId.substring(0, math.min(20, compactId.length))}';
       unawaited(_saveSettings());
     }
     // ??= : created once and reused across rebuilds (see the field
@@ -8319,6 +8470,8 @@ class _DashboardState extends State<Dashboard> {
     final bucketController = _bucketController ??= TextEditingController(
       text: settings.influxBucket,
     );
+    final archiveBucketController = _archiveBucketController ??=
+        TextEditingController(text: settings.influxArchiveBucket);
     final influxHostController = _influxHostController ??=
         TextEditingController(text: settings.influxHost);
     final influxOrgController = _influxOrgController ??= TextEditingController(
@@ -8328,7 +8481,7 @@ class _DashboardState extends State<Dashboard> {
         TextEditingController(text: settings.influxToken);
     const lbl = TextStyle(
       color: cMuted,
-      fontSize: 10,
+      fontSize: 11,
       letterSpacing: 1.1,
       fontWeight: FontWeight.w700,
     );
@@ -8336,9 +8489,23 @@ class _DashboardState extends State<Dashboard> {
 
     Future<void> doSave() async {
       final newHost = hostController.text.trim();
-      final newPort = int.tryParse(portController.text.trim()) ?? 3000;
-      final hostChanged =
-          newHost != settings.host || newPort != settings.port;
+      final parsedPort = int.tryParse(portController.text.trim());
+      if (newHost.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Escribe un host o una dirección IP.')),
+        );
+        return;
+      }
+      if (parsedPort == null || parsedPort < 1 || parsedPort > 65535) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('El puerto debe estar entre 1 y 65535.'),
+          ),
+        );
+        return;
+      }
+      final newPort = parsedPort;
+      final hostChanged = newHost != settings.host || newPort != settings.port;
       if (hostChanged) {
         // Same per-host sensor/anchor config swap as _switchToSavedServer —
         // CFG > Admin's saved-servers list is remotes-only (Tailscale), so
@@ -8350,10 +8517,10 @@ class _DashboardState extends State<Dashboard> {
         // 2026-09-04 ("cuando cambio de servidor tiene que guardar toda la
         // configuracion de sensores incluido si es el local").
         final outgoingKey = _serverConfigKey;
-        settings.sensorConfigJsonByHost[outgoingKey] =
-            settings.sensorConfig.toJson();
-        settings.anchorConfigJsonByHost[outgoingKey] =
-            settings.anchorConfig.toJson();
+        settings.sensorConfigJsonByHost[outgoingKey] = settings.sensorConfig
+            .toJson();
+        settings.anchorConfigJsonByHost[outgoingKey] = settings.anchorConfig
+            .toJson();
       }
       settings.host = newHost;
       settings.port = newPort;
@@ -8419,9 +8586,17 @@ class _DashboardState extends State<Dashboard> {
       settings.influxBucket = bucketController.text.trim().isEmpty
           ? influxBucketDefault
           : bucketController.text.trim();
+      settings.influxArchiveBucket = archiveBucketController.text.trim().isEmpty
+          ? settings.influxBucket
+          : archiveBucketController.text.trim();
       await _saveSettings();
       _connectSignalK();
       Timer(const Duration(seconds: 12), _maybePromptDemoMode);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Configuración guardada.')),
+        );
+      }
     }
 
     return DefaultTabController(
@@ -8444,7 +8619,7 @@ class _DashboardState extends State<Dashboard> {
                 const Tab(text: 'ALARMAS'),
                 const Tab(text: 'FONDEO'),
                 const Tab(text: 'DIAGNÓSTICO'),
-                if (_adminRevealed) const Tab(text: 'ADMIN'),
+                if (_adminRevealed) const Tab(text: 'TÉCNICO'),
               ],
             ),
           ),
@@ -8453,554 +8628,655 @@ class _DashboardState extends State<Dashboard> {
               builder: (ctx, setSt) => TabBarView(
                 children: [
                   // ── Tab: Conexión (Signal K) ─────────────────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
                     padding: const EdgeInsets.all(12),
-                    // Capped like CFG > Alarmas' own form — left
-                    // unconstrained, these fields stretched across a
-                    // tablet's full landscape width, leaving a lot of
-                    // empty space instead of reading as a form. Reported
-                    // via external audit, fixed 2026-09-04.
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 480),
+                      constraints: const BoxConstraints(maxWidth: 760),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                        if (_isSignalKWebapp) ...[
-                          const Text('SIGNAL K', style: lbl),
-                          gap,
-                          Row(
+                          SettingsGroup(
+                            title: 'SERVIDOR SIGNAL K',
+                            icon: Icons.dns_outlined,
                             children: [
-                              Icon(
-                                settings.host == Uri.base.host
-                                    ? Icons.check_circle
-                                    : Icons.info_outline,
-                                color: settings.host == Uri.base.host
-                                    ? cGreen
-                                    : cCyan,
-                                size: 16,
+                              SettingsStatusRow(
+                                label: 'Estado',
+                                value: signalK.connected
+                                    ? 'Conectado'
+                                    : 'Desconectado',
+                                color: signalK.connected ? cGreen : cRed,
                               ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  settings.host == Uri.base.host
-                                      ? 'Servido desde ${Uri.base.host} — normalmente no hace falta tocar esto.'
-                                      : 'Esta página se sirve desde ${Uri.base.host}, pero apuntando manualmente a ${settings.host}:${settings.port}.',
-                                  style: const TextStyle(
-                                    color: cMuted,
-                                    fontSize: 13,
+                              const SizedBox(height: 8),
+                              if (_isSignalKWebapp) ...[
+                                const Text('SIGNAL K', style: lbl),
+                                gap,
+                                Row(
+                                  children: [
+                                    Icon(
+                                      settings.host == Uri.base.host
+                                          ? Icons.check_circle
+                                          : Icons.info_outline,
+                                      color: settings.host == Uri.base.host
+                                          ? cGreen
+                                          : cCyan,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        settings.host == Uri.base.host
+                                            ? 'Servido desde ${Uri.base.host} — normalmente no hace falta tocar esto.'
+                                            : 'Esta página se sirve desde ${Uri.base.host}, pero apuntando manualmente a ${settings.host}:${settings.port}.',
+                                        style: const TextStyle(
+                                          color: cMuted,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                gap,
+                                // A .local (mDNS) hostname only resolves on the
+                                // boat's own LAN — if you loaded this page that
+                                // way but are actually reachable remotely (e.g.
+                                // via Tailscale), there was previously no way to
+                                // point the app anywhere else at all. Confirmed
+                                // live 2026-09-02.
+                                const Text(
+                                  'Si la conexión automática no funciona (por ejemplo, accediendo por '
+                                  'red móvil/Tailscale a un servidor con nombre .local), pon aquí el '
+                                  'host o IP por el que sí llegas:',
+                                  style: TextStyle(color: cMuted, fontSize: 12),
+                                ),
+                                gap,
+                                TextField(
+                                  controller: hostController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Host (o IP)',
+                                    isDense: true,
+                                  ),
+                                  onChanged: (v) =>
+                                      setSt(() => settings.host = v.trim()),
+                                ),
+                                gap,
+                                TextField(
+                                  controller: portController,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Puerto',
+                                    isDense: true,
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                          gap,
-                          // A .local (mDNS) hostname only resolves on the
-                          // boat's own LAN — if you loaded this page that
-                          // way but are actually reachable remotely (e.g.
-                          // via Tailscale), there was previously no way to
-                          // point the app anywhere else at all. Confirmed
-                          // live 2026-09-02.
-                          const Text(
-                            'Si la conexión automática no funciona (por ejemplo, accediendo por '
-                            'red móvil/Tailscale a un servidor con nombre .local), pon aquí el '
-                            'host o IP por el que sí llegas:',
-                            style: TextStyle(color: cMuted, fontSize: 12),
-                          ),
-                          gap,
-                          TextField(
-                            controller: hostController,
-                            decoration: const InputDecoration(
-                              labelText: 'Host (o IP)',
-                              isDense: true,
-                            ),
-                            onChanged: (v) =>
-                                setSt(() => settings.host = v.trim()),
-                          ),
-                          gap,
-                          TextField(
-                            controller: portController,
-                            keyboardType: TextInputType.number,
-                            decoration: const InputDecoration(
-                              labelText: 'Puerto',
-                              isDense: true,
-                            ),
-                          ),
-                          gap,
-                          Row(
-                            children: [
-                              FilledButton.icon(
-                                icon: const Icon(Icons.save, size: 18),
-                                label: const Text('Guardar y reconectar'),
-                                onPressed: () => doSave(),
-                              ),
-                              const SizedBox(width: 8),
-                              if (settings.host != Uri.base.host ||
-                                  (Uri.base.hasPort &&
-                                      settings.port != Uri.base.port))
-                                TextButton(
-                                  onPressed: () async {
-                                    final prefs =
-                                        await SharedPreferences.getInstance();
-                                    await prefs.remove(
-                                      'webappHostOverride:${Uri.base.origin}',
-                                    );
-                                    setSt(() {
-                                      settings.host = Uri.base.host;
-                                      if (Uri.base.hasPort) {
-                                        settings.port = Uri.base.port;
-                                      }
-                                      hostController.text = settings.host;
-                                      portController.text =
-                                          '${settings.port}';
-                                    });
-                                    setState(() {});
-                                    unawaited(doSave());
-                                  },
-                                  child: const Text('Volver a automático'),
-                                ),
-                            ],
-                          ),
-                        ] else ...[
-                          const Text('SIGNAL K', style: lbl),
-                          gap,
-                          Row(
-                            children: [
-                              _HostPresetChip(
-                                label: 'lysmarine.local',
-                                selected: settings.host == 'lysmarine.local',
-                                onTap: () {
-                                  // Used to only fill the text field and
-                                  // wait for a separate "Guardar y
-                                  // reconectar" tap — picking a preset
-                                  // should just connect. Confirmed live
-                                  // 2026-09-02: tapping this looked like it
-                                  // did nothing.
-                                  setSt(() {
-                                    settings.host = 'lysmarine.local';
-                                    hostController.text = settings.host;
-                                  });
-                                  unawaited(doSave());
-                                },
-                              ),
-                              const SizedBox(width: 8),
-                              _HostPresetChip(
-                                label: '100.85.109.61',
-                                selected: settings.host == '100.85.109.61',
-                                onTap: () {
-                                  setSt(() {
-                                    settings.host = '100.85.109.61';
-                                    hostController.text = settings.host;
-                                  });
-                                  unawaited(doSave());
-                                },
-                              ),
-                            ],
-                          ),
-                          gap,
-                          // Manual IP/hostname entry — the third option alongside the two
-                          // presets above: "lysmarine.local" only resolves on the network
-                          // it was set up on (mDNS is network-scoped), so a different boat
-                          // needs to type its own Signal K IP here, or use the scan below.
-                          TextField(
-                            controller: hostController,
-                            decoration: const InputDecoration(
-                              labelText: 'Host (o escribe una IP manualmente)',
-                              isDense: true,
-                            ),
-                            onChanged: (v) =>
-                                setSt(() => settings.host = v.trim()),
-                          ),
-                          gap,
-                          OutlinedButton.icon(
-                            icon: _lanScanning
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
+                                gap,
+                                Row(
+                                  children: [
+                                    FilledButton.icon(
+                                      icon: const Icon(Icons.save, size: 18),
+                                      label: const Text('Guardar y reconectar'),
+                                      onPressed: () => doSave(),
                                     ),
-                                  )
-                                : const Icon(Icons.wifi_find, size: 18),
-                            label: Text(
-                              _lanScanning
-                                  ? 'Buscando… ($_lanScanChecked/$_lanScanTotal)'
-                                  : 'Buscar Signal K en la red (puerto 3000)',
-                            ),
-                            onPressed: _lanScanning
-                                ? null
-                                : () async {
-                                    setSt(() {
-                                      _lanScanning = true;
-                                      _lanScanResults = [];
-                                      _lanScanChecked = 0;
-                                      _lanScanTotal = 0;
-                                    });
-                                    try {
-                                      final results = await scanLanForSignalK(
-                                        3000,
-                                        onProgress: (c, t) => setSt(() {
-                                          _lanScanChecked = c;
-                                          _lanScanTotal = t;
-                                        }),
-                                      );
-                                      setSt(() {
-                                        _lanScanResults = results;
-                                        _lanScanning = false;
-                                      });
-                                    } catch (e) {
-                                      setSt(() => _lanScanning = false);
-                                      if (mounted) {
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              'No se pudo escanear la red: ${friendlyApiError(e)}',
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                    }
-                                  },
-                          ),
-                          if (!_lanScanning &&
-                              _lanScanResults.isEmpty &&
-                              _lanScanChecked > 0)
-                            const Padding(
-                              padding: EdgeInsets.only(top: 6),
-                              child: Text(
-                                'No se encontró ningún Signal K en la red.',
-                                style: TextStyle(color: cMuted, fontSize: 12),
-                              ),
-                            ),
-                          if (_lanScanResults.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 6, bottom: 4),
-                              child: Text(
-                                _lanScanResults.length == 1
-                                    ? 'Encontrado: ${_lanScanResults.first}'
-                                    : 'Encontrados ${_lanScanResults.length}: ${_lanScanResults.join(', ')}',
-                                style: const TextStyle(
-                                  color: cGreen,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                                    const SizedBox(width: 8),
+                                    if (settings.host != Uri.base.host ||
+                                        (Uri.base.hasPort &&
+                                            settings.port != Uri.base.port))
+                                      TextButton(
+                                        onPressed: () async {
+                                          final prefs =
+                                              await SharedPreferences.getInstance();
+                                          await prefs.remove(
+                                            'webappHostOverride:${Uri.base.origin}',
+                                          );
+                                          setSt(() {
+                                            settings.host = Uri.base.host;
+                                            if (Uri.base.hasPort) {
+                                              settings.port = Uri.base.port;
+                                            }
+                                            hostController.text = settings.host;
+                                            portController.text =
+                                                '${settings.port}';
+                                          });
+                                          setState(() {});
+                                          unawaited(doSave());
+                                        },
+                                        child: const Text(
+                                          'Volver a automático',
+                                        ),
+                                      ),
+                                  ],
                                 ),
-                              ),
-                            ),
-                          if (_lanScanResults.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 6),
-                              child: Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: [
-                                  for (final ip in _lanScanResults)
+                              ] else ...[
+                                const Text('SIGNAL K', style: lbl),
+                                gap,
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
                                     _HostPresetChip(
-                                      label: ip,
-                                      selected: settings.host == ip,
+                                      label: 'lysmarine.local',
+                                      selected:
+                                          settings.host == 'lysmarine.local',
                                       onTap: () {
+                                        // Used to only fill the text field and
+                                        // wait for a separate "Guardar y
+                                        // reconectar" tap — picking a preset
+                                        // should just connect. Confirmed live
+                                        // 2026-09-02: tapping this looked like it
+                                        // did nothing.
                                         setSt(() {
-                                          settings.host = ip;
-                                          hostController.text = ip;
+                                          settings.host = 'lysmarine.local';
+                                          hostController.text = settings.host;
                                         });
                                         unawaited(doSave());
                                       },
                                     ),
-                                ],
-                              ),
-                            ),
-                          gap,
-                          TextField(
-                            controller: portController,
-                            decoration: const InputDecoration(
-                              labelText: 'Puerto',
-                              isDense: true,
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                          TextField(
-                            controller: authController,
-                            decoration: const InputDecoration(
-                              labelText:
-                                  'Contraseña codificada (Basic, avanzado)',
-                              helperText: 'Solo si tu servidor exige este tipo de autenticación para leer datos. La mayoría no lo necesita — usa el usuario/contraseña de abajo en su lugar.',
-                              helperMaxLines: 3,
-                              isDense: true,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          FilledButton.icon(
-                            icon: const Icon(Icons.save, size: 18),
-                            label: const Text('Guardar y reconectar'),
-                            onPressed: () => doSave(),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'USUARIO Y CONTRASEÑA DE SIGNAL K',
-                            style: lbl,
-                          ),
-                          gap,
-                          const Text(
-                            'Para que las pantallas de carta náutica (Freeboard) y fondeo puedan escribir — por ejemplo, fijar la posición del ancla. Se guarda en este dispositivo, no hace falta volver a escribirlo.',
-                            style: TextStyle(color: cMuted, fontSize: 11),
-                          ),
-                          gap,
-                          TextField(
-                            controller: skUsernameController,
-                            decoration: const InputDecoration(
-                              labelText: 'Usuario Signal K',
-                              isDense: true,
-                            ),
-                          ),
-                          gap,
-                          TextField(
-                            controller: skPasswordController,
-                            decoration: const InputDecoration(
-                              labelText: 'Contraseña Signal K',
-                              isDense: true,
-                            ),
-                            obscureText: true,
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              OutlinedButton.icon(
-                                icon: const Icon(Icons.login, size: 16),
-                                label: const Text('Guardar credenciales'),
-                                onPressed: () async {
-                                  settings.skUsername = skUsernameController
-                                      .text
-                                      .trim();
-                                  settings.skPassword =
-                                      skPasswordController.text;
-                                  await _saveSettings();
-                                  await _loginToSignalK();
-                                  if (mounted) setState(() {});
-                                },
-                              ),
-                              const SizedBox(width: 10),
-                              if (_skLoginOk == true)
-                                const Text(
-                                  'Credenciales válidas ✓',
-                                  style: TextStyle(color: cGreen, fontSize: 12),
-                                )
-                              else if (_skLoginOk == false)
-                                const Text(
-                                  'No se pudo iniciar sesión',
-                                  style: TextStyle(color: cRed, fontSize: 12),
+                                    _HostPresetChip(
+                                      label: '100.85.109.61',
+                                      selected:
+                                          settings.host == '100.85.109.61',
+                                      onTap: () {
+                                        setSt(() {
+                                          settings.host = '100.85.109.61';
+                                          hostController.text = settings.host;
+                                        });
+                                        unawaited(doSave());
+                                      },
+                                    ),
+                                  ],
                                 ),
+                                gap,
+                                // Manual IP/hostname entry — the third option alongside the two
+                                // presets above: "lysmarine.local" only resolves on the network
+                                // it was set up on (mDNS is network-scoped), so a different boat
+                                // needs to type its own Signal K IP here, or use the scan below.
+                                TextField(
+                                  controller: hostController,
+                                  decoration: const InputDecoration(
+                                    labelText:
+                                        'Host (o escribe una IP manualmente)',
+                                    isDense: true,
+                                  ),
+                                  onChanged: (v) =>
+                                      setSt(() => settings.host = v.trim()),
+                                ),
+                                gap,
+                                OutlinedButton.icon(
+                                  icon: _lanScanning
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(Icons.wifi_find, size: 18),
+                                  label: Text(
+                                    _lanScanning
+                                        ? 'Buscando… ($_lanScanChecked/$_lanScanTotal)'
+                                        : 'Buscar Signal K en la red (puerto 3000)',
+                                  ),
+                                  onPressed: _lanScanning
+                                      ? null
+                                      : () async {
+                                          setSt(() {
+                                            _lanScanning = true;
+                                            _lanScanResults = [];
+                                            _lanScanChecked = 0;
+                                            _lanScanTotal = 0;
+                                          });
+                                          try {
+                                            final results =
+                                                await scanLanForSignalK(
+                                                  3000,
+                                                  onProgress: (c, t) =>
+                                                      setSt(() {
+                                                        _lanScanChecked = c;
+                                                        _lanScanTotal = t;
+                                                      }),
+                                                );
+                                            setSt(() {
+                                              _lanScanResults = results;
+                                              _lanScanning = false;
+                                            });
+                                          } catch (e) {
+                                            setSt(() => _lanScanning = false);
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(
+                                                context,
+                                              ).showSnackBar(
+                                                SnackBar(
+                                                  content: Text(
+                                                    'No se pudo escanear la red: ${friendlyApiError(e)}',
+                                                  ),
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        },
+                                ),
+                                if (!_lanScanning &&
+                                    _lanScanResults.isEmpty &&
+                                    _lanScanChecked > 0)
+                                  const Padding(
+                                    padding: EdgeInsets.only(top: 6),
+                                    child: Text(
+                                      'No se encontró ningún Signal K en la red.',
+                                      style: TextStyle(
+                                        color: cMuted,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                if (_lanScanResults.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: 6,
+                                      bottom: 4,
+                                    ),
+                                    child: Text(
+                                      _lanScanResults.length == 1
+                                          ? 'Encontrado: ${_lanScanResults.first}'
+                                          : 'Encontrados ${_lanScanResults.length}: ${_lanScanResults.join(', ')}',
+                                      style: const TextStyle(
+                                        color: cGreen,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                if (_lanScanResults.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        for (final ip in _lanScanResults)
+                                          _HostPresetChip(
+                                            label: ip,
+                                            selected: settings.host == ip,
+                                            onTap: () {
+                                              setSt(() {
+                                                settings.host = ip;
+                                                hostController.text = ip;
+                                              });
+                                              unawaited(doSave());
+                                            },
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                gap,
+                                TextField(
+                                  controller: portController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Puerto',
+                                    isDense: true,
+                                  ),
+                                  keyboardType: TextInputType.number,
+                                ),
+                                TextField(
+                                  controller: authController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Contraseña codificada (Basic, avanzado)',
+                                    helperText: 'Solo si tu servidor exige este tipo de autenticación para leer datos. La mayoría no lo necesita — usa el usuario/contraseña de abajo en su lugar.',
+                                    helperMaxLines: 3,
+                                    isDense: true,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                FilledButton.icon(
+                                  icon: const Icon(Icons.save, size: 18),
+                                  label: const Text('Guardar y reconectar'),
+                                  onPressed: () => doSave(),
+                                ),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'USUARIO Y CONTRASEÑA DE SIGNAL K',
+                                  style: lbl,
+                                ),
+                                gap,
+                                const Text(
+                                  'Para que las pantallas de carta náutica (Freeboard) y fondeo puedan escribir — por ejemplo, fijar la posición del ancla. Se guarda en este dispositivo, no hace falta volver a escribirlo.',
+                                  style: TextStyle(color: cMuted, fontSize: 11),
+                                ),
+                                gap,
+                                TextField(
+                                  controller: skUsernameController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Usuario Signal K',
+                                    isDense: true,
+                                  ),
+                                ),
+                                gap,
+                                TextField(
+                                  controller: skPasswordController,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Contraseña Signal K',
+                                    helperText: 'Se guarda cifrada en el almacenamiento seguro del dispositivo.',
+                                    helperMaxLines: 2,
+                                    isDense: true,
+                                  ),
+                                  obscureText: true,
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    OutlinedButton.icon(
+                                      icon: const Icon(Icons.login, size: 16),
+                                      label: const Text('Guardar credenciales'),
+                                      onPressed: () async {
+                                        settings.skUsername =
+                                            skUsernameController.text.trim();
+                                        settings.skPassword =
+                                            skPasswordController.text;
+                                        await _saveSettings();
+                                        await _loginToSignalK();
+                                        if (mounted) setState(() {});
+                                      },
+                                    ),
+                                    const SizedBox(width: 10),
+                                    if (_skLoginOk == true)
+                                      const Text(
+                                        'Credenciales válidas ✓',
+                                        style: TextStyle(
+                                          color: cGreen,
+                                          fontSize: 12,
+                                        ),
+                                      )
+                                    else if (_skLoginOk == false)
+                                      const Text(
+                                        'No se pudo iniciar sesión',
+                                        style: TextStyle(
+                                          color: cRed,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ],
                             ],
                           ),
                         ],
-                      ],
                       ),
                     ),
                   ),
                   // ── Tab: Sensores ──────────────────────────────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
                     padding: const EdgeInsets.all(12),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('SENSORES', style: lbl),
-                        gap,
-                        const Text(
-                          'Descubre y asigna los paths de Signal K para baterías, solar, neveras, tanques y profundidad de este barco.',
-                          style: TextStyle(color: cMuted, fontSize: 12),
-                        ),
-                        const SizedBox(height: 12),
-                        OutlinedButton.icon(
-                          icon: const Icon(Icons.sensors, size: 18),
-                          label: const Text('Configurar sensores'),
-                          onPressed: () async {
-                            final newCfg = await showDialog<SensorConfig>(
-                              context: context,
-                              builder: (_) => _SensorConfigDialog(
-                                initial: settings.sensorConfig,
-                                discover: discoverSkPaths,
-                              ),
-                            );
-                            if (newCfg != null) {
-                              setState(() => settings.sensorConfig = newCfg);
-                              await _saveSettings();
-                              _connectSignalK();
-                            }
-                          },
-                        ),
-                        if (!kIsWeb) ...[
-                          const SizedBox(height: 20),
-                          const Text('ESCORA (BALANCEO)', style: lbl),
-                          gap,
-                          SwitchListTile(
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: const Text(
-                              'Usar acelerómetro del dispositivo',
-                              style: TextStyle(color: cText, fontSize: 13),
-                            ),
-                            subtitle: const Text(
-                              'Fuente alternativa de escora/cabeceo si el barco no tiene sensor de actitud propio (navigation.attitude)',
-                              style: TextStyle(color: cMuted, fontSize: 11),
-                            ),
-                            value: settings.usePhoneHeel,
-                            onChanged: (v) {
-                              setSt(() => settings.usePhoneHeel = v);
-                              setState(() {});
-                              unawaited(_saveSettings());
-                            },
-                          ),
-                          if (settings.usePhoneHeel)
+                        SettingsGroup(
+                          title: 'MAPEO SIGNAL K',
+                          icon: Icons.sensors,
+                          children: [
                             const Text(
-                              'Elegir el eje y calibrar se hace desde la propia pantalla: toca la tarjeta "Escora" en NAV.',
+                              'Descubre y asigna las señales de baterías, solar, profundidad, motor, neveras y tanques de este barco.',
                               style: TextStyle(color: cMuted, fontSize: 12),
                             ),
+                            const SizedBox(height: 8),
+                            SettingsResponsiveGroups(
+                              children: [
+                                SettingsStatusRow(
+                                  label: 'Baterías',
+                                  value:
+                                      '${settings.sensorConfig.batteryHouseId} / ${settings.sensorConfig.batteryStartId}',
+                                  color: cGreen,
+                                  icon: Icons.battery_charging_full,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Solar',
+                                  value: settings.sensorConfig.solarPath == null
+                                      ? 'Sin configurar'
+                                      : settings.sensorConfig.solarPath2 == null
+                                      ? '1 controlador'
+                                      : '2 controladores',
+                                  color: settings.sensorConfig.solarPath == null
+                                      ? cMuted
+                                      : cGreen,
+                                  icon: Icons.solar_power_outlined,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Profundidad',
+                                  value: settings.sensorConfig.depthPath == null
+                                      ? 'Sin configurar'
+                                      : 'Configurada',
+                                  color: settings.sensorConfig.depthPath == null
+                                      ? cMuted
+                                      : cGreen,
+                                  icon: Icons.water,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Horas de motor',
+                                  value:
+                                      settings.sensorConfig.enginePath == null
+                                      ? 'Sin configurar'
+                                      : 'Configuradas',
+                                  color:
+                                      settings.sensorConfig.enginePath == null
+                                      ? cMuted
+                                      : cGreen,
+                                  icon: Icons.build_outlined,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Tanques activos',
+                                  value: settings.sensorConfig.tanks
+                                      .where((tank) => tank.enabled)
+                                      .length
+                                      .toString(),
+                                  color:
+                                      settings.sensorConfig.tanks.any(
+                                        (tank) => tank.enabled,
+                                      )
+                                      ? cGreen
+                                      : cMuted,
+                                  icon: Icons.opacity,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.tune, size: 18),
+                              label: const Text('Configurar sensores'),
+                              onPressed: () async {
+                                final newCfg = await showDialog<SensorConfig>(
+                                  context: context,
+                                  builder: (_) => _SensorConfigDialog(
+                                    initial: settings.sensorConfig,
+                                    discover: discoverSkPaths,
+                                  ),
+                                );
+                                if (newCfg != null) {
+                                  setState(
+                                    () => settings.sensorConfig = newCfg,
+                                  );
+                                  await _saveSettings();
+                                  _connectSignalK();
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                        if (!kIsWeb) ...[
+                          SettingsGroup(
+                            title: 'ESCORA (BALANCEO)',
+                            icon: Icons.screen_rotation_alt_outlined,
+                            children: [
+                              SettingsSwitchRow(
+                                value: settings.usePhoneHeel,
+                                onChanged: (v) {
+                                  setSt(() => settings.usePhoneHeel = v);
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                                title: 'Usar acelerómetro del dispositivo',
+                                subtitle: 'Alternativa si el barco no publica navigation.attitude. El eje y la calibración se ajustan tocando “Escora” en NAV.',
+                              ),
+                            ],
+                          ),
                         ],
                       ],
                     ),
                   ),
                   // ── Tab: Histórico de gráficas ────────────────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
+                    maxWidth: 760,
                     padding: const EdgeInsets.all(12),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'Fuente de datos',
-                          style: TextStyle(color: cMuted, fontSize: 12),
-                        ),
-                        const SizedBox(height: 4),
-                        SegmentedButton<String>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 'auto',
-                              label: Text(
-                                'Automático',
-                                style: TextStyle(fontSize: 12),
+                        SettingsGroup(
+                          title: 'FUENTE Y ALMACENAMIENTO',
+                          icon: Icons.history,
+                          children: [
+                            const Text(
+                              'Fuente de datos',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            ),
+                            const SizedBox(height: 4),
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'auto',
+                                  label: Text(
+                                    'Automático',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                                ButtonSegment(
+                                  value: 'influx',
+                                  label: Text(
+                                    'InfluxDB',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                                ButtonSegment(
+                                  value: 'sk',
+                                  label: Text(
+                                    'Signal K (KIP…)',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ],
+                              selected: {settings.historySource},
+                              onSelectionChanged: (v) {
+                                setSt(() => settings.historySource = v.first);
+                                setState(() {});
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              switch (settings.historySource) {
+                                'influx' => 'Siempre usa InfluxDB.',
+                                'sk' => 'Siempre usa el History API de Signal K (funciona con KIP/SQLite u otro proveedor registrado).',
+                                _ => 'Prueba InfluxDB primero; si falla, usa el History API de Signal K (KIP/SQLite) automáticamente.',
+                              },
+                              style: const TextStyle(
+                                color: cMuted,
+                                fontSize: 11,
                               ),
                             ),
-                            ButtonSegment(
-                              value: 'influx',
-                              label: Text(
-                                'InfluxDB',
-                                style: TextStyle(fontSize: 12),
+                            if (settings.historySource != 'sk') ...[
+                              const SizedBox(height: 14),
+                              const Text('INFLUXDB', style: lbl),
+                              gap,
+                              TextField(
+                                controller: influxHostController,
+                                decoration: const InputDecoration(
+                                  labelText:
+                                      'Host (vacío = el mismo que Signal K)',
+                                  isDense: true,
+                                ),
+                                onChanged: (v) =>
+                                    setSt(() => settings.influxHost = v.trim()),
                               ),
-                            ),
-                            ButtonSegment(
-                              value: 'sk',
-                              label: Text(
-                                'Signal K (KIP…)',
-                                style: TextStyle(fontSize: 12),
+                              gap,
+                              TextField(
+                                controller: influxOrgController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Org',
+                                  isDense: true,
+                                ),
+                                onChanged: (v) =>
+                                    setSt(() => settings.influxOrg = v.trim()),
                               ),
+                              gap,
+                              TextField(
+                                controller: influxTokenController,
+                                decoration: InputDecoration(
+                                  labelText: 'Token',
+                                  helperText: kIsWeb
+                                      ? 'En web queda en el almacenamiento local del navegador; usa HTTPS y un token de solo lectura.'
+                                      : 'Se guarda cifrado en el almacenamiento seguro del dispositivo.',
+                                  helperMaxLines: 2,
+                                  isDense: true,
+                                ),
+                                obscureText: true,
+                                onChanged: (v) => setSt(
+                                  () => settings.influxToken = v.trim(),
+                                ),
+                              ),
+                              gap,
+                              TextField(
+                                controller: bucketController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Bucket',
+                                  hintText: 'enjoy_raw',
+                                  isDense: true,
+                                ),
+                                onChanged: (v) => setSt(
+                                  () => settings.influxBucket = v.trim(),
+                                ),
+                              ),
+                              gap,
+                              TextField(
+                                controller: archiveBucketController,
+                                decoration: const InputDecoration(
+                                  labelText:
+                                      'Bucket de archivo (7 días / 1 mes)',
+                                  helperText: 'Vacío = usar el mismo bucket para todos los periodos.',
+                                  helperMaxLines: 2,
+                                  isDense: true,
+                                ),
+                                onChanged: (v) => setSt(
+                                  () => settings.influxArchiveBucket = v.trim(),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+                            FilledButton.icon(
+                              icon: const Icon(Icons.save, size: 18),
+                              label: const Text('Guardar configuración'),
+                              onPressed: () => doSave(),
                             ),
                           ],
-                          selected: {settings.historySource},
-                          onSelectionChanged: (v) =>
-                              setSt(() => settings.historySource = v.first),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(switch (settings.historySource) {
-                          'influx' => 'Siempre usa InfluxDB.',
-                          'sk' => 'Siempre usa el History API de Signal K (funciona con KIP/SQLite u otro proveedor registrado).',
-                          _ => 'Prueba InfluxDB primero; si falla, usa el History API de Signal K (KIP/SQLite) automáticamente.',
-                        }, style: const TextStyle(color: cMuted, fontSize: 11)),
-                        if (settings.historySource != 'sk') ...[
-                          const SizedBox(height: 14),
-                          const Text('INFLUXDB', style: lbl),
-                          gap,
-                          TextField(
-                            controller: influxHostController,
-                            decoration: const InputDecoration(
-                              labelText: 'Host (vacío = el mismo que Signal K)',
-                              isDense: true,
-                            ),
-                            onChanged: (v) =>
-                                setSt(() => settings.influxHost = v.trim()),
-                          ),
-                          gap,
-                          TextField(
-                            controller: influxOrgController,
-                            decoration: const InputDecoration(
-                              labelText: 'Org',
-                              isDense: true,
-                            ),
-                            onChanged: (v) =>
-                                setSt(() => settings.influxOrg = v.trim()),
-                          ),
-                          gap,
-                          TextField(
-                            controller: influxTokenController,
-                            decoration: const InputDecoration(
-                              labelText: 'Token',
-                              isDense: true,
-                            ),
-                            obscureText: true,
-                            onChanged: (v) =>
-                                setSt(() => settings.influxToken = v.trim()),
-                          ),
-                          gap,
-                          TextField(
-                            controller: bucketController,
-                            decoration: const InputDecoration(
-                              labelText: 'Bucket',
-                              hintText: 'enjoy_raw',
-                              isDense: true,
-                            ),
-                            onChanged: (v) =>
-                                setSt(() => settings.influxBucket = v.trim()),
-                          ),
-                        ],
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          icon: const Icon(Icons.save, size: 18),
-                          label: const Text('Guardar y reconectar'),
-                          onPressed: () => doSave(),
                         ),
                       ],
                     ),
                   ),
                   // ── Tab: Pantalla ──────────────────────────────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
+                    maxWidth: 760,
                     padding: const EdgeInsets.all(12),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
+                        SettingsGroup(
+                          title: 'COMPORTAMIENTO',
+                          icon: Icons.phone_android,
                           children: [
-                            Switch(
+                            SettingsSwitchRow(
                               value: settings.keepAwake,
                               onChanged: (v) {
                                 setState(() => settings.keepAwake = v);
                                 _applyWakelock();
+                                unawaited(_saveSettings());
                               },
+                              title: 'Pantalla siempre activa',
+                              subtitle: 'Evita que el dispositivo se bloquee mientras muestra instrumentos.',
                             ),
-                            const SizedBox(width: 4),
-                            const Text(
-                              'Pantalla siempre activa',
-                              style: TextStyle(fontSize: 13),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Switch(
-                              value: settings.demoMode,
-                              onChanged: (v) => setState(() => setDemoMode(v)),
-                            ),
-                            const SizedBox(width: 4),
-                            const Text(
-                              'Modo DEMO (datos simulados)',
-                              style: TextStyle(fontSize: 13),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Switch(
+                            SettingsSwitchRow(
                               value: settings.autoHideHeaderOnNav,
                               onChanged: (v) {
                                 setState(
@@ -9008,284 +9284,303 @@ class _DashboardState extends State<Dashboard> {
                                 );
                                 unawaited(_saveSettings());
                               },
-                            ),
-                            const SizedBox(width: 4),
-                            const Text(
-                              'Ocultar menú automáticamente',
-                              style: TextStyle(fontSize: 13),
+                              title: 'Ocultar menú automáticamente',
+                              subtitle: 'En NAV, VNT, PWR y AIS. ANC y MAP siempre usan toda la pantalla.',
                             ),
                           ],
                         ),
-                        const Padding(
-                          padding: EdgeInsets.only(left: 62, bottom: 4),
-                          child: Text(
-                            'En NAV, VNT, PWR y AIS. En ANC y MAP siempre se oculta '
-                            '(necesitan toda la pantalla); en el resto no hace falta '
-                            '(son de consulta rápida).',
-                            style: TextStyle(color: cMuted, fontSize: 11),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'MODO',
-                          style: TextStyle(
-                            color: cMuted,
-                            fontSize: 10,
-                            letterSpacing: 1.1,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        SegmentedButton<String>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 'dia',
-                              label: Text('Día'),
-                              icon: Icon(Icons.wb_sunny_outlined, size: 14),
-                            ),
-                            ButtonSegment(
-                              value: 'auto',
-                              label: Text('Auto (dispositivo)'),
-                              icon: Icon(Icons.brightness_auto, size: 14),
-                            ),
-                            ButtonSegment(
-                              value: 'noche',
-                              label: Text('Noche'),
-                              icon: Icon(Icons.nightlight_outlined, size: 14),
-                            ),
-                          ],
-                          selected: {settings.brightnessMode},
-                          onSelectionChanged: (v) {
-                            setState(() => settings.brightnessMode = v.first);
-                            unawaited(_saveSettings());
-                          },
-                          style: const ButtonStyle(
-                            visualDensity: VisualDensity(
-                              horizontal: -2,
-                              vertical: -2,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'ESTILO NAV',
-                          style: TextStyle(
-                            color: cMuted,
-                            fontSize: 10,
-                            letterSpacing: 1.1,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        SegmentedButton<String>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 'classic',
-                              label: Text('Clásica'),
-                            ),
-                            ButtonSegment(
-                              value: 'premium',
-                              label: Text('Premium'),
-                            ),
-                            ButtonSegment(value: 'both', label: Text('Ambas')),
-                          ],
-                          selected: {settings.navLayoutMode},
-                          onSelectionChanged: (v) {
-                            setState(() {
-                              settings.navLayoutMode = v.first;
-                              _navPageIndex = 0;
-                            });
-                            unawaited(_saveSettings());
-                          },
-                          style: const ButtonStyle(
-                            visualDensity: VisualDensity(
-                              horizontal: -2,
-                              vertical: -2,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'ESTILO MOTOR',
-                          style: TextStyle(
-                            color: cMuted,
-                            fontSize: 10,
-                            letterSpacing: 1.1,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        SegmentedButton<String>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 'ninguno',
-                              label: Text('Ninguno'),
-                            ),
-                            ButtonSegment(
-                              value: 'simple',
-                              label: Text('Simple'),
-                            ),
-                            ButtonSegment(
-                              value: 'completo',
-                              label: Text('Completo'),
-                            ),
-                          ],
-                          selected: {
-                            !settings.motorPanelEnabled
-                                ? 'ninguno'
-                                : settings.motorPanelDetailed
-                                ? 'completo'
-                                : 'simple',
-                          },
-                          onSelectionChanged: (v) {
-                            setState(() {
-                              switch (v.first) {
-                                case 'ninguno':
-                                  settings.motorPanelEnabled = false;
-                                case 'completo':
-                                  settings.motorPanelEnabled = true;
-                                  settings.motorPanelDetailed = true;
-                                default:
-                                  settings.motorPanelEnabled = true;
-                                  settings.motorPanelDetailed = false;
-                              }
-                            });
-                            unawaited(_saveSettings());
-                          },
-                          style: const ButtonStyle(
-                            visualDensity: VisualDensity(
-                              horizontal: -2,
-                              vertical: -2,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'REJILLA NAV CLÁSICA',
-                          style: TextStyle(
-                            color: cMuted,
-                            fontSize: 10,
-                            letterSpacing: 1.1,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        SegmentedButton<int>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 3,
-                              label: Text('3×2 (6 cartas)'),
-                            ),
-                            ButtonSegment(
-                              value: 4,
-                              label: Text('4×2 (8 cartas)'),
-                            ),
-                          ],
-                          selected: {settings.navGridColumns},
-                          onSelectionChanged: (v) {
-                            setState(() => settings.navGridColumns = v.first);
-                            unawaited(_saveSettings());
-                          },
-                          style: const ButtonStyle(
-                            visualDensity: VisualDensity(
-                              horizontal: -2,
-                              vertical: -2,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text('ICONO DEL BARCO', style: lbl),
-                        gap,
-                        Row(
+                        SettingsGroup(
+                          title: 'APARIENCIA Y PANELES',
+                          icon: Icons.palette_outlined,
                           children: [
-                            Container(
-                              width: 64,
-                              height: 64,
-                              padding: const EdgeInsets.all(6),
-                              decoration: BoxDecoration(
-                                color: cBg,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.white12),
-                              ),
-                              child: Transform.rotate(
-                                angle: math.pi / 2,
-                                child: Image.asset(
-                                  boatIconById(settings.shipIconId).grandeAsset,
-                                  fit: BoxFit.contain,
-                                ),
+                            const Text(
+                              'MODO',
+                              style: TextStyle(
+                                color: cMuted,
+                                fontSize: 10,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    boatIconById(settings.shipIconId).label,
-                                    style: const TextStyle(
-                                      color: cText,
-                                      fontSize: 13,
-                                    ),
+                            const SizedBox(height: 6),
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'dia',
+                                  label: Text('Día'),
+                                  icon: Icon(Icons.wb_sunny_outlined, size: 14),
+                                ),
+                                ButtonSegment(
+                                  value: 'auto',
+                                  label: Text('Auto (dispositivo)'),
+                                  icon: Icon(Icons.brightness_auto, size: 14),
+                                ),
+                                ButtonSegment(
+                                  value: 'noche',
+                                  label: Text('Noche'),
+                                  icon: Icon(
+                                    Icons.nightlight_outlined,
+                                    size: 14,
                                   ),
-                                  const SizedBox(height: 6),
-                                  OutlinedButton(
-                                    onPressed: () => showShipIconPicker(
-                                      context,
-                                      settings.shipIconId,
-                                      (id) {
-                                        setState(() => settings.shipIconId = id);
-                                        unawaited(_saveSettings());
-                                      },
-                                    ),
-                                    child: const Text('Cambiar icono'),
-                                  ),
-                                ],
+                                ),
+                              ],
+                              selected: {settings.brightnessMode},
+                              onSelectionChanged: (v) {
+                                setState(
+                                  () => settings.brightnessMode = v.first,
+                                );
+                                unawaited(_saveSettings());
+                              },
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity(
+                                  horizontal: -2,
+                                  vertical: -2,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                               ),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'ESTILO NAV',
+                              style: TextStyle(
+                                color: cMuted,
+                                fontSize: 10,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'classic',
+                                  label: Text('Clásica'),
+                                ),
+                                ButtonSegment(
+                                  value: 'premium',
+                                  label: Text('Premium'),
+                                ),
+                                ButtonSegment(
+                                  value: 'both',
+                                  label: Text('Ambas'),
+                                ),
+                              ],
+                              selected: {settings.navLayoutMode},
+                              onSelectionChanged: (v) {
+                                setState(() {
+                                  settings.navLayoutMode = v.first;
+                                  _navPageIndex = 0;
+                                });
+                                unawaited(_saveSettings());
+                              },
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity(
+                                  horizontal: -2,
+                                  vertical: -2,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'ESTILO MOTOR',
+                              style: TextStyle(
+                                color: cMuted,
+                                fontSize: 10,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'ninguno',
+                                  label: Text('Ninguno'),
+                                ),
+                                ButtonSegment(
+                                  value: 'simple',
+                                  label: Text('Simple'),
+                                ),
+                                ButtonSegment(
+                                  value: 'completo',
+                                  label: Text('Completo'),
+                                ),
+                              ],
+                              selected: {
+                                !settings.motorPanelEnabled
+                                    ? 'ninguno'
+                                    : settings.motorPanelDetailed
+                                    ? 'completo'
+                                    : 'simple',
+                              },
+                              onSelectionChanged: (v) {
+                                setState(() {
+                                  switch (v.first) {
+                                    case 'ninguno':
+                                      settings.motorPanelEnabled = false;
+                                    case 'completo':
+                                      settings.motorPanelEnabled = true;
+                                      settings.motorPanelDetailed = true;
+                                    default:
+                                      settings.motorPanelEnabled = true;
+                                      settings.motorPanelDetailed = false;
+                                  }
+                                });
+                                unawaited(_saveSettings());
+                              },
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity(
+                                  horizontal: -2,
+                                  vertical: -2,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'REJILLA NAV CLÁSICA',
+                              style: TextStyle(
+                                color: cMuted,
+                                fontSize: 10,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            SegmentedButton<int>(
+                              segments: const [
+                                ButtonSegment(
+                                  value: 3,
+                                  label: Text('3×2 (6 cartas)'),
+                                ),
+                                ButtonSegment(
+                                  value: 4,
+                                  label: Text('4×2 (8 cartas)'),
+                                ),
+                              ],
+                              selected: {settings.navGridColumns},
+                              onSelectionChanged: (v) {
+                                setState(
+                                  () => settings.navGridColumns = v.first,
+                                );
+                                unawaited(_saveSettings());
+                              },
+                              style: const ButtonStyle(
+                                visualDensity: VisualDensity(
+                                  horizontal: -2,
+                                  vertical: -2,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text('ICONO DEL BARCO', style: lbl),
+                            gap,
+                            Row(
+                              children: [
+                                Container(
+                                  width: 64,
+                                  height: 64,
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: cBg,
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: Colors.white12),
+                                  ),
+                                  child: Transform.rotate(
+                                    angle: math.pi / 2,
+                                    child: Image.asset(
+                                      boatIconById(settings.shipIconId)
+                                          .grandeAsset,
+                                      fit: BoxFit.contain,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        boatIconById(settings.shipIconId).label,
+                                        style: const TextStyle(
+                                          color: cText,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      OutlinedButton(
+                                        onPressed: () => showShipIconPicker(
+                                          context,
+                                          settings.shipIconId,
+                                          (id) {
+                                            setState(
+                                              () => settings.shipIconId = id,
+                                            );
+                                            unawaited(_saveSettings());
+                                          },
+                                        ),
+                                        child: const Text('Cambiar icono'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                        const SizedBox(height: 16),
                         // Just what shows on the NAV AIS card — not an
                         // alarm (see CFG → Alarmas for the real collision
                         // alarm, which has its own, much tighter
                         // thresholds and actually alerts).
-                        const Text('AIS — MOSTRADO EN NAV', style: lbl),
-                        gap,
-                        _ThresholdRow(
-                          label: 'CPA máximo mostrado',
-                          unit: 'NM',
-                          value: settings.aisCpaMaxNm,
-                          onChanged: (v) {
-                            setSt(() => settings.aisCpaMaxNm = v);
-                            setState(() {});
-                            unawaited(_saveSettings());
-                          },
-                        ),
-                        _ThresholdRow(
-                          label: 'TCPA máximo mostrado',
-                          unit: 'min',
-                          value: settings.aisTcpaMaxMin,
-                          onChanged: (v) {
-                            setSt(() => settings.aisTcpaMaxMin = v);
-                            setState(() {});
-                            unawaited(_saveSettings());
-                          },
+                        SettingsGroup(
+                          title: 'AIS MOSTRADO EN NAV',
+                          icon: Icons.radar,
+                          children: [
+                            const Text(
+                              'Estos límites solo filtran lo mostrado. Las alarmas de colisión tienen umbrales independientes.',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            ),
+                            _ThresholdRow(
+                              label: 'CPA máximo mostrado',
+                              unit: 'NM',
+                              value: settings.aisCpaMaxNm,
+                              min: 0.1,
+                              max: 20,
+                              divisions: 199,
+                              onChanged: (v) {
+                                setSt(() => settings.aisCpaMaxNm = v);
+                                setState(() {});
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            _ThresholdRow(
+                              label: 'TCPA máximo mostrado',
+                              unit: 'min',
+                              value: settings.aisTcpaMaxMin,
+                              min: 1,
+                              max: 120,
+                              divisions: 119,
+                              onChanged: (v) {
+                                setSt(() => settings.aisTcpaMaxMin = v);
+                                setState(() {});
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ),
                   // ── Tab: Alarmas ────────────────────────────────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
                     padding: const EdgeInsets.all(12),
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 480),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      constraints: const BoxConstraints(maxWidth: 760),
+                      child: SettingsResponsiveGroups(
                         children: [
                           SettingsGroup(
                             title: 'AVISO PUSH (ntfy.sh)',
@@ -9293,12 +9588,37 @@ class _DashboardState extends State<Dashboard> {
                             children: [
                               TextFormField(
                                 initialValue: settings.ntfyTopic,
-                                decoration: const InputDecoration(
+                                decoration: InputDecoration(
                                   labelText: 'Topic de ntfy',
                                   isDense: true,
+                                  helperText: 'Trátalo como una contraseña: quien lo conozca puede recibir los avisos.',
+                                  helperMaxLines: 2,
+                                  suffixIcon: IconButton(
+                                    tooltip: 'Copiar topic',
+                                    icon: const Icon(Icons.copy, size: 18),
+                                    onPressed: settings.ntfyTopic.trim().isEmpty
+                                        ? null
+                                        : () async {
+                                            await Clipboard.setData(
+                                              ClipboardData(
+                                                text: settings.ntfyTopic.trim(),
+                                              ),
+                                            );
+                                            if (ctx.mounted) {
+                                              ScaffoldMessenger.of(ctx)
+                                                  .showSnackBar(
+                                                    const SnackBar(
+                                                      content: Text(
+                                                        'Topic copiado.',
+                                                      ),
+                                                    ),
+                                                  );
+                                            }
+                                          },
+                                  ),
                                 ),
                                 onChanged: (v) {
-                                  settings.ntfyTopic = v;
+                                  setSt(() => settings.ntfyTopic = v);
                                   unawaited(_saveSettings());
                                   // Reported live 2026-09-04: changing the
                                   // topic here didn't reach the server
@@ -9309,33 +9629,56 @@ class _DashboardState extends State<Dashboard> {
                                   _ntfyTopicSyncDebounce?.cancel();
                                   _ntfyTopicSyncDebounce = Timer(
                                     const Duration(seconds: 1),
-                                    () => unawaited(
-                                      _syncOwnAnchorPluginConfig(),
-                                    ),
+                                    () =>
+                                        unawaited(_syncOwnAnchorPluginConfig()),
                                   );
                                 },
                               ),
+                              if (settings.ntfyTopic.startsWith('SV_'))
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 6),
+                                  child: Text(
+                                    'Este topic parece derivado del nombre del barco y puede ser predecible. Cámbialo por una cadena larga y aleatoria.',
+                                    style: TextStyle(
+                                      color: cOrange,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ),
                               const SizedBox(height: 10),
                               Row(
                                 children: [
-                                  const Text(
-                                    'No repetir antes de (app y vigilante del servidor)',
-                                    style: TextStyle(fontSize: 13),
+                                  const Expanded(
+                                    child: Text(
+                                      'Intervalo mínimo entre avisos\n(app y vigilante del servidor)',
+                                      style: TextStyle(fontSize: 13),
+                                    ),
                                   ),
-                                  const Spacer(),
+                                  const SizedBox(width: 8),
                                   DropdownButton<int>(
                                     value: settings.ntfyMinIntervalSec,
                                     dropdownColor: cPanel,
-                                    items: const [30, 60, 300, 600, 900, 1800, 3600]
-                                        .map(
-                                          (s) => DropdownMenuItem(
-                                            value: s,
-                                            child: Text(
-                                              s < 60 ? '$s seg' : '${s ~/ 60} min',
-                                            ),
-                                          ),
-                                        )
-                                        .toList(),
+                                    items:
+                                        const [
+                                              30,
+                                              60,
+                                              300,
+                                              600,
+                                              900,
+                                              1800,
+                                              3600,
+                                            ]
+                                            .map(
+                                              (s) => DropdownMenuItem(
+                                                value: s,
+                                                child: Text(
+                                                  s < 60
+                                                      ? '$s seg'
+                                                      : '${s ~/ 60} min',
+                                                ),
+                                              ),
+                                            )
+                                            .toList(),
                                     onChanged: (v) {
                                       if (v == null) return;
                                       setSt(
@@ -9395,9 +9738,7 @@ class _DashboardState extends State<Dashboard> {
                                       if (v == true) {
                                         settings.ntfyAlarmKeys.add(entry.$1);
                                       } else {
-                                        settings.ntfyAlarmKeys.remove(
-                                          entry.$1,
-                                        );
+                                        settings.ntfyAlarmKeys.remove(entry.$1);
                                       }
                                     });
                                     setState(() {});
@@ -9413,11 +9754,10 @@ class _DashboardState extends State<Dashboard> {
                                 onPressed: settings.ntfyTopic.trim().isEmpty
                                     ? null
                                     : () async {
-                                        final ok = await _ntfyPush._sendNtfyTestPush();
+                                        final ok = await _ntfyPush
+                                            ._sendNtfyTestPush();
                                         if (!ctx.mounted) return;
-                                        ScaffoldMessenger.of(
-                                          ctx,
-                                        ).showSnackBar(
+                                        ScaffoldMessenger.of(ctx).showSnackBar(
                                           SnackBar(
                                             content: Text(
                                               ok
@@ -9445,8 +9785,7 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_syncAlarmSound());
                                 },
                                 title: 'Usar zonas de Signal K',
-                                subtitle:
-                                    'Zonas configuradas en el propio servidor (notifications.*)',
+                                subtitle: 'Zonas configuradas en el propio servidor (notifications.*)',
                               ),
                               if (settings.alarmsUseSkZones) ...[
                                 const SizedBox(height: 8),
@@ -9502,8 +9841,7 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_syncAlarmSound());
                                 },
                                 title: 'Corredera (SOG sin STW)',
-                                subtitle:
-                                    'Salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled/parada',
+                                subtitle: 'Salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled/parada',
                               ),
                               if (settings.alarmCorrederaEnabled)
                                 SettingsSwitchRow(
@@ -9533,8 +9871,7 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_syncAlarmSound());
                                 },
                                 title: 'Alarma de colisión AIS',
-                                subtitle:
-                                    'Salta cuando CPA y TCPA del blanco más cercano bajan de estos umbrales a la vez',
+                                subtitle: 'Salta cuando CPA y TCPA del blanco más cercano bajan de estos umbrales a la vez',
                               ),
                               if (settings.alarmAisEnabled) ...[
                                 SettingsSwitchRow(
@@ -9551,6 +9888,9 @@ class _DashboardState extends State<Dashboard> {
                                   label: 'Alarma CPA',
                                   unit: 'NM',
                                   value: settings.alarmAisCpaNm,
+                                  min: 0.1,
+                                  max: 10,
+                                  divisions: 99,
                                   onChanged: (v) {
                                     setSt(() => settings.alarmAisCpaNm = v);
                                     setState(() {});
@@ -9561,6 +9901,9 @@ class _DashboardState extends State<Dashboard> {
                                   label: 'Alarma TCPA',
                                   unit: 'min',
                                   value: settings.alarmAisTcpaMin,
+                                  min: 1,
+                                  max: 60,
+                                  divisions: 59,
                                   onChanged: (v) {
                                     setSt(() => settings.alarmAisTcpaMin = v);
                                     setState(() {});
@@ -9601,9 +9944,7 @@ class _DashboardState extends State<Dashboard> {
                               SettingsSwitchRow(
                                 value: settings.alarmEngineOilSound,
                                 onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineOilSound = v,
-                                  );
+                                  setSt(() => settings.alarmEngineOilSound = v);
                                   setState(() {});
                                   unawaited(_saveSettings());
                                   unawaited(_syncAlarmSound());
@@ -9614,6 +9955,9 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'Mínimo',
                                 unit: 'bar',
                                 value: settings.alarmEngineOilMinBar,
+                                min: 0.1,
+                                max: 10,
+                                divisions: 99,
                                 onChanged: (v) {
                                   setSt(
                                     () => settings.alarmEngineOilMinBar = v,
@@ -9647,10 +9991,11 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'Máximo',
                                 unit: '°C',
                                 value: settings.alarmEngineTempMaxC,
+                                min: 60,
+                                max: 130,
+                                divisions: 70,
                                 onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineTempMaxC = v,
-                                  );
+                                  setSt(() => settings.alarmEngineTempMaxC = v);
                                   setState(() {});
                                   unawaited(_saveSettings());
                                 },
@@ -9680,10 +10025,11 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'Mínimo',
                                 unit: 'V',
                                 value: settings.alarmEngineVoltMinV,
+                                min: 8,
+                                max: 30,
+                                divisions: 88,
                                 onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineVoltMinV = v,
-                                  );
+                                  setSt(() => settings.alarmEngineVoltMinV = v);
                                   setState(() {});
                                   unawaited(_saveSettings());
                                 },
@@ -9701,8 +10047,7 @@ class _DashboardState extends State<Dashboard> {
                                 value: settings.alarmEngineGlowPlugSound,
                                 onChanged: (v) {
                                   setSt(
-                                    () =>
-                                        settings.alarmEngineGlowPlugSound = v,
+                                    () => settings.alarmEngineGlowPlugSound = v,
                                   );
                                   setState(() {});
                                   unawaited(_saveSettings());
@@ -9740,10 +10085,7 @@ class _DashboardState extends State<Dashboard> {
                               if (settings.customAlarms.isEmpty)
                                 const Text(
                                   'Ninguna. Toca + para añadir una.',
-                                  style: TextStyle(
-                                    color: cMuted,
-                                    fontSize: 12,
-                                  ),
+                                  style: TextStyle(color: cMuted, fontSize: 12),
                                 )
                               else
                                 for (final rule in settings.customAlarms)
@@ -9756,15 +10098,27 @@ class _DashboardState extends State<Dashboard> {
                                       unawaited(_syncAlarmSound());
                                     },
                                     onDelete: () {
-                                      setSt(
-                                        () => settings.customAlarms
-                                            .removeWhere(
-                                              (r) => r.id == rule.id,
-                                            ),
-                                      );
-                                      setState(() {});
-                                      unawaited(_saveSettings());
-                                      unawaited(_syncAlarmSound());
+                                      unawaited(() async {
+                                        final confirmed =
+                                            await confirmSettingsAction(
+                                              context,
+                                              title: '¿Borrar esta alarma?',
+                                              message:
+                                                  'Se eliminará “${rule.label}” y no podrá recuperarse.',
+                                              confirmLabel: 'Borrar',
+                                              destructive: true,
+                                            );
+                                        if (!confirmed || !mounted) return;
+                                        setSt(
+                                          () =>
+                                              settings.customAlarms.removeWhere(
+                                                (r) => r.id == rule.id,
+                                              ),
+                                        );
+                                        setState(() {});
+                                        await _saveSettings();
+                                        await _syncAlarmSound();
+                                      }());
                                     },
                                   ),
                             ],
@@ -9774,12 +10128,11 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   ),
                   // ── Tab: Fondeo (native anchor watch alarms) ─────────────────────────
-                  SingleChildScrollView(
+                  SettingsPageBody(
                     padding: const EdgeInsets.all(12),
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 480),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      constraints: const BoxConstraints(maxWidth: 760),
+                      child: SettingsResponsiveGroups(
                         children: [
                           SettingsGroup(
                             title: 'CAMBIO DE PROFUNDIDAD',
@@ -9789,24 +10142,21 @@ class _DashboardState extends State<Dashboard> {
                                 value: settings.alarmAnchorDepthEnabled,
                                 onChanged: (v) {
                                   setSt(
-                                    () =>
-                                        settings.alarmAnchorDepthEnabled = v,
+                                    () => settings.alarmAnchorDepthEnabled = v,
                                   );
                                   setState(() {});
                                   unawaited(_saveSettings());
                                   unawaited(_syncAlarmSound());
                                 },
                                 title: 'Alertar si la profundidad cambia',
-                                subtitle:
-                                    'Margen alrededor de la profundidad que había al fondear — no la del scope',
+                                subtitle: 'Margen alrededor de la profundidad que había al fondear — no la del scope',
                               ),
                               if (settings.alarmAnchorDepthEnabled) ...[
                                 SettingsSwitchRow(
                                   value: settings.alarmAnchorDepthSound,
                                   onChanged: (v) {
                                     setSt(
-                                      () =>
-                                          settings.alarmAnchorDepthSound = v,
+                                      () => settings.alarmAnchorDepthSound = v,
                                     );
                                     setState(() {});
                                     unawaited(_saveSettings());
@@ -9818,10 +10168,13 @@ class _DashboardState extends State<Dashboard> {
                                   label: 'Margen',
                                   unit: 'm',
                                   value: settings.alarmAnchorDepthMarginM,
+                                  min: 0.1,
+                                  max: 20,
+                                  divisions: 199,
                                   onChanged: (v) {
                                     setSt(
-                                      () => settings.alarmAnchorDepthMarginM =
-                                          v,
+                                      () =>
+                                          settings.alarmAnchorDepthMarginM = v,
                                     );
                                     setState(() {});
                                     unawaited(_saveSettings());
@@ -9851,8 +10204,7 @@ class _DashboardState extends State<Dashboard> {
                                   value: settings.alarmAnchorWindSound,
                                   onChanged: (v) {
                                     setSt(
-                                      () =>
-                                          settings.alarmAnchorWindSound = v,
+                                      () => settings.alarmAnchorWindSound = v,
                                     );
                                     setState(() {});
                                     unawaited(_saveSettings());
@@ -9865,8 +10217,8 @@ class _DashboardState extends State<Dashboard> {
                                   unit: 'kt',
                                   value: settings.alarmAnchorWindKn,
                                   min: 5,
-                                  max: 60,
-                                  divisions: 55,
+                                  max: 80,
+                                  divisions: 75,
                                   onChanged: (v) {
                                     setSt(() => settings.alarmAnchorWindKn = v);
                                     setState(() {});
@@ -9884,17 +10236,16 @@ class _DashboardState extends State<Dashboard> {
                                 value: settings.alarmAnchorNoPositionEnabled,
                                 onChanged: (v) {
                                   setSt(
-                                    () => settings.alarmAnchorNoPositionEnabled =
-                                        v,
+                                    () =>
+                                        settings.alarmAnchorNoPositionEnabled =
+                                            v,
                                   );
                                   setState(() {});
                                   unawaited(_saveSettings());
                                   unawaited(_syncAlarmSound());
                                 },
-                                title:
-                                    'Alertar si se pierde la posición estando fondeado',
-                                subtitle:
-                                    'Ni Signal K ni el GPS del dispositivo tienen posición — no se puede vigilar el garreo',
+                                title: 'Alertar si se pierde la posición estando fondeado',
+                                subtitle: 'Ni Signal K ni el GPS del dispositivo tienen posición — no se puede vigilar el garreo',
                               ),
                             ],
                           ),
@@ -9922,8 +10273,7 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_saveSettings());
                                 },
                                 title: 'Por patrón de movimiento',
-                                subtitle:
-                                    'Alejarse en línea recta, no el vaivén típico del fondeo',
+                                subtitle: 'Alejarse en línea recta, no el vaivén típico del fondeo',
                               ),
                               SettingsSwitchRow(
                                 value: settings.anchorDetectPhoneLeftBySteps,
@@ -9937,23 +10287,20 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_saveSettings());
                                 },
                                 title: 'Por podómetro',
-                                subtitle:
-                                    'Pide permiso de actividad física la primera vez',
+                                subtitle: 'Pide permiso de actividad física la primera vez',
                               ),
                               SettingsSwitchRow(
                                 value: settings.anchorDetectPhoneLeftByWifi,
                                 onChanged: (v) {
                                   setSt(
-                                    () =>
-                                        settings.anchorDetectPhoneLeftByWifi =
-                                            v,
+                                    () => settings.anchorDetectPhoneLeftByWifi =
+                                        v,
                                   );
                                   setState(() {});
                                   unawaited(_saveSettings());
                                 },
                                 title: 'Por WiFi del barco',
-                                subtitle:
-                                    'Avisa si el móvil pierde la red WiFi del barco',
+                                subtitle: 'Avisa si el móvil pierde la red WiFi del barco',
                               ),
                               if (settings.anchorDetectPhoneLeftByWifi) ...[
                                 const SizedBox(height: 6),
@@ -9990,18 +10337,19 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_saveSettings());
                                 },
                                 title: 'Ignorar saltos de posición aislados',
-                                subtitle:
-                                    'Un único salto de GPS grande no cuenta como garreo — solo un movimiento sostenido',
+                                subtitle: 'Un único salto de GPS grande no cuenta como garreo — solo un movimiento sostenido',
                               ),
                               if (settings.alarmAnchorFilterGlitches)
                                 _ThresholdRow(
                                   label: 'Salto considerado sospechoso',
                                   unit: 'm',
                                   value: settings.alarmAnchorGlitchJumpM,
+                                  min: 5,
+                                  max: 500,
+                                  divisions: 99,
                                   onChanged: (v) {
                                     setSt(
-                                      () =>
-                                          settings.alarmAnchorGlitchJumpM = v,
+                                      () => settings.alarmAnchorGlitchJumpM = v,
                                     );
                                     setState(() {});
                                     unawaited(_saveSettings());
@@ -10024,6 +10372,9 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'Altura del roller sobre el agua',
                                 unit: 'm',
                                 value: settings.anchorBowRollerHeightM,
+                                min: 0,
+                                max: 10,
+                                divisions: 100,
                                 onChanged: (v) {
                                   setSt(
                                     () => settings.anchorBowRollerHeightM = v,
@@ -10036,10 +10387,12 @@ class _DashboardState extends State<Dashboard> {
                                 label: 'Longitud total de cadena',
                                 unit: 'm',
                                 value: settings.anchorTotalChainLengthM,
+                                min: 1,
+                                max: 300,
+                                divisions: 299,
                                 onChanged: (v) {
                                   setSt(
-                                    () =>
-                                        settings.anchorTotalChainLengthM = v,
+                                    () => settings.anchorTotalChainLengthM = v,
                                   );
                                   setState(() {});
                                   unawaited(_saveSettings());
@@ -10054,7 +10407,18 @@ class _DashboardState extends State<Dashboard> {
                               OutlinedButton.icon(
                                 onPressed: _ownTrack.points.isEmpty
                                     ? null
-                                    : () {
+                                    : () async {
+                                        final count = _ownTrack.points.length;
+                                        final confirmed =
+                                            await confirmSettingsAction(
+                                              context,
+                                              title: '¿Borrar la traza?',
+                                              message:
+                                                  'Se eliminarán $count puntos de la traza propia. La posición y el estado del ancla no cambiarán.',
+                                              confirmLabel: 'Borrar traza',
+                                              destructive: true,
+                                            );
+                                        if (!confirmed || !mounted) return;
                                         setSt(_ownTrack.clear);
                                         setState(() {});
                                       },
@@ -10074,7 +10438,8 @@ class _DashboardState extends State<Dashboard> {
                   Builder(
                     builder: (_) {
                       final sc = settings.sensorConfig;
-                      return SingleChildScrollView(
+                      return SettingsPageBody(
+                        maxWidth: 1100,
                         padding: const EdgeInsets.all(12),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -10092,6 +10457,135 @@ class _DashboardState extends State<Dashboard> {
                                 buildNumber: _pkgBuild,
                                 installSource: _installSourceLabel,
                               ),
+                            ),
+                            const SizedBox(height: 12),
+                            SettingsGroup(
+                              title: 'ESTADO DEL SISTEMA',
+                              icon: Icons.monitor_heart_outlined,
+                              children: [
+                                SettingsStatusRow(
+                                  label: 'Signal K',
+                                  value: signalK.connected
+                                      ? 'Conectado'
+                                      : 'Desconectado',
+                                  color: signalK.connected ? cGreen : cRed,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Servidor',
+                                  value: '${settings.host}:${settings.port}',
+                                  color: signalK.connected ? cGreen : cMuted,
+                                  icon: Icons.dns_outlined,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Último dato',
+                                  value: signalK.lastUpdate == null
+                                      ? 'Sin datos'
+                                      : _lastUpdateText(signalK.lastUpdate),
+                                  color: signalK.lastUpdate == null
+                                      ? cMuted
+                                      : cCyan,
+                                  icon: Icons.schedule,
+                                ),
+                                SettingsStatusRow(
+                                  label: 'Sesión de escritura',
+                                  value: _skLoginOk == true
+                                      ? 'Autenticada'
+                                      : _skLoginOk == false
+                                      ? 'Fallida'
+                                      : 'Sin comprobar',
+                                  color: _skLoginOk == true
+                                      ? cGreen
+                                      : _skLoginOk == false
+                                      ? cRed
+                                      : cMuted,
+                                  icon: Icons.lock_outline,
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'HERRAMIENTAS',
+                              icon: Icons.build_outlined,
+                              children: [
+                                SettingsSwitchRow(
+                                  value: settings.demoMode,
+                                  onChanged: (v) =>
+                                      setState(() => setDemoMode(v)),
+                                  title: 'Modo DEMO',
+                                  subtitle: 'Datos simulados para pruebas. No debe quedar activo durante la navegación real.',
+                                ),
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: OutlinedButton.icon(
+                                    onPressed: () {
+                                      setSt(
+                                        () => _adminRevealed = !_adminRevealed,
+                                      );
+                                      setState(() {});
+                                    },
+                                    icon: Icon(
+                                      _adminRevealed
+                                          ? Icons.visibility_off_outlined
+                                          : Icons.admin_panel_settings_outlined,
+                                      size: 17,
+                                    ),
+                                    label: Text(
+                                      _adminRevealed
+                                          ? 'Ocultar modo técnico'
+                                          : 'Mostrar modo técnico',
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    OutlinedButton.icon(
+                                      onPressed: settings.demoMode
+                                          ? null
+                                          : _connectSignalK,
+                                      icon: const Icon(Icons.refresh, size: 17),
+                                      label: const Text('Reconectar Signal K'),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: () async {
+                                        final report = [
+                                          'REWIND Panel $_pkgVersion (build $_pkgBuild)',
+                                          'Instalación: $_installSourceLabel',
+                                          'Signal K: ${signalK.connected ? 'conectado' : 'desconectado'}',
+                                          'Servidor: ${settings.host}:${settings.port}',
+                                          'Último dato: ${signalK.lastUpdate == null ? 'sin datos' : signalK.lastUpdate!.toIso8601String()}',
+                                          'Sesión escritura: ${_skLoginOk == true
+                                              ? 'autenticada'
+                                              : _skLoginOk == false
+                                              ? 'fallida'
+                                              : 'sin comprobar'}',
+                                          if (lastCrashInfo != null)
+                                            'Último error:\n$lastCrashInfo',
+                                        ].join('\n');
+                                        await Clipboard.setData(
+                                          ClipboardData(text: report),
+                                        );
+                                        if (ctx.mounted) {
+                                          ScaffoldMessenger.of(ctx)
+                                              .showSnackBar(
+                                                const SnackBar(
+                                                  content: Text(
+                                                    'Diagnóstico copiado sin credenciales.',
+                                                  ),
+                                                ),
+                                              );
+                                        }
+                                      },
+                                      icon: const Icon(
+                                        Icons.copy_all_outlined,
+                                        size: 17,
+                                      ),
+                                      label: const Text('Copiar diagnóstico'),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                             if (lastCrashInfo != null) ...[
                               const SizedBox(height: 12),
@@ -10125,8 +10619,21 @@ class _DashboardState extends State<Dashboard> {
                                         ),
                                         const Spacer(),
                                         TextButton(
-                                          onPressed: () =>
-                                              setState(() => lastCrashInfo = null),
+                                          onPressed: () async {
+                                            final confirmed =
+                                                await confirmSettingsAction(
+                                                  context,
+                                                  title: '¿Borrar el último error?',
+                                                  message: 'Se eliminará este diagnóstico del dispositivo.',
+                                                  confirmLabel: 'Borrar',
+                                                  destructive: true,
+                                                );
+                                            if (confirmed && mounted) {
+                                              setState(
+                                                () => lastCrashInfo = null,
+                                              );
+                                            }
+                                          },
                                           child: const Text('Borrar'),
                                         ),
                                       ],
@@ -10562,7 +11069,8 @@ class _DashboardState extends State<Dashboard> {
                   ),
                   // ── Tab: Admin (hidden — long-press the version card above) ────────
                   if (_adminRevealed)
-                    SingleChildScrollView(
+                    SettingsPageBody(
+                      maxWidth: 760,
                       padding: const EdgeInsets.all(12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -10604,7 +11112,20 @@ class _DashboardState extends State<Dashboard> {
                                     setState(() {});
                                     unawaited(_saveSettings());
                                   },
-                                  onDelete: () {
+                                  onDelete: () async {
+                                    final confirmed =
+                                        await confirmSettingsAction(
+                                          context,
+                                          title: '¿Borrar ${s.name}?',
+                                          message:
+                                              settings.host == s.host &&
+                                                  settings.port == s.port
+                                              ? 'Es el servidor seleccionado actualmente. Se borrará de la lista, pero la conexión actual continuará hasta que cambies de servidor.'
+                                              : 'Se eliminará de la lista de servidores guardados.',
+                                          confirmLabel: 'Borrar servidor',
+                                          destructive: true,
+                                        );
+                                    if (!confirmed || !mounted) return;
                                     setSt(
                                       () => settings.savedServers.remove(s),
                                     );
@@ -10628,16 +11149,12 @@ class _DashboardState extends State<Dashboard> {
                                 icon: const Icon(Icons.add, size: 16),
                                 label: const Text('Añadir servidor'),
                                 onPressed: () async {
-                                  final added =
-                                      await showDialog<SavedServer>(
-                                        context: context,
-                                        builder: (_) =>
-                                            const ServerEditDialog(),
-                                      );
-                                  if (added == null) return;
-                                  setSt(
-                                    () => settings.savedServers.add(added),
+                                  final added = await showDialog<SavedServer>(
+                                    context: context,
+                                    builder: (_) => const ServerEditDialog(),
                                   );
+                                  if (added == null) return;
+                                  setSt(() => settings.savedServers.add(added));
                                   setState(() {});
                                   unawaited(_saveSettings());
                                 },
@@ -10695,10 +11212,14 @@ class _DashboardState extends State<Dashboard> {
           ),
           if (path != null)
             Expanded(
-              child: Text(
-                path,
-                style: const TextStyle(color: cMuted, fontSize: 12),
-                overflow: TextOverflow.ellipsis,
+              child: Tooltip(
+                message: path,
+                triggerMode: TooltipTriggerMode.tap,
+                child: Text(
+                  path,
+                  style: const TextStyle(color: cMuted, fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
         ],

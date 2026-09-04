@@ -550,14 +550,56 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
 
   Widget _pathsPanel() {
     if (_discovery == null) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(16),
-          child: Text(
-            'Pulsa "Buscar sensores" para descubrir los paths disponibles en tu Signal K.',
-            style: TextStyle(color: cMuted, fontSize: 13),
-            textAlign: TextAlign.center,
-          ),
+      final configured = <String>[
+        if (_cfg.solarPath != null) 'Solar',
+        if (_cfg.solarPath2 != null) 'Solar 2',
+        if (_cfg.depthPath != null) 'Profundidad',
+        if (_cfg.enginePath != null) 'Horas de motor',
+        if (_cfg.fridge1Path != null) 'Nevera 1',
+        if (_cfg.fridge2Path != null) 'Nevera 2',
+        for (final tank in _cfg.tanks.where((tank) => tank.enabled))
+          tank.groupLabel,
+      ];
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'ESTADO ACTUAL',
+              style: TextStyle(
+                color: cMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.7,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const SettingsStatusRow(
+              label: 'Batería de servicio y arranque',
+              value: 'Configuradas',
+              color: cGreen,
+              icon: Icons.battery_charging_full,
+            ),
+            SettingsStatusRow(
+              label: 'Otras señales asignadas',
+              value: '${configured.length}',
+              color: configured.isEmpty ? cMuted : cGreen,
+              icon: Icons.sensors,
+            ),
+            if (configured.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                configured.join(' · '),
+                style: const TextStyle(color: cMuted, fontSize: 12),
+              ),
+            ],
+            const Spacer(),
+            const Text(
+              'Busca sensores para comprobar estas asignaciones, detectar señales nuevas y localizar paths que hayan desaparecido.',
+              style: TextStyle(color: cMuted, fontSize: 12),
+            ),
+          ],
         ),
       );
     }
@@ -741,7 +783,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   Widget build(BuildContext context) {
     const lbl = TextStyle(
       color: cMuted,
-      fontSize: 10,
+      fontSize: 11,
       letterSpacing: 1.1,
       fontWeight: FontWeight.w700,
     );
@@ -907,7 +949,8 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                             DropdownButtonFormField<String?>(
                               initialValue: _cfg.solarPath2,
                               decoration: const InputDecoration(
-                                labelText: 'Path del 2º controlador solar (opcional)',
+                                labelText:
+                                    'Path del 2º controlador solar (opcional)',
                                 isDense: true,
                               ),
                               items: [

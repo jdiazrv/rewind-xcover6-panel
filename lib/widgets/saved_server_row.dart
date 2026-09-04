@@ -53,6 +53,9 @@ class _SavedServerRowState extends State<SavedServerRow> {
   }
 
   Future<void> _probe() async {
+    if (mounted && _state != _ProbeState.checking) {
+      setState(() => _state = _ProbeState.checking);
+    }
     // false = platform confirmed no VPN transport (Android only) — skip
     // the probe, it can't possibly reach a Tailscale-only address. null =
     // "can't tell" (web, iOS, anything without the platform channel) — run
@@ -166,6 +169,15 @@ class _SavedServerRowState extends State<SavedServerRow> {
               onPressed: widget.onConnect,
               child: const Text('Conectar'),
             ),
+          Tooltip(
+            message: 'Volver a comprobar',
+            child: IconButton(
+              icon: const Icon(Icons.refresh, color: cMuted, size: 18),
+              onPressed: _state == _ProbeState.checking
+                  ? null
+                  : () => unawaited(_probe()),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.edit_outlined, color: cMuted, size: 18),
             onPressed: widget.onEdit,

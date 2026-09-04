@@ -65,6 +65,104 @@ class SettingsGroup extends StatelessWidget {
   );
 }
 
+/// Consistent page frame for the non-card CFG tabs. On the XCover the app is
+/// always landscape: use the available width, but keep long forms readable
+/// instead of letting fields stretch edge-to-edge.
+class SettingsPageBody extends StatelessWidget {
+  const SettingsPageBody({
+    super.key,
+    required this.child,
+    this.maxWidth = 760,
+    this.padding = const EdgeInsets.all(12),
+  });
+
+  final Widget child;
+  final double maxWidth;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: padding,
+    child: Align(
+      alignment: Alignment.topLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: child,
+      ),
+    ),
+  );
+}
+
+/// Uses the XCover's landscape width without introducing another navigation
+/// level. Groups keep their normal single-column order on narrow windows and
+/// split into two balanced reading columns on the device layout.
+class SettingsResponsiveGroups extends StatelessWidget {
+  const SettingsResponsiveGroups({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      if (constraints.maxWidth < 700 || children.length < 2) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: children,
+        );
+      }
+      final split = (children.length + 1) ~/ 2;
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children.take(split).toList(),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children.skip(split).toList(),
+            ),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+Future<bool> confirmSettingsAction(
+  BuildContext context, {
+  required String title,
+  required String message,
+  String confirmLabel = 'Confirmar',
+  bool destructive = false,
+}) async =>
+    (await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: cPanel,
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            style: destructive
+                ? FilledButton.styleFrom(backgroundColor: cRed)
+                : null,
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    )) ??
+    false;
+
 // Switch leading, tight against its own label — not a ListTile spanning the
 // full row width with the switch stranded at the trailing edge.
 class SettingsSwitchRow extends StatelessWidget {
@@ -89,10 +187,7 @@ class SettingsSwitchRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Transform.scale(
-            scale: 0.85,
-            child: Switch(value: value, onChanged: onChanged),
-          ),
+          Switch(value: value, onChanged: onChanged),
           const SizedBox(width: 4),
           Expanded(
             child: Padding(
@@ -100,13 +195,16 @@ class SettingsSwitchRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: const TextStyle(fontSize: 13, color: cText)),
+                  Text(
+                    title,
+                    style: const TextStyle(fontSize: 13, color: cText),
+                  ),
                   if (subtitle != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
                       child: Text(
                         subtitle!,
-                        style: const TextStyle(fontSize: 11, color: cMuted),
+                        style: const TextStyle(fontSize: 12, color: cMuted),
                       ),
                     ),
                 ],
@@ -115,6 +213,51 @@ class SettingsSwitchRow extends StatelessWidget {
           ),
         ],
       ),
+    ),
+  );
+}
+
+class SettingsStatusRow extends StatelessWidget {
+  const SettingsStatusRow({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.color,
+    this.icon,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(
+      children: [
+        Icon(icon ?? Icons.circle, size: icon == null ? 10 : 17, color: color),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(color: cText, fontSize: 13),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
     ),
   );
 }
@@ -145,6 +288,7 @@ class _ThresholdRow extends StatefulWidget {
 
 class _ThresholdRowState extends State<_ThresholdRow> {
   late final _controller = TextEditingController(text: _fmt(widget.value));
+  String? _error;
 
   String _fmt(double v) =>
       v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
@@ -152,6 +296,42 @@ class _ThresholdRowState extends State<_ThresholdRow> {
   void _setValue(double v) {
     widget.onChanged(v);
     _controller.text = _fmt(v);
+    setState(() => _error = null);
+  }
+
+  void _submit(String raw) {
+    final parsed = double.tryParse(raw.replaceAll(',', '.'));
+    if (parsed == null) {
+      setState(() => _error = 'Número no válido');
+      return;
+    }
+    if (widget.min != null && parsed < widget.min! ||
+        widget.max != null && parsed > widget.max!) {
+      final range = widget.min != null && widget.max != null
+          ? '${_fmt(widget.min!)}–${_fmt(widget.max!)} ${widget.unit}'
+          : widget.min != null
+          ? 'mínimo ${_fmt(widget.min!)} ${widget.unit}'
+          : 'máximo ${_fmt(widget.max!)} ${widget.unit}';
+      setState(() => _error = 'Rango permitido: $range');
+      return;
+    }
+    _setValue(parsed);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ThresholdRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value &&
+        double.tryParse(_controller.text.replaceAll(',', '.')) !=
+            widget.value) {
+      _controller.text = _fmt(widget.value);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   @override
@@ -179,11 +359,13 @@ class _ThresholdRowState extends State<_ThresholdRow> {
                     decimal: true,
                   ),
                   style: const TextStyle(color: cText, fontSize: 13),
-                  decoration: const InputDecoration(isDense: true),
-                  onSubmitted: (v) {
-                    final n = double.tryParse(v.replaceAll(',', '.'));
-                    if (n != null) widget.onChanged(n);
-                  },
+                  decoration: InputDecoration(
+                    isDense: true,
+                    errorText: _error,
+                    errorMaxLines: 2,
+                  ),
+                  onSubmitted: _submit,
+                  onEditingComplete: () => _submit(_controller.text),
                 ),
               ),
               const SizedBox(width: 6),
@@ -197,16 +379,16 @@ class _ThresholdRowState extends State<_ThresholdRow> {
             Align(
               alignment: Alignment.centerRight,
               child: SizedBox(
-              width: 220,
-              height: 28,
-              child: Slider(
-                value: widget.value.clamp(widget.min!, widget.max!),
-                min: widget.min!,
-                max: widget.max!,
-                divisions: widget.divisions,
-                activeColor: cCyan,
-                onChanged: _setValue,
-              ),
+                width: 220,
+                height: 28,
+                child: Slider(
+                  value: widget.value.clamp(widget.min!, widget.max!),
+                  min: widget.min!,
+                  max: widget.max!,
+                  divisions: widget.divisions,
+                  activeColor: cCyan,
+                  onChanged: _setValue,
+                ),
               ),
             ),
         ],
@@ -364,8 +546,12 @@ class ServerEditDialog extends StatefulWidget {
 }
 
 class _ServerEditDialogState extends State<ServerEditDialog> {
-  late final _nameCtrl = TextEditingController(text: widget.initial?.name ?? '');
-  late final _hostCtrl = TextEditingController(text: widget.initial?.host ?? '');
+  late final _nameCtrl = TextEditingController(
+    text: widget.initial?.name ?? '',
+  );
+  late final _hostCtrl = TextEditingController(
+    text: widget.initial?.host ?? '',
+  );
   late final _portCtrl = TextEditingController(
     text: '${widget.initial?.port ?? 3000}',
   );
@@ -375,6 +561,8 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
   late final _passCtrl = TextEditingController(
     text: widget.initial?.skPassword ?? '',
   );
+  bool _showPassword = false;
+  String? _validationError;
 
   @override
   void dispose() {
@@ -396,7 +584,9 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
         children: [
           TextField(
             controller: _nameCtrl,
-            decoration: const InputDecoration(labelText: 'Nombre (ej. DRAGUEUR)'),
+            decoration: const InputDecoration(
+              labelText: 'Nombre (ej. DRAGUEUR)',
+            ),
           ),
           TextField(
             controller: _hostCtrl,
@@ -409,13 +599,34 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
           ),
           TextField(
             controller: _userCtrl,
-            decoration: const InputDecoration(labelText: 'Usuario Signal K (opcional)'),
+            decoration: const InputDecoration(
+              labelText: 'Usuario Signal K (opcional)',
+            ),
           ),
           TextField(
             controller: _passCtrl,
-            obscureText: true,
-            decoration: const InputDecoration(labelText: 'Contraseña (opcional)'),
+            obscureText: !_showPassword,
+            decoration: InputDecoration(
+              labelText: 'Contraseña (opcional)',
+              suffixIcon: IconButton(
+                tooltip: _showPassword
+                    ? 'Ocultar contraseña'
+                    : 'Mostrar contraseña',
+                onPressed: () => setState(() => _showPassword = !_showPassword),
+                icon: Icon(
+                  _showPassword ? Icons.visibility_off : Icons.visibility,
+                ),
+              ),
+            ),
           ),
+          if (_validationError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                _validationError!,
+                style: const TextStyle(color: cRed, fontSize: 12),
+              ),
+            ),
         ],
       ),
     ),
@@ -428,12 +639,24 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
         onPressed: () {
           final name = _nameCtrl.text.trim();
           final host = _hostCtrl.text.trim();
-          if (name.isEmpty || host.isEmpty) return;
+          final port = int.tryParse(_portCtrl.text.trim());
+          if (name.isEmpty || host.isEmpty) {
+            setState(
+              () => _validationError = 'El nombre y el host son obligatorios.',
+            );
+            return;
+          }
+          if (port == null || port < 1 || port > 65535) {
+            setState(
+              () => _validationError = 'El puerto debe estar entre 1 y 65535.',
+            );
+            return;
+          }
           Navigator.of(context).pop(
             SavedServer(
               name: name,
               host: host,
-              port: int.tryParse(_portCtrl.text.trim()) ?? 3000,
+              port: port,
               skUsername: _userCtrl.text.trim(),
               skPassword: _passCtrl.text,
             ),

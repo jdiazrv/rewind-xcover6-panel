@@ -222,18 +222,23 @@ class _Header extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 4),
-          Icon(
-            ok ? Icons.link : Icons.link_off,
-            color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            status,
-            style: TextStyle(
+          Tooltip(
+            message: status,
+            child: Icon(
+              ok ? Icons.link : Icons.link_off,
               color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),
-              fontWeight: FontWeight.w700,
             ),
           ),
+          if (MediaQuery.sizeOf(context).width >= 900) ...[
+            const SizedBox(width: 8),
+            Text(
+              status,
+              style: TextStyle(
+                color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
           const SizedBox(width: 14),
         ],
       ),

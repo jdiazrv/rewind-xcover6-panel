@@ -46,13 +46,20 @@ flutter build apk --release
 adb install -r build/app/outputs/flutter-apk/app-release.apk
 ```
 
+Para una compilación Gradle directa fuera de la carpeta sincronizada de
+Dropbox se puede definir `REWIND_BUILD_DIR=/ruta/absoluta`; el comando normal
+de Flutter usa su directorio estándar para poder localizar el APK.
+
 ## Configuración
 
 Todo se ajusta desde la pantalla `CFG` dentro de la app:
 
-- Host/puerto/autenticación de Signal K, bucket de InfluxDB.
-- `Configurar sensores`: baterías, solar, neveras y tanques, descubiertos automáticamente desde el servidor.
-- `Modo DEMO`: activa datos simulados.
+- Host/puerto/autenticación de Signal K y configuración de InfluxDB.
+- `Configurar sensores`: baterías, solar, profundidad, motor, neveras y tanques, descubiertos automáticamente desde el servidor.
+- `Diagnóstico > Modo DEMO`: activa datos simulados.
+
+En Android, las credenciales de Signal K, InfluxDB y los servidores guardados
+se conservan en el almacén cifrado del sistema, no en preferencias normales.
 
 ## Instalar como webapp de Signal K
 

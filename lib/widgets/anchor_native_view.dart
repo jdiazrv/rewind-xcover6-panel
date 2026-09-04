@@ -730,16 +730,22 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   // "recolocar automaticamente el ancla en el origen del radio de ese
   // sector" (reported live 2026-09-04) — re-derives the anchor's true
   // position from the arc the boat has actually swung through, which can
-  // be more accurate than the originally recorded drop fix. See
-  // fitCircleToTrack's own doc comment for the method. Null (rather than
-  // just "enough points") is also what gates the toolbar button itself —
-  // a coarse point-count check alone could leave the button looking
-  // enabled while a tap silently did nothing, if the points don't yet
-  // span enough of an arc.
-  ({double lat, double lon, double radiusM})? get _repositionFit {
+  // be more accurate than the originally recorded drop fix. The known
+  // radius (config.radiusM, the watch's own alarm radius) is what makes
+  // this reliable down to a fairly narrow swing — see
+  // fitAnchorCenterKnownRadius's own doc comment for the method. Null
+  // (rather than just "enough points") is also what gates the toolbar
+  // button itself — a coarse point-count check alone could leave the
+  // button looking enabled while a tap silently did nothing.
+  ({double lat, double lon})? get _repositionFit {
     final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
     if (dropLat == null || dropLon == null) return null;
-    return fitCircleToTrack(_trackSinceDrop, refLat: dropLat, refLon: dropLon);
+    return fitAnchorCenterKnownRadius(
+      _trackSinceDrop,
+      radiusM: widget.config.radiusM,
+      refLat: dropLat,
+      refLon: dropLon,
+    );
   }
 
   // Why the button is greyed out right now — surfaced as its tooltip.
@@ -759,9 +765,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       return 'Acumulando traza\n($n/$kAnchorRefitMinPoints puntos)';
     }
     if (_repositionFit == null) {
-      return 'Falta girar más\n'
-          '(mín. ${kAnchorRefitMinArcDeg.round()}°,\n'
-          'más viento/marea)';
+      return 'Cadena aún no\nse ha tensado lo\nbastante (viento/marea)';
     }
     return null;
   }

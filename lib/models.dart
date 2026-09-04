@@ -1256,107 +1256,83 @@ class OwnTrackHistory {
 }
 
 // Minimum points (since the current drop — see ANC's "Recolocar" use)
-// before a circle fit is even attempted. Fewer than this and the boat
-// simply hasn't swung through enough of the arc for the fit to mean
-// anything.
+// before a fit is even attempted.
 const kAnchorRefitMinPoints = 8;
-// Below this, circle fitting is too ill-conditioned to trust — verified
-// empirically that a ~35-degree swing can produce a "confident"-looking
-// fit that's 15m+ off from the real anchor position, even with plenty of
-// points and low per-fix noise.
-const kAnchorRefitMinArcDeg = 60.0;
 
-// Fits a circle to a set of own-track points using Kasa's algebraic
-// least-squares method — the boat, tethered to the anchor by a fixed
-// scope, traces an arc of a circle centered on the anchor's TRUE position
-// as it swings with wind/tide. That center can be a more accurate estimate
-// of where the anchor actually is than the originally recorded drop fix
-// (GPS settling right at the moment of dropping, a position taken at the
-// bow rather than the anchor itself, etc). Used by ANC's "Recolocar ancla"
-// button. Reported live 2026-09-04 ("cuando ha pasado tiempo y hay trazas
-// se forma un sector de circulo que permitiria... recolocar
-// automaticamente el ancla en el origen del radio de ese sector").
+// Finds the anchor's true position from the boat's own swing track, given
+// a KNOWN (not fitted) chain-taut radius — config.radiusM, the anchor
+// watch's own configured radius, which the user already set (often from
+// the 7:1 scope rule _dropAnchor itself uses). The boat, tethered to the
+// anchor, traces an arc centered on the anchor's TRUE position when the
+// chain is taut; that center can be a more accurate estimate than the
+// originally recorded drop fix (GPS settling at the moment of dropping, a
+// position taken at the bow rather than the anchor itself, etc). Used by
+// ANC's "Recolocar ancla" button. Reported live 2026-09-04 ("cuando ha
+// pasado tiempo y hay trazas se forma un sector de circulo que
+// permitiria... recolocar automaticamente el ancla").
 //
-// Points are converted to a local flat (equirectangular) projection first
-// — adequate at anchor-swing scale (tens of meters), not meant for
-// anything long-range. Returns null when there aren't enough points, or
-// the fit can't be trusted (see refLat/refLon below).
+// An EARLIER version of this fit solved for center AND radius together
+// (3 unknowns) via Kasa's least-squares method — that needed a wide
+// (60°+) swing to be well-conditioned; a narrower arc could produce a
+// "confident"-looking fit 15m+ off from the truth. Fixing the radius
+// (an external follow-up suggestion, evaluated and agreed with 2026-09-04)
+// reduces this to 2 unknowns (just the center), which is dramatically
+// better conditioned — verified empirically down to a 10° swing giving
+// ~4-8m error (close to GPS's own ~2.5m noise floor) as long as the known
+// radius is reasonably accurate.
 //
-// refLat/refLon must be the CURRENTLY recorded anchor position (config.
-// dropLat/dropLon) — used only to judge whether the track has swung
-// through enough of an arc to trust a refit, never as part of the fit's
-// own math. This is deliberately NOT measured against the fitted center
-// itself: empirically, a narrow (~35°) swing can still produce a
-// "confident"-looking fit whose own center is 15m+ off from the true
-// anchor position, which then makes the swing look artificially wide when
-// measured around THAT wrong center — exactly hiding the case this check
-// exists to catch. Measuring against the already-known (if imperfect)
-// current position avoids that circularity. A geometry-only curvature
-// measure (sagitta/chord of the raw points) was also tried and rejected —
-// at the narrow arcs that matter here, ordinary per-fix GPS noise (~1m)
-// is comparable to or larger than the true sagitta, swamping the signal.
-({double lat, double lon, double radiusM})? fitCircleToTrack(
+// Method: gradient descent minimizing Σ max(0, distance_i − R)² — points
+// already within R cost nothing (interior points, chain slack in light
+// wind/tide, are correctly ignored rather than corrupting the fit), points
+// beyond R pull the center toward them until their distance approaches R
+// (only the perimeter, taut-chain points actually pin down where the
+// anchor is). This is a fixed-radius "shrink-wrap" fit, not a classic
+// circle regression.
+//
+// refLat/refLon should be the CURRENTLY recorded anchor position (config.
+// dropLat/dropLon) — the local-projection origin and the starting point
+// for the descent, not otherwise part of the math.
+({double lat, double lon})? fitAnchorCenterKnownRadius(
   List<AnchorTrackPoint> points, {
+  required double radiusM,
   required double refLat,
   required double refLon,
 }) {
-  if (points.length < kAnchorRefitMinPoints) return null;
-  final cosRefLat = math.cos(refLat * math.pi / 180);
-  final angles =
-      [
-        for (final p in points)
-          math.atan2(
-                (p.lon - refLon) * cosRefLat,
-                p.lat - refLat,
-              ) *
-              180 /
-              math.pi,
-      ]..sort();
-  final n = angles.length;
-  var largestGap = 360.0 - (angles.last - angles.first);
-  for (var i = 1; i < n; i++) {
-    final gap = angles[i] - angles[i - 1];
-    if (gap > largestGap) largestGap = gap;
+  if (points.length < kAnchorRefitMinPoints || radiusM <= 0) return null;
+  final cosRef = math.cos(refLat * math.pi / 180);
+  final n = points.length;
+  final xs = [for (final p in points) (p.lon - refLon) * cosRef * 111320];
+  final ys = [for (final p in points) (p.lat - refLat) * 110540];
+  var cx = 0.0, cy = 0.0;
+  const learningRate = 0.5;
+  const iterations = 500;
+  for (var iter = 0; iter < iterations; iter++) {
+    var gx = 0.0, gy = 0.0;
+    for (var i = 0; i < n; i++) {
+      final dx = cx - xs[i], dy = cy - ys[i];
+      final d = math.sqrt(dx * dx + dy * dy);
+      if (d > radiusM && d > 1e-9) {
+        final coeff = 2 * (d - radiusM) / d;
+        gx += coeff * dx;
+        gy += coeff * dy;
+      }
+    }
+    cx -= learningRate * gx / n;
+    cy -= learningRate * gy / n;
   }
-  if (360.0 - largestGap < kAnchorRefitMinArcDeg) return null;
-
-  final lat0 = points.map((p) => p.lat).reduce((a, b) => a + b) / n;
-  final lon0 = points.map((p) => p.lon).reduce((a, b) => a + b) / n;
-  final cosLat0 = math.cos(lat0 * math.pi / 180);
-  final xs = [for (final p in points) (p.lon - lon0) * cosLat0 * 111320];
-  final ys = [for (final p in points) (p.lat - lat0) * 110540];
-  final xBar = xs.reduce((a, b) => a + b) / n;
-  final yBar = ys.reduce((a, b) => a + b) / n;
-  final u = [for (final x in xs) x - xBar];
-  final v = [for (final y in ys) y - yBar];
-  double suu = 0, svv = 0, suv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
-  for (var i = 0; i < n; i++) {
-    suu += u[i] * u[i];
-    svv += v[i] * v[i];
-    suv += u[i] * v[i];
-    suuu += u[i] * u[i] * u[i];
-    svvv += v[i] * v[i] * v[i];
-    suvv += u[i] * v[i] * v[i];
-    svuu += v[i] * u[i] * u[i];
-  }
-  // Too little spread on either axis, or the linear system is (near-)
-  // singular.
-  final det = suu * svv - suv * suv;
-  if (suu < 4 || svv < 4 || det.abs() < 1e-6) return null;
-  final rhsU = 0.5 * (suuu + suvv);
-  final rhsV = 0.5 * (svvv + svuu);
-  final uc = (rhsU * svv - rhsV * suv) / det;
-  final vc = (suu * rhsV - suv * rhsU) / det;
-  final radiusM = math.sqrt(uc * uc + vc * vc + (suu + svv) / n);
-  // Sanity bounds — a fit wildly outside plausible swing-circle sizes
-  // means the input wasn't really arc-shaped (e.g. a mostly-straight
-  // motoring track) rather than a real anchor swing.
-  if (!radiusM.isFinite || radiusM <= 0 || radiusM > 500) return null;
-  return (
-    lat: lat0 + (yBar + vc) / 110540,
-    lon: lon0 + (xBar + uc) / (cosLat0 * 111320),
-    radiusM: radiusM,
-  );
+  // Require several points actually near the fitted radius, not just
+  // one — a real taut-chain swing leaves a CLUSTER of points out there;
+  // a single stray GPS glitch reaching R shouldn't alone be trusted to
+  // drag the center (verified empirically: one such outlier could pull
+  // the result 10m+ without this). Also correctly rejects an all-calm
+  // anchorage (chain never went taut this whole session) instead of
+  // silently "succeeding" at zero actual movement.
+  final nearRadiusCount = [
+    for (var i = 0; i < n; i++)
+      math.sqrt((cx - xs[i]) * (cx - xs[i]) + (cy - ys[i]) * (cy - ys[i])),
+  ].where((d) => d >= radiusM * 0.7 && d <= radiusM * 1.3).length;
+  if (nearRadiusCount < 3) return null;
+  return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
 }
 
 class ModelForecastPoint {
