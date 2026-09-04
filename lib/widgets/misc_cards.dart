@@ -1201,6 +1201,7 @@ class PowerAuxTile extends StatelessWidget {
     this.icon,
     this.customIcon,
     this.graphMetrics,
+    this.onShowCurve,
   });
   final String title;
   final String value;
@@ -1210,12 +1211,21 @@ class PowerAuxTile extends StatelessWidget {
   final IconData? icon;
   final Widget? customIcon;
   final List<MetricDef>? graphMetrics;
+  // Opens the lead-acid voltage→SOC curve (BatteryCurveDialog) from within
+  // the zoom dialog's own extra button — only passed for batteries with no
+  // current sensor (start, bow thruster), see main.dart's call sites. A
+  // tiny separate tap icon directly on the card was tried first but proved
+  // impractical to hit precisely (reported live 2026-09-04, confirmed
+  // during manual testing) — routing it through the zoom dialog instead
+  // gives it a normal-sized, unambiguous button.
+  final VoidCallback? onShowCurve;
   final void Function(
     String title,
     String value,
     Color color, {
     String? subtitle,
     List<MetricDef>? graphMetrics,
+    VoidCallback? onShowCurve,
   })?
   zoom;
 
@@ -1228,6 +1238,7 @@ class PowerAuxTile extends StatelessWidget {
         color,
         subtitle: subtitle,
         graphMetrics: graphMetrics,
+        onShowCurve: onShowCurve,
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -1270,6 +1281,15 @@ class PowerAuxTile extends StatelessWidget {
                           Icons.show_chart,
                           size: 14,
                           color: color.withValues(alpha: 0.55),
+                        ),
+                      if (onShowCurve != null)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 6),
+                          child: Icon(
+                            Icons.battery_5_bar,
+                            size: 14,
+                            color: color.withValues(alpha: 0.55),
+                          ),
                         ),
                     ],
                   ),

@@ -1426,6 +1426,51 @@ const kAnchorRefitMinPoints = 8;
   return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
 }
 
+// ─── Lead-acid voltage → SOC curve (batteries without a shunt) ────────────────
+// "en todas las baterias ademas de la grafica historica e gustaria ver la
+// curva de carga y descarga... vamos a asumir que son plomo" (reported live
+// 2026-09-04) — for the house battery there's already a real current sensor
+// and Signal K publishes a proper stateOfCharge, so none of this applies
+// there. For start/bow-thruster batteries there's only ever a voltage
+// reading, so this is the standard fallback: a resting-voltage lookup table,
+// ONLY meaningful when the battery isn't currently being charged or drained
+// (see _VoltageTrendTracker in trackers.dart, which is what qualifies
+// whether to trust it). Values are the widely-used approximate reference for
+// a 12V lead-acid battery at rest around room temperature — real cells vary
+// a few tenths of a volt by chemistry (flooded/AGM/gel) and temperature, so
+// this is always presented as an approximation, never an exact reading.
+const leadAcidSocCurve12V = <(int soc, double voltage)>[
+  (0, 11.00),
+  (10, 11.51),
+  (20, 11.66),
+  (30, 11.81),
+  (40, 11.96),
+  (50, 12.10),
+  (60, 12.24),
+  (70, 12.37),
+  (80, 12.50),
+  (90, 12.62),
+  (100, 12.70),
+];
+
+// Linear interpolation through leadAcidSocCurve12V — voltage in, approximate
+// SOC% out (clamped to the table's own range at both ends).
+double leadAcidSocFromVoltage(double voltageAt12VNominal) {
+  final v = voltageAt12VNominal;
+  final table = leadAcidSocCurve12V;
+  if (v <= table.first.$2) return table.first.$1.toDouble();
+  if (v >= table.last.$2) return table.last.$1.toDouble();
+  for (var i = 0; i < table.length - 1; i++) {
+    final (soc0, v0) = table[i];
+    final (soc1, v1) = table[i + 1];
+    if (v >= v0 && v <= v1) {
+      final frac = (v - v0) / (v1 - v0);
+      return soc0 + frac * (soc1 - soc0);
+    }
+  }
+  return 50; // unreachable given the clamps above
+}
+
 // ─── Guiñada (yaw-at-anchor analysis) ─────────────────────────────────────────
 // "analizar analíticamente cómo 'navega' el barco sobre el ancla... en lugar
 // de limitarse a mostrar solo el círculo de borneo estático" (reported live

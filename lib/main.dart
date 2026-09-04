@@ -65,6 +65,7 @@ part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
 part 'widgets/saved_server_row.dart';
 part 'widgets/yaw_analysis_dialog.dart';
+part 'widgets/battery_curve_dialog.dart';
 
 // Last uncaught error, if any — shown in CFG > Diagnóstico rather than only
 // living in logcat, since the tablet running this has no attached console
@@ -350,6 +351,8 @@ class _DashboardState extends State<Dashboard> {
   // see YawTrackHistory's own doc comment for why this is a separate,
   // non-persisted buffer from _ownTrack rather than reusing it.
   final _yawTrack = YawTrackHistory();
+  final _startVTrend = _VoltageTrendTracker();
+  final _bowVTrend = _VoltageTrendTracker();
   // Fed by NativeAnchorView's onEffectivePositionChanged — its own
   // device-GPS fallback lives inside that widget, invisible from here
   // otherwise. Used by the "sin posición" alarm below so it doesn't fire
@@ -2725,8 +2728,10 @@ class _DashboardState extends State<Dashboard> {
     };
     h['electrical.batteries.${c.batteryHouseId}.temperature'] = (v) =>
         signalK.houseTempK = _num(v);
-    h['electrical.batteries.${c.batteryStartId}.voltage'] = (v) =>
-        signalK.startV = _num(v);
+    h['electrical.batteries.${c.batteryStartId}.voltage'] = (v) {
+      signalK.startV = _num(v);
+      _startVTrend.add(signalK.startV);
+    };
     if (c.solarPath != null && c.solarPath!.isNotEmpty) {
       h[c.solarPath!] = (v) => signalK.solarW = _num(v);
     }
@@ -3629,6 +3634,7 @@ class _DashboardState extends State<Dashboard> {
         signalK.solarFusesTempK = n;
       case 'electrical.batteries.bowthruster.voltage':
         signalK.bowthrusterV = n;
+        _bowVTrend.add(n);
       case 'electrical.batteries.bowthruster.temperature':
         signalK.bowthrusterTempK = n;
       case 'electrical.venus.dcPower':
@@ -3834,6 +3840,8 @@ class _DashboardState extends State<Dashboard> {
       signalK.startV = 12.8 + osc(500, 0.15, 0);
       signalK.bowthrusterV = 12.7 + jitter(0.05);
       signalK.bowthrusterTempK = 297 + jitter(0.2);
+      _startVTrend.add(signalK.startV);
+      _bowVTrend.add(signalK.bowthrusterV);
 
       // Tanks: slowly draining, wraps back up (simulating a re-fill) for a believable demo
       for (final slot in settings.sensorConfig.tanks.where((s) => s.enabled)) {
@@ -7666,6 +7674,14 @@ class _DashboardState extends State<Dashboard> {
                     customIcon: StarterMotorGlyph(color: startColor),
                     zoom: _showZoom,
                     graphMetrics: [_metricColor(_mStartV, startColor)],
+                    onShowCurve: signalK.startV == null
+                        ? null
+                        : () => _openBatteryCurveDialog(
+                            title: 'Arranque',
+                            voltage: signalK.startV,
+                            trend: _startVTrend.direction,
+                            color: startColor,
+                          ),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -7683,6 +7699,14 @@ class _DashboardState extends State<Dashboard> {
                     customIcon: BowThrusterGlyph(color: bowColor),
                     zoom: _showZoom,
                     graphMetrics: [_metricColor(mBowV, bowColor)],
+                    onShowCurve: signalK.bowthrusterV == null
+                        ? null
+                        : () => _openBatteryCurveDialog(
+                            title: 'Bow thruster',
+                            voltage: signalK.bowthrusterV,
+                            trend: _bowVTrend.direction,
+                            color: bowColor,
+                          ),
                   ),
                 ),
               ],
@@ -8517,6 +8541,23 @@ class _DashboardState extends State<Dashboard> {
         influxToken: settings.influxToken,
         bucket: settings.influxBucket,
         archiveBucket: settings.influxArchiveBucket,
+      ),
+    );
+  }
+
+  void _openBatteryCurveDialog({
+    required String title,
+    required double? voltage,
+    required int trend,
+    required Color color,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => BatteryCurveDialog(
+        title: title,
+        voltage: voltage,
+        trendDirection: trend,
+        color: color,
       ),
     );
   }
@@ -11340,6 +11381,7 @@ class _DashboardState extends State<Dashboard> {
     Color color, {
     String? subtitle,
     List<MetricDef>? graphMetrics,
+    VoidCallback? onShowCurve,
   }) {
     final hasGraph = graphMetrics != null && graphMetrics.isNotEmpty;
     showDialog<void>(
@@ -11435,6 +11477,32 @@ class _DashboardState extends State<Dashboard> {
                   onPressed: () => Navigator.of(ctx).pop(),
                 ),
               ),
+              // Separate button, NOT inside the big InkWell above (which
+              // already has its own tap meaning: open the graph) — a tiny
+              // icon directly on the small card was tried first and proved
+              // too fiddly to hit reliably (reported live 2026-09-04,
+              // confirmed during manual testing), so this lives here
+              // instead, full-sized and unambiguous.
+              if (onShowCurve != null)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: hasGraph ? 90 : 28,
+                  child: Center(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        onShowCurve();
+                      },
+                      icon: const Icon(Icons.battery_5_bar, size: 18),
+                      label: const Text('Ver curva de carga (aprox.)'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: color,
+                        side: BorderSide(color: color.withValues(alpha: 0.5)),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),

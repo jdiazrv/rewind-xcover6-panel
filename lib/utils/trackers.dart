@@ -23,6 +23,33 @@ class _DepthTrendTracker {
   }
 }
 
+/// Same shape as [_DepthTrendTracker], tuned for a 12V lead-acid battery
+/// with no current sensor — used to qualify the voltage→SOC curve
+/// (BatteryCurveDialog): the curve is only trustworthy when the battery is
+/// at rest, so knowing whether it's presently drifting up (charging), down
+/// (discharging), or flat (resting) is what makes that estimate honest
+/// instead of silently wrong under load or charge.
+class _VoltageTrendTracker {
+  double? _smoothed;
+  double? _confirmedAt;
+  int direction = 0; // -1 descargando, 0 en reposo / sin datos, 1 cargando
+  static const _thresholdV = 0.08;
+  static const _alpha = 0.1;
+
+  void add(double? voltage) {
+    if (voltage == null) return;
+    _smoothed = _smoothed == null
+        ? voltage
+        : _smoothed! + (voltage - _smoothed!) * _alpha;
+    _confirmedAt ??= _smoothed;
+    final delta = _smoothed! - _confirmedAt!;
+    if (delta.abs() >= _thresholdV) {
+      direction = delta > 0 ? 1 : -1;
+      _confirmedAt = _smoothed;
+    }
+  }
+}
+
 class _WindHistory {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(minutes: 30);
