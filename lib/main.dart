@@ -25,6 +25,9 @@ import 'lan_scan/lan_scan_stub.dart'
 import 'mdns_resolve/mdns_resolve_stub.dart'
     if (dart.library.io) 'mdns_resolve/mdns_resolve_io.dart'
     if (dart.library.html) 'mdns_resolve/mdns_resolve_web.dart';
+import 'network_info/network_info_stub.dart'
+    if (dart.library.io) 'network_info/network_info_io.dart'
+    if (dart.library.html) 'network_info/network_info_web.dart';
 import 'webview_embed/webview_embed_stub.dart'
     if (dart.library.io) 'webview_embed/webview_embed_io.dart'
     if (dart.library.html) 'webview_embed/webview_embed_web.dart';
@@ -59,6 +62,7 @@ part 'widgets/alarm_and_shell.dart';
 part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
+part 'widgets/saved_server_row.dart';
 
 // Last uncaught error, if any — shown in CFG > Diagnóstico rather than only
 // living in logcat, since the tablet running this has no attached console
@@ -3587,6 +3591,16 @@ class _DashboardState extends State<Dashboard> {
       final battMatch = RegExp(r'^electrical\.batteries\.([^.]+)\.')
           .firstMatch(path);
       if (battMatch != null) batteryIds.add(battMatch.group(1)!);
+      final battNameMatch = RegExp(r'^electrical\.batteries\.([^.]+)\.name$')
+          .firstMatch(path);
+      if (battNameMatch != null) {
+        final node = leaves[path];
+        final nameVal = node is Map ? node['value'] : null;
+        if (nameVal is String && nameVal.isNotEmpty) {
+          result.batteryNames[battNameMatch.group(1)!] = nameVal
+              .toLowerCase();
+        }
+      }
       final lowerPath = path.toLowerCase();
       if (lowerPath.contains('solar') || lowerPath.contains('panel')) {
         result.solarPaths.add(path);
@@ -7340,6 +7354,14 @@ class _DashboardState extends State<Dashboard> {
   // _tankIcons/_tankColors only know these three) sorts after, in
   // whatever order it was found.
   static const _tankTypeOrder = ['fuel', 'freshWater', 'blackWater'];
+  // Category name shown on a merged card — see _groupedTankTypes below.
+  static const _tankCategoryNames = {'fuel': 'Fuel', 'freshWater': 'Agua'};
+  // Which types get merged into a single aggregate card. blackWater is
+  // deliberately excluded — combining two separate holding tanks into one
+  // percentage would hide which one is actually near full, so each keeps
+  // its own card. "los tanques se tienen que agrupar por categorias
+  // (fuel, agua) excepto los de blackwater" (reported live 2026-09-04).
+  static const _groupedTankTypes = {'fuel', 'freshWater'};
 
   List<TankViewData> get tankOverview {
     final groups = <String, List<TankSlot>>{};
@@ -7349,13 +7371,24 @@ class _DashboardState extends State<Dashboard> {
     // that hid a still-enabled tank during any real gap in its readings,
     // not just genuinely-absent sensors — the checkbox is the correct,
     // explicit way to say "this boat doesn't have this tank".)
+    //
+    // Grouped purely by TYPE now, not by the tank's own groupLabel — that
+    // field is each tank's own name (e.g. "Fuel 1", "Agua Stbd") and must
+    // survive on screen even when its category is merged into one card;
+    // using it as the merge key too meant setting two tanks to the same
+    // groupLabel to merge them silently overwrote their individual names
+    // with a shared one. Reported live 2026-09-04 ("no se porque has
+    // perdido el nombre fuel 1 y 2 agua stbd y port").
     for (final t in settings.sensorConfig.tanks.where((t) => t.enabled)) {
-      groups.putIfAbsent(t.groupLabel, () => []).add(t);
+      final key = _groupedTankTypes.contains(t.type) ? t.type : t.tankKey;
+      groups.putIfAbsent(key, () => []).add(t);
     }
     final out = [
       for (final entry in groups.entries)
         TankViewData(
-          name: entry.key,
+          name:
+              _tankCategoryNames[entry.value.first.type] ??
+              entry.value.first.groupLabel,
           slots: entry.value,
           color: _tankColors[entry.value.first.type] ?? cCyan,
           icon: _tankIcons[entry.value.first.type] ?? Icons.water_drop,
@@ -7385,7 +7418,7 @@ class _DashboardState extends State<Dashboard> {
           final liters = (pct != null && s.capacityL > 0)
               ? (s.capacityL * pct / 100).round()
               : null;
-          return '${s.id} ${liters == null ? '--' : '$liters/${s.capacityL}L'}';
+          return '${s.groupLabel} ${liters == null ? '--' : '$liters/${s.capacityL}L'}';
         })
         .join(' · ');
   }
@@ -8114,8 +8147,53 @@ class _DashboardState extends State<Dashboard> {
     const gap = SizedBox(height: 6);
 
     Future<void> doSave() async {
-      settings.host = hostController.text.trim();
-      settings.port = int.tryParse(portController.text.trim()) ?? 3000;
+      final newHost = hostController.text.trim();
+      final newPort = int.tryParse(portController.text.trim()) ?? 3000;
+      final hostChanged =
+          newHost != settings.host || newPort != settings.port;
+      if (hostChanged) {
+        // Same per-host sensor/anchor config swap as _switchToSavedServer —
+        // CFG > Admin's saved-servers list is remotes-only (Tailscale), so
+        // the direct host/port fields here are how the LOCAL connection is
+        // set too. Without this, editing them just kept using whatever
+        // sensor config was already loaded (e.g. a remote boat's tank/
+        // battery mapping), never saving it under the server being left NOR
+        // loading/creating the new host's own mapping. Reported live
+        // 2026-09-04 ("cuando cambio de servidor tiene que guardar toda la
+        // configuracion de sensores incluido si es el local").
+        final outgoingKey = _serverConfigKey;
+        settings.sensorConfigJsonByHost[outgoingKey] =
+            settings.sensorConfig.toJson();
+        settings.anchorConfigJsonByHost[outgoingKey] =
+            settings.anchorConfig.toJson();
+      }
+      settings.host = newHost;
+      settings.port = newPort;
+      if (hostChanged) {
+        // Reuse a saved-server's name as the key when this host:port
+        // matches one exactly, so editing the field by hand still shares
+        // that server's config instead of splitting it into a second,
+        // host:port-keyed copy. Otherwise fall back to the plain host:port
+        // key, same as a never-visited saved server would.
+        SavedServer? matching;
+        for (final s in settings.savedServers) {
+          if (s.host == newHost && s.port == newPort) {
+            matching = s;
+            break;
+          }
+        }
+        _currentServerConfigKey = matching?.name;
+        final hostKey = _serverConfigKey;
+        final savedSensor = settings.sensorConfigJsonByHost[hostKey];
+        settings.sensorConfig = savedSensor != null
+            ? SensorConfig.fromJson(savedSensor)
+            : SensorConfig.empty();
+        final savedAnchor = settings.anchorConfigJsonByHost[hostKey];
+        settings.anchorConfig = savedAnchor != null
+            ? AnchorConfig.fromJson(savedAnchor)
+            : AnchorConfig();
+        _syncAnchorPublishTimer();
+      }
       if (_isSignalKWebapp) {
         // Remembered per-origin (see _loadSettings) — the page you're
         // actually looking at was loaded from Uri.base, but the real
@@ -10260,94 +10338,38 @@ class _DashboardState extends State<Dashboard> {
                               ),
                               const SizedBox(height: 10),
                               for (final s in settings.savedServers)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 4,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              s.name,
-                                              style: const TextStyle(
-                                                color: cText,
-                                                fontWeight: FontWeight.w700,
-                                                fontSize: 13,
-                                              ),
-                                            ),
-                                            Text(
-                                              '${s.host}:${s.port}',
-                                              style: const TextStyle(
-                                                color: cMuted,
-                                                fontSize: 11,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      if (settings.host == s.host &&
-                                          settings.port == s.port)
-                                        const Padding(
-                                          padding: EdgeInsets.only(right: 8),
-                                          child: Icon(
-                                            Icons.check_circle,
-                                            color: cGreen,
-                                            size: 20,
-                                          ),
-                                        )
-                                      else
-                                        OutlinedButton(
-                                          onPressed: () => unawaited(
-                                            _switchToSavedServer(s),
-                                          ),
-                                          child: const Text('Conectar'),
-                                        ),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.edit_outlined,
-                                          color: cMuted,
-                                          size: 18,
-                                        ),
-                                        onPressed: () async {
-                                          final edited =
-                                              await showDialog<SavedServer>(
-                                                context: context,
-                                                builder: (_) =>
-                                                    ServerEditDialog(
-                                                      initial: s,
-                                                    ),
-                                              );
-                                          if (edited == null) return;
-                                          setSt(() {
-                                            final i = settings.savedServers
-                                                .indexOf(s);
-                                            settings.savedServers[i] = edited;
-                                          });
-                                          setState(() {});
-                                          unawaited(_saveSettings());
-                                        },
-                                      ),
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.delete_outline,
-                                          color: cMuted,
-                                          size: 18,
-                                        ),
-                                        onPressed: () {
-                                          setSt(
-                                            () => settings.savedServers
-                                                .remove(s),
-                                          );
-                                          setState(() {});
-                                          unawaited(_saveSettings());
-                                        },
-                                      ),
-                                    ],
-                                  ),
+                                SavedServerRow(
+                                  key: ValueKey('${s.host}:${s.port}'),
+                                  server: s,
+                                  isCurrent:
+                                      settings.host == s.host &&
+                                      settings.port == s.port,
+                                  onConnect: () =>
+                                      unawaited(_switchToSavedServer(s)),
+                                  onEdit: () async {
+                                    final edited =
+                                        await showDialog<SavedServer>(
+                                          context: context,
+                                          builder: (_) =>
+                                              ServerEditDialog(initial: s),
+                                        );
+                                    if (edited == null) return;
+                                    setSt(() {
+                                      final i = settings.savedServers.indexOf(
+                                        s,
+                                      );
+                                      settings.savedServers[i] = edited;
+                                    });
+                                    setState(() {});
+                                    unawaited(_saveSettings());
+                                  },
+                                  onDelete: () {
+                                    setSt(
+                                      () => settings.savedServers.remove(s),
+                                    );
+                                    setState(() {});
+                                    unawaited(_saveSettings());
+                                  },
                                 ),
                               if (settings.savedServers.isEmpty)
                                 const Padding(
@@ -10617,7 +10639,7 @@ class _DashboardState extends State<Dashboard> {
                         children: [
                           for (final slot in group.slots)
                             TankCard(
-                              name: '${slot.type} ${slot.id}',
+                              name: slot.groupLabel,
                               value: signalK.tanks[slot.tankKey],
                               capacityL: slot.capacityL,
                               color: group.color,

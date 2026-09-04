@@ -291,7 +291,65 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
           _cfg.tanks[idx].capacityL = tc.capacityL!;
         }
       }
+      _autoConfigureFromDiscovery(d);
     });
+  }
+
+  // "cuando le doy a buscar sensores, trata de autoconfigurar baterias,
+  // paneles, etc." (reported live 2026-09-04) — best-effort auto-fill for
+  // fields that were still blank before this scan. Never overwrites a
+  // value the user already has set (blank/null check on every field), so
+  // re-running the scan can't silently undo a manual choice.
+  void _autoConfigureFromDiscovery(SkDiscovery d) {
+    if (_cfg.batteryHouseId.isEmpty || _cfg.batteryStartId.isEmpty) {
+      String? findByHint(Iterable<String> hints) {
+        for (final id in d.batteryIds) {
+          final name = d.batteryNames[id];
+          if (name != null && hints.any(name.contains)) return id;
+        }
+        return null;
+      }
+
+      final houseHints = ['house', 'servicio', 'domestic', 'auxiliar', 'aux'];
+      final startHints = ['start', 'arranque', 'motor', 'engine'];
+      var house = findByHint(houseHints);
+      var start = findByHint(startHints);
+      // No name hints at all (or they didn't disambiguate) but exactly two
+      // batteries were found — a reasonable starting guess is better than
+      // leaving both blank; the dropdowns are right there to correct it.
+      if (house == null &&
+          start == null &&
+          d.batteryIds.length == 2 &&
+          _cfg.batteryHouseId.isEmpty &&
+          _cfg.batteryStartId.isEmpty) {
+        house = d.batteryIds[0];
+        start = d.batteryIds[1];
+      }
+      if (_cfg.batteryHouseId.isEmpty && house != null) {
+        _cfg.batteryHouseId = house;
+      }
+      if (_cfg.batteryStartId.isEmpty && start != null && start != house) {
+        _cfg.batteryStartId = start;
+      }
+    }
+    if (_cfg.solarPath == null && d.solarPaths.isNotEmpty) {
+      _cfg.solarPath = d.solarPaths[0];
+      if (_cfg.solarPath2 == null && d.solarPaths.length > 1) {
+        _cfg.solarPath2 = d.solarPaths[1];
+      }
+    }
+    if (_cfg.fridge1Path == null && d.fridgePaths.isNotEmpty) {
+      _cfg.fridge1Path = d.fridgePaths[0];
+      if (_cfg.fridge2Path == null && d.fridgePaths.length > 1) {
+        _cfg.fridge2Path = d.fridgePaths[1];
+      }
+    }
+    if (_cfg.depthPath == null && d.depthPaths.isNotEmpty) {
+      _cfg.depthPath = d.depthPaths[0];
+    }
+    if (_cfg.enginePath == null && d.enginePaths.isNotEmpty) {
+      _cfg.enginePath = d.enginePaths[0];
+    }
   }
 
   List<String> get _batteryIdOptions {

@@ -51,13 +51,13 @@ void main() {
     await tester.tap(find.text('TNK'));
     await tester.pumpAndSettle();
     expect(find.text('Fuel'), findsOneWidget);
-    expect(find.text('Fresh water'), findsOneWidget);
+    expect(find.text('Agua'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.text('Fuel'));
     await tester.pumpAndSettle();
-    expect(find.text('fuel 27'), findsOneWidget);
-    expect(find.text('fuel 26'), findsOneWidget);
+    expect(find.text('Fuel 1'), findsOneWidget);
+    expect(find.text('Fuel 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

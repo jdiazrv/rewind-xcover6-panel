@@ -715,18 +715,18 @@ class SensorConfig {
   bool hasOutsideTemp = true;
   bool hasOutsidePressure = true;
   List<TankSlot> tanks = [
-    TankSlot(type: 'fuel', id: '27', groupLabel: 'Fuel', capacityL: 180),
-    TankSlot(type: 'fuel', id: '26', groupLabel: 'Fuel', capacityL: 180),
+    TankSlot(type: 'fuel', id: '27', groupLabel: 'Fuel 1', capacityL: 180),
+    TankSlot(type: 'fuel', id: '26', groupLabel: 'Fuel 2', capacityL: 180),
     TankSlot(
       type: 'freshWater',
       id: '24',
-      groupLabel: 'Fresh water',
+      groupLabel: 'Agua Stbd',
       capacityL: 276,
     ),
     TankSlot(
       type: 'freshWater',
       id: '25',
-      groupLabel: 'Fresh water',
+      groupLabel: 'Agua Port',
       capacityL: 195,
     ),
     TankSlot(
@@ -947,6 +947,11 @@ class TankCandidate {
 
 class SkDiscovery {
   final List<String> batteryIds = [];
+  // id -> Signal K's own electrical.batteries.<id>.name, when the device
+  // publishes one (lowercased) — used to guess house vs. start battery on
+  // "Buscar sensores" instead of leaving both blank. See
+  // _SensorConfigDialog._discoverNow's _guessBatteryRole.
+  final Map<String, String> batteryNames = {};
   final List<String> solarPaths = [];
   final List<String> fridgePaths = [];
   final List<String> depthPaths = [];
