@@ -939,10 +939,19 @@ class AnchorHistoryEntry {
 
 // ─── Signal K path discovery (used by CFG > Sensores) ────────────────────────
 class TankCandidate {
-  TankCandidate({required this.type, required this.id, this.capacityL});
+  TankCandidate({
+    required this.type,
+    required this.id,
+    this.capacityL,
+    this.name,
+  });
   final String type;
   final String id;
   final int? capacityL;
+  // Signal K's own tanks.<type>.<id>.name, when published — "el nombre de
+  // los tanques tienes que cogerlo de signalk con el sufijo .name"
+  // (reported live 2026-09-04). Null when the device never publishes one.
+  final String? name;
 }
 
 class SkDiscovery {
@@ -953,6 +962,17 @@ class SkDiscovery {
   // _SensorConfigDialog._discoverNow's _guessBatteryRole.
   final Map<String, String> batteryNames = {};
   final List<String> solarPaths = [];
+  // Subset of solarPaths that are an actual per-controller TOTAL (e.g.
+  // electrical.solar.0.panelPower, electrical.venus.totalPanelPower) as
+  // opposed to one individual panel's own reading (e.g.
+  // electrical.solar.0.1.panelPower, one extra segment) — only these are
+  // valid solarPath/solarPath2 candidates, since picking an individual
+  // panel's path would silently report just that one panel's output
+  // instead of the controller's real total. "analiza primero el numero de
+  // paneles... electrical.solar.?.?.panelpower para los individuales y
+  // electrical.solar.?.panelpower para el total" (reported live
+  // 2026-09-04).
+  final List<String> solarTotalPaths = [];
   final List<String> fridgePaths = [];
   final List<String> depthPaths = [];
   final List<String> enginePaths = [];

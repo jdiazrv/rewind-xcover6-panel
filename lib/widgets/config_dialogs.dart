@@ -282,13 +282,20 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
             TankSlot(
               type: tc.type,
               id: tc.id,
-              groupLabel: '${tc.type} ${tc.id}',
+              groupLabel: tc.name ?? '${tc.type} ${tc.id}',
               capacityL: tc.capacityL ?? 0,
               enabled: false,
             ),
           );
-        } else if (tc.capacityL != null && _cfg.tanks[idx].capacityL == 0) {
-          _cfg.tanks[idx].capacityL = tc.capacityL!;
+        } else {
+          if (tc.capacityL != null && _cfg.tanks[idx].capacityL == 0) {
+            _cfg.tanks[idx].capacityL = tc.capacityL!;
+          }
+          // "el nombre de los tanques tienes que cogerlo de signalk con el
+          // sufijo .name" (reported live 2026-09-04) — Signal K's own name
+          // is authoritative when published, so every scan refreshes it
+          // rather than only filling it in once.
+          if (tc.name != null) _cfg.tanks[idx].groupLabel = tc.name!;
         }
       }
       _autoConfigureFromDiscovery(d);
@@ -332,10 +339,10 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
         _cfg.batteryStartId = start;
       }
     }
-    if (_cfg.solarPath == null && d.solarPaths.isNotEmpty) {
-      _cfg.solarPath = d.solarPaths[0];
-      if (_cfg.solarPath2 == null && d.solarPaths.length > 1) {
-        _cfg.solarPath2 = d.solarPaths[1];
+    if (_cfg.solarPath == null && d.solarTotalPaths.isNotEmpty) {
+      _cfg.solarPath = d.solarTotalPaths[0];
+      if (_cfg.solarPath2 == null && d.solarTotalPaths.length > 1) {
+        _cfg.solarPath2 = d.solarTotalPaths[1];
       }
     }
     if (_cfg.fridge1Path == null && d.fridgePaths.isNotEmpty) {
@@ -361,14 +368,18 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     return ids.toList()..sort();
   }
 
+  // Only the per-controller TOTAL paths are offered here — an individual
+  // panel's own reading (see SkDiscovery.solarTotalPaths) would silently
+  // report just that one panel's output as if it were the whole
+  // controller's contribution.
   List<String?> get _solarOptions => [
     null,
-    ...?_discovery?.solarPaths,
+    ...?_discovery?.solarTotalPaths,
     if (_cfg.solarPath != null) _cfg.solarPath,
   ];
   List<String?> get _solarOptions2 => [
     null,
-    ...?_discovery?.solarPaths,
+    ...?_discovery?.solarTotalPaths,
     if (_cfg.solarPath2 != null) _cfg.solarPath2,
   ];
   List<String?> get _fridgeOptions => [

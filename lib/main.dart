@@ -3604,6 +3604,19 @@ class _DashboardState extends State<Dashboard> {
       final lowerPath = path.toLowerCase();
       if (lowerPath.contains('solar') || lowerPath.contains('panel')) {
         result.solarPaths.add(path);
+        // See solarTotalPaths' doc comment — an individual panel's own
+        // reading has one extra id segment before the field name compared
+        // to its controller's total.
+        final individualPanel = RegExp(
+          r'^electrical\.\w+\.[^.]+\.[^.]+\.(panelPower|totalPanelPower)$',
+          caseSensitive: false,
+        ).hasMatch(path);
+        final isPanelPowerField =
+            lowerPath.endsWith('panelpower') ||
+            lowerPath.endsWith('totalpanelpower');
+        if (isPanelPowerField && !individualPanel) {
+          result.solarTotalPaths.add(path);
+        }
       }
       if (lowerPath.contains('depth')) {
         final node = leaves[path];
@@ -3630,10 +3643,13 @@ class _DashboardState extends State<Dashboard> {
         final id = tankMatch.group(2)!;
         final capNode = leaves['tanks.$type.$id.capacity'];
         final capM3 = capNode is Map ? _num(capNode['value']) : null;
+        final nameNode = leaves['tanks.$type.$id.name'];
+        final nameVal = nameNode is Map ? nameNode['value'] : null;
         tankMap['$type.$id'] = TankCandidate(
           type: type,
           id: id,
           capacityL: capM3 == null ? null : (capM3 * 1000).round(),
+          name: (nameVal is String && nameVal.isNotEmpty) ? nameVal : null,
         );
       }
       if (path == 'environment.outside.temperature') {
