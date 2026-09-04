@@ -642,7 +642,15 @@ class _DashboardState extends State<Dashboard> {
               },
               body: jsonEncode({
                 'enabled': true,
-                'configuration': {'ntfyTopic': settings.ntfyTopic},
+                'configuration': {
+                  'ntfyTopic': settings.ntfyTopic,
+                  // Keeps the server plugin's own backup-watchdog push
+                  // throttle equal to the app's — previously independent,
+                  // meaning a garreo could get pushed once by the app and
+                  // again moments later by the plugin, each unaware of the
+                  // other's window. Reported live 2026-09-04.
+                  'pushMinIntervalSec': settings.ntfyMinIntervalSec,
+                },
               }),
             )
             .timeout(const Duration(seconds: 8));
@@ -9303,7 +9311,7 @@ class _DashboardState extends State<Dashboard> {
                               Row(
                                 children: [
                                   const Text(
-                                    'No repetir antes de',
+                                    'No repetir antes de (app y vigilante del servidor)',
                                     style: TextStyle(fontSize: 13),
                                   ),
                                   const Spacer(),
@@ -9327,6 +9335,25 @@ class _DashboardState extends State<Dashboard> {
                                       );
                                       setState(() {});
                                       unawaited(_saveSettings());
+                                      // The server plugin's own backup
+                                      // watchdog push-throttle
+                                      // (pushMinIntervalSec) is kept equal
+                                      // to this same value — otherwise the
+                                      // app and the plugin could each
+                                      // independently decide it's fine to
+                                      // push again, doubling up a garreo
+                                      // alert. Reported live 2026-09-04
+                                      // ("debe respetarse que la app no
+                                      // reitere la alarma a ntfy si no ha
+                                      // pasado el tiempo de no repetición
+                                      // que está en el plugin").
+                                      _ntfyTopicSyncDebounce?.cancel();
+                                      _ntfyTopicSyncDebounce = Timer(
+                                        const Duration(seconds: 1),
+                                        () => unawaited(
+                                          _syncOwnAnchorPluginConfig(),
+                                        ),
+                                      );
                                     },
                                   ),
                                 ],

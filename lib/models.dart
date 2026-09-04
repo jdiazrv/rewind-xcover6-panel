@@ -1255,6 +1255,110 @@ class OwnTrackHistory {
   }
 }
 
+// Minimum points (since the current drop — see ANC's "Recolocar" use)
+// before a circle fit is even attempted. Fewer than this and the boat
+// simply hasn't swung through enough of the arc for the fit to mean
+// anything.
+const kAnchorRefitMinPoints = 8;
+// Below this, circle fitting is too ill-conditioned to trust — verified
+// empirically that a ~35-degree swing can produce a "confident"-looking
+// fit that's 15m+ off from the real anchor position, even with plenty of
+// points and low per-fix noise.
+const kAnchorRefitMinArcDeg = 60.0;
+
+// Fits a circle to a set of own-track points using Kasa's algebraic
+// least-squares method — the boat, tethered to the anchor by a fixed
+// scope, traces an arc of a circle centered on the anchor's TRUE position
+// as it swings with wind/tide. That center can be a more accurate estimate
+// of where the anchor actually is than the originally recorded drop fix
+// (GPS settling right at the moment of dropping, a position taken at the
+// bow rather than the anchor itself, etc). Used by ANC's "Recolocar ancla"
+// button. Reported live 2026-09-04 ("cuando ha pasado tiempo y hay trazas
+// se forma un sector de circulo que permitiria... recolocar
+// automaticamente el ancla en el origen del radio de ese sector").
+//
+// Points are converted to a local flat (equirectangular) projection first
+// — adequate at anchor-swing scale (tens of meters), not meant for
+// anything long-range. Returns null when there aren't enough points, or
+// the fit can't be trusted (see refLat/refLon below).
+//
+// refLat/refLon must be the CURRENTLY recorded anchor position (config.
+// dropLat/dropLon) — used only to judge whether the track has swung
+// through enough of an arc to trust a refit, never as part of the fit's
+// own math. This is deliberately NOT measured against the fitted center
+// itself: empirically, a narrow (~35°) swing can still produce a
+// "confident"-looking fit whose own center is 15m+ off from the true
+// anchor position, which then makes the swing look artificially wide when
+// measured around THAT wrong center — exactly hiding the case this check
+// exists to catch. Measuring against the already-known (if imperfect)
+// current position avoids that circularity. A geometry-only curvature
+// measure (sagitta/chord of the raw points) was also tried and rejected —
+// at the narrow arcs that matter here, ordinary per-fix GPS noise (~1m)
+// is comparable to or larger than the true sagitta, swamping the signal.
+({double lat, double lon, double radiusM})? fitCircleToTrack(
+  List<AnchorTrackPoint> points, {
+  required double refLat,
+  required double refLon,
+}) {
+  if (points.length < kAnchorRefitMinPoints) return null;
+  final cosRefLat = math.cos(refLat * math.pi / 180);
+  final angles =
+      [
+        for (final p in points)
+          math.atan2(
+                (p.lon - refLon) * cosRefLat,
+                p.lat - refLat,
+              ) *
+              180 /
+              math.pi,
+      ]..sort();
+  final n = angles.length;
+  var largestGap = 360.0 - (angles.last - angles.first);
+  for (var i = 1; i < n; i++) {
+    final gap = angles[i] - angles[i - 1];
+    if (gap > largestGap) largestGap = gap;
+  }
+  if (360.0 - largestGap < kAnchorRefitMinArcDeg) return null;
+
+  final lat0 = points.map((p) => p.lat).reduce((a, b) => a + b) / n;
+  final lon0 = points.map((p) => p.lon).reduce((a, b) => a + b) / n;
+  final cosLat0 = math.cos(lat0 * math.pi / 180);
+  final xs = [for (final p in points) (p.lon - lon0) * cosLat0 * 111320];
+  final ys = [for (final p in points) (p.lat - lat0) * 110540];
+  final xBar = xs.reduce((a, b) => a + b) / n;
+  final yBar = ys.reduce((a, b) => a + b) / n;
+  final u = [for (final x in xs) x - xBar];
+  final v = [for (final y in ys) y - yBar];
+  double suu = 0, svv = 0, suv = 0, suuu = 0, svvv = 0, suvv = 0, svuu = 0;
+  for (var i = 0; i < n; i++) {
+    suu += u[i] * u[i];
+    svv += v[i] * v[i];
+    suv += u[i] * v[i];
+    suuu += u[i] * u[i] * u[i];
+    svvv += v[i] * v[i] * v[i];
+    suvv += u[i] * v[i] * v[i];
+    svuu += v[i] * u[i] * u[i];
+  }
+  // Too little spread on either axis, or the linear system is (near-)
+  // singular.
+  final det = suu * svv - suv * suv;
+  if (suu < 4 || svv < 4 || det.abs() < 1e-6) return null;
+  final rhsU = 0.5 * (suuu + suvv);
+  final rhsV = 0.5 * (svvv + svuu);
+  final uc = (rhsU * svv - rhsV * suv) / det;
+  final vc = (suu * rhsV - suv * rhsU) / det;
+  final radiusM = math.sqrt(uc * uc + vc * vc + (suu + svv) / n);
+  // Sanity bounds — a fit wildly outside plausible swing-circle sizes
+  // means the input wasn't really arc-shaped (e.g. a mostly-straight
+  // motoring track) rather than a real anchor swing.
+  if (!radiusM.isFinite || radiusM <= 0 || radiusM > 500) return null;
+  return (
+    lat: lat0 + (yBar + vc) / 110540,
+    lon: lon0 + (xBar + uc) / (cosLat0 * 111320),
+    radiusM: radiusM,
+  );
+}
+
 class ModelForecastPoint {
   const ModelForecastPoint({
     required this.time,

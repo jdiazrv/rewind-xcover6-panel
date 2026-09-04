@@ -718,6 +718,42 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     });
   }
 
+  // Only the swing recorded since the CURRENT drop — widget.ownTrack keeps
+  // up to 24h regardless of anchorage, so an earlier stop's track must
+  // never leak into this anchorage's fit.
+  List<AnchorTrackPoint> get _trackSinceDrop {
+    final since = widget.config.droppedAt;
+    if (since == null) return const [];
+    return widget.ownTrack.where((p) => !p.t.isBefore(since)).toList();
+  }
+
+  // "recolocar automaticamente el ancla en el origen del radio de ese
+  // sector" (reported live 2026-09-04) — re-derives the anchor's true
+  // position from the arc the boat has actually swung through, which can
+  // be more accurate than the originally recorded drop fix. See
+  // fitCircleToTrack's own doc comment for the method. Null (rather than
+  // just "enough points") is also what gates the toolbar button itself —
+  // a coarse point-count check alone could leave the button looking
+  // enabled while a tap silently did nothing, if the points don't yet
+  // span enough of an arc.
+  ({double lat, double lon, double radiusM})? get _repositionFit {
+    final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
+    if (dropLat == null || dropLon == null) return null;
+    return fitCircleToTrack(_trackSinceDrop, refLat: dropLat, refLon: dropLon);
+  }
+
+  Future<void> _repositionAnchor() async {
+    final fit = _repositionFit;
+    if (fit == null) return;
+    if (!await _ensureLoggedIn()) return;
+    HapticFeedback.mediumImpact();
+    _updateConfig((c) {
+      c.dropLat = fit.lat;
+      c.dropLon = fit.lon;
+      c.armedOrMovedAt = skNow();
+    });
+  }
+
   void _openLayersSheet() {
     showModalBottomSheet<void>(
       context: context,
@@ -2323,6 +2359,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 });
               },
         active: _editMode == 'radius',
+      ),
+      const SizedBox(width: 8),
+      _toolBtn(
+        Icons.center_focus_strong,
+        'Recolocar',
+        (!widget.config.armed || _repositionFit == null)
+            ? null
+            : _repositionAnchor,
       ),
       const SizedBox(width: 14),
       FilledButton.icon(
