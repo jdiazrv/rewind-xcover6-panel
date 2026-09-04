@@ -1845,28 +1845,41 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          !widget.config.armed
-              ? 'SIN ARMAR'
-              // Without a live connection the app has no idea what's
-              // actually true right now — a stale local "armed" flag is
-              // not the same as confirmed "still fine, still anchored".
-              : !widget.skConnected
-              ? 'SIN CONEXIÓN'
-              : !outside
-              ? 'FONDEADO'
-              // Actively moving away vs. parked outside the circle —
-              // both need attention, but only one is a live drag.
-              : (isDragging ? 'GARREANDO' : 'FUERA DEL CÍRCULO'),
-          style: TextStyle(
-            color: !widget.config.armed
+        Builder(
+          builder: (context) {
+            final label = !widget.config.armed
+                ? 'SIN ARMAR'
+                // Without a live connection the app has no idea what's
+                // actually true right now — a stale local "armed" flag is
+                // not the same as confirmed "still fine, still anchored".
+                : !widget.skConnected
+                ? 'SIN CONEXIÓN'
+                : !outside
+                ? 'FONDEADO'
+                // Actively moving away vs. parked outside the circle —
+                // both need attention, but only one is a live drag.
+                : (isDragging ? 'GARREANDO' : 'FUERA DEL CÍRCULO');
+            final color = !widget.config.armed
                 ? cMuted
                 : !widget.skConnected
                 ? cOrange
-                : (outside ? cRed : cGreen),
-            fontWeight: FontWeight.w800,
-            fontSize: 15,
-          ),
+                : (outside ? cRed : cGreen);
+            final text = Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+              ),
+            );
+            // TEMPORARY 2026-09-04: substitutes for the alarm sound, which
+            // is off right now while testing garreo detection (see
+            // main.dart's _activeAlarms) — a blinking status makes a
+            // triggered test just as unmissable without the noise. Revert
+            // (or keep, if it turns out worth keeping) once the sound is
+            // back on.
+            return isDragging ? _Blink(child: text) : text;
+          },
         ),
         if (widget.config.armed && distanceM != null)
           Text(
@@ -2636,4 +2649,36 @@ class _LayersSheetState extends State<_LayersSheet> {
       ),
     );
   }
+}
+
+// Repeating opacity pulse — see the TEMPORARY 2026-09-04 note where this is
+// used in _statusPanel.
+class _Blink extends StatefulWidget {
+  const _Blink({required this.child});
+  final Widget child;
+
+  @override
+  State<_Blink> createState() => _BlinkState();
+}
+
+class _BlinkState extends State<_Blink> with SingleTickerProviderStateMixin {
+  late final _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: Tween<double>(
+      begin: 1,
+      end: 0.25,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut)),
+    child: widget.child,
+  );
 }

@@ -344,9 +344,9 @@ class _DashboardState extends State<Dashboard> {
   WebSocketChannel? _anchorPublishChannel;
   bool _anchorPublishConnecting = false;
   // Cached across calls (SK session tokens are long-lived) — see
-  // _syncHoekensAnchorAlarm. Cleared on a 401 so the next sync logs back
-  // in instead of retrying a dead token forever.
-  String? _hoekensToken;
+  // _syncOwnAnchorPluginConfig. Cleared on a 401 so the next sync logs
+  // back in instead of retrying a dead token forever.
+  String? _skConfigToken;
 
   Future<WebSocketChannel?> _ensureAnchorPublishChannel() async {
     if (_anchorPublishChannel != null) return _anchorPublishChannel;
@@ -552,81 +552,47 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  // Best-effort backup watchdog: mirrors our own arm/position/radius into
-  // hoekens-anchor-alarm (if installed — most calls here 404 harmlessly on
-  // a server without it) so an anchor watch keeps running INSIDE the
-  // Signal K server itself, independent of whether any phone/tablet/
-  // browser has this app open at all. We stopped using hoekens as the
-  // primary UI over its own config drifting stale/wrong (see the ANC
-  // native-screen rewrite), but its own UI/webview is untouched — this
-  // only keeps its config in sync, nothing else. A failure here must
-  // NEVER affect our own anchor watch, hence the blanket catch.
-  Future<void> _syncHoekensAnchorAlarm() async {
+  // Pushes the ntfy topic into our OWN server-side plugin's config (see
+  // server/index.js) — everything else that plugin needs (armed state,
+  // drop position, watch zone) it already gets by listening to
+  // navigation.anchor.* itself, the same paths this app already publishes;
+  // the topic is the one thing it can't observe that way. Best-effort: a
+  // server without our plugin installed/enabled 404s harmlessly, and a
+  // failure here must never affect this app's own anchor watch.
+  Future<void> _syncOwnAnchorPluginConfig() async {
     if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return;
-    final cfg = settings.anchorConfig;
     final base =
-        'http://${settings.host}:${settings.port}/plugins/hoekens-anchor-alarm';
-
-    Future<http.Response?> post(String path, Map<String, dynamic> body) async {
-      for (var attempt = 0; attempt < 2; attempt++) {
-        final token = await _ensureHoekensToken(forceRefresh: attempt > 0);
-        if (token == null) return null;
-        try {
-          final resp = await http
-              .post(
-                Uri.parse('$base/$path'),
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': 'Bearer $token',
-                },
-                body: jsonEncode(body),
-              )
-              .timeout(const Duration(seconds: 8));
-          if (resp.statusCode == 401 && attempt == 0) {
-            _hoekensToken = null;
-            continue;
-          }
-          return resp;
-        } catch (_) {
-          return null;
+        'http://${settings.host}:${settings.port}/plugins/rewind-xcover6-panel/config';
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final token = await _ensureSkConfigToken(forceRefresh: attempt > 0);
+      if (token == null) return;
+      try {
+        final resp = await http
+            .post(
+              Uri.parse(base),
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer $token',
+              },
+              body: jsonEncode({
+                'enabled': true,
+                'configuration': {'ntfyTopic': settings.ntfyTopic},
+              }),
+            )
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode == 401 && attempt == 0) {
+          _skConfigToken = null;
+          continue;
         }
+        return;
+      } catch (_) {
+        return;
       }
-      return null;
-    }
-
-    try {
-      if (cfg.armed && cfg.dropLat != null && cfg.dropLon != null) {
-        final zone = <String, dynamic>{
-          'type': cfg.shape,
-          'radius': cfg.radiusM,
-          if (cfg.shape == 'sector') 'startAngle': cfg.sectorStartDeg,
-          if (cfg.shape == 'sector') 'endAngle': cfg.sectorEndDeg,
-        };
-        final position = {'latitude': cfg.dropLat, 'longitude': cfg.dropLon};
-        // setZone first — it's idempotent and doesn't start a new session
-        // log entry the way dropAnchor does. Only falls back to dropAnchor
-        // when hoekens doesn't already have an anchor down on its side
-        // (fresh plugin install, plugin restarted, or this is genuinely
-        // the first sync of a new arm) — setZone rejects that case with
-        // 403/404 rather than silently accepting it.
-        final resp = await post('setZone', {
-          'zone': zone,
-          'position': position,
-        });
-        if (resp == null || resp.statusCode == 403 || resp.statusCode == 404) {
-          await post('dropAnchor', {'position': position, 'zone': zone});
-        }
-      } else {
-        await post('raiseAnchor', {});
-      }
-    } catch (_) {
-      // Backup watchdog only — never let a sync failure surface to the
-      // user or affect our own anchor watch.
     }
   }
 
-  Future<String?> _ensureHoekensToken({bool forceRefresh = false}) async {
-    if (!forceRefresh && _hoekensToken != null) return _hoekensToken;
+  Future<String?> _ensureSkConfigToken({bool forceRefresh = false}) async {
+    if (!forceRefresh && _skConfigToken != null) return _skConfigToken;
     if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return null;
     try {
       final resp = await http
@@ -642,8 +608,8 @@ class _DashboardState extends State<Dashboard> {
           )
           .timeout(const Duration(seconds: 8));
       if (resp.statusCode != 200) return null;
-      _hoekensToken = (jsonDecode(resp.body) as Map)['token'] as String?;
-      return _hoekensToken;
+      _skConfigToken = (jsonDecode(resp.body) as Map)['token'] as String?;
+      return _skConfigToken;
     } catch (_) {
       return null;
     }
@@ -919,7 +885,14 @@ class _DashboardState extends State<Dashboard> {
       out.add((
         key: key,
         label: 'Garreando — fuera de la zona de fondeo',
-        sound: true,
+        // TEMPORARY 2026-09-04: sound off while testing garreo detection —
+        // the real USAGE_ALARM sound firing on every test run was too
+        // disruptive to iterate against. The "GARREANDO" status now blinks
+        // instead (see _statusPanel) so a triggered test is still obvious.
+        // Revert to `true` once testing is done — this alarm is normally
+        // deliberately NOT a persistent user setting (see the comment
+        // where _muteAllActiveAlarms is defined).
+        sound: false,
         muted: _mutedAlarms.contains(key),
       ));
     }
@@ -2728,7 +2701,7 @@ class _DashboardState extends State<Dashboard> {
       // armed from a previous session (app restart, reconnect) — not just
       // on the next config change from the ANC screen itself.
       unawaited(_publishAnchorDelta());
-      unawaited(_syncHoekensAnchorAlarm());
+      unawaited(_syncOwnAnchorPluginConfig());
       _syncAnchorPublishTimer();
       // A fresh connection always starts unsubscribed from AIS — re-derive
       // whether it should be (AIS page open, or a CPA/TCPA NAV card is
@@ -2858,9 +2831,10 @@ class _DashboardState extends State<Dashboard> {
       // shared anchor watch actually changed and this install should sync
       // to match (see _applyRemoteAnchorState); or a genuinely different
       // source (hoekens etc.), which just updates signalK.anchorState —
-      // now only read by CFG > Diagnóstico's raw-path row, since hoekens
-      // is a deliberately-synced backup watchdog (see
-      // _syncHoekensAnchorAlarm), not something to warn about anymore.
+      // only read by CFG > Diagnóstico's raw-path row on the client side.
+      // Backing off when a genuinely foreign anchor watch is armed is now
+      // handled server-side, by our own plugin (see server/index.js) —
+      // not something the client needs to warn about.
       // Without this distinction every install used to ignore ALL anchor.* data
       // carrying its own label, including from other installs — meaning
       // anchoring from the webapp never showed as anchored on Android.
@@ -4551,10 +4525,9 @@ class _DashboardState extends State<Dashboard> {
         (_engineRunning || _kMotorPanelAlwaysVisible);
     // settings.anchorConfig.armed, NOT signalK.anchorArmed — the latter is
     // fed only by whatever a foreign source (hoekens etc.) is reporting on
-    // navigation.anchor.state (see _onSignalKMessage's routing), which lags
-    // behind our own arm/disarm by however long _syncHoekensAnchorAlarm
-    // takes and never reflects it at all when that sync fails — this app's
-    // own state, kept in sync across installs, is the right field here.
+    // navigation.anchor.state (see _onSignalKMessage's routing), which has
+    // nothing to do with what THIS app is doing — this app's own state,
+    // kept in sync across installs, is the right field here.
     // Confirmed live 2026-09-02.
     final premiumScreens = <Widget>[
       _navPremiumSailPage(),
@@ -7844,7 +7817,6 @@ class _DashboardState extends State<Dashboard> {
       setState(() => settings.anchorConfig = cfg);
       unawaited(_saveSettings());
       unawaited(_publishAnchorDelta());
-      unawaited(_syncHoekensAnchorAlarm());
       _syncAnchorPublishTimer();
     },
     ownLat: signalK.latitude,
