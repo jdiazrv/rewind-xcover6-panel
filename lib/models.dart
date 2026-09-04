@@ -1338,18 +1338,25 @@ class SettingsModel {
   // watch circle. Explicitly NOT a scope-ratio alarm (chain:depth) — asked
   // for and declined; depth swing is what's wanted instead.
   bool alarmAnchorDepthEnabled = false;
-  bool alarmAnchorDepthSound = true;
+  // Sound off by default (reported live 2026-09-04) — the anchor-drag
+  // alarm itself (garreo) always sounds regardless, un-configurable; these
+  // three secondary anchor alarms (depth swing, wind, no-position) stay
+  // silent until the user opts in per-alarm in CFG > Fondeo, same as the
+  // AIS/corredera/engine alarms already default to sound-on but these
+  // specifically default to off.
+  bool alarmAnchorDepthSound = false;
   double alarmAnchorDepthMarginM = 1.5;
   bool alarmAnchorWindEnabled = false;
-  bool alarmAnchorWindSound = true;
+  bool alarmAnchorWindSound = false;
   double alarmAnchorWindKn = 25.0;
   // "Fails loud, not silent" — losing position entirely while armed (both
   // Signal K and any device-GPS fallback) is itself worth alerting on, not
   // just silently showing "--" the way it would for an unarmed watch. On
   // by default, unlike the other two — this one has no false-positive risk
-  // (it only fires when there's truly nothing to watch with).
+  // (it only fires when there's truly nothing to watch with). Sound still
+  // defaults off though, same as the other two anchor alarms above.
   bool alarmAnchorNoPositionEnabled = true;
-  bool alarmAnchorNoPositionSound = true;
+  bool alarmAnchorNoPositionSound = false;
   // A single implausible GPS fix (a big instantaneous jump, then back) can
   // read as "outside the watch circle" even though the boat never actually
   // moved — this ignores any one reading that jumps further than this from
