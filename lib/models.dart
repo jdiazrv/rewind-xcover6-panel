@@ -78,6 +78,22 @@ void skRecordServerDate(http.BaseResponse response) {
   skClockOffset = serverNow.difference(DateTime.now().toUtc());
 }
 
+// Moved here from utils/format_helpers.dart (a `part of main.dart` file
+// that can't be reached from models.dart's own standalone library) so
+// computeYawAnalysis below can use it too — main.dart and its part files
+// already see this via main.dart's own `import 'models.dart';`.
+double normalize360(double value) {
+  var out = value % 360.0;
+  if (out < 0) out += 360.0;
+  return out;
+}
+
+double normalizeRelativeAngle(double value) {
+  var out = normalize360(value);
+  if (out > 180.0) out -= 360.0;
+  return out;
+}
+
 /// Great-circle bearing/distance between two points — shared by the AIS
 /// radar (ais_view.dart, in nautical miles) and the native anchor watch
 /// (main.dart, in meters), so both use the same Haversine math instead of
@@ -269,6 +285,13 @@ const mHeading = MetricDef(
   '°',
   scale: 57.2957795,
   color: cText,
+);
+const mCog = MetricDef(
+  'navigation.courseOverGroundTrue',
+  'COG',
+  '°',
+  scale: 57.2957795,
+  color: cPurple,
 );
 
 const defaultNavCardIds = ['sog', 'stw', 'heading', 'cog', 'depth', 'heel'];
@@ -1333,6 +1356,273 @@ const kAnchorRefitMinPoints = 8;
   ].where((d) => d >= radiusM * 0.7 && d <= radiusM * 1.3).length;
   if (nearRadiusCount < 3) return null;
   return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
+}
+
+// ─── Guiñada (yaw-at-anchor analysis) ─────────────────────────────────────────
+// "analizar analíticamente cómo 'navega' el barco sobre el ancla... en lugar
+// de limitarse a mostrar solo el círculo de borneo estático" (reported live
+// 2026-09-04) — a new ANC sub-screen. Purely single-boat, no cross-vessel
+// data sharing and no chain-scope event log (both explicitly descoped by the
+// user: comparing boats happens by talking over the radio, not in-app; the
+// effect of paying out more/less chain is judged by eye, re-opening this
+// screen before/after, not by an automatic before/after annotation).
+
+// One sample for yaw analysis — like AnchorTrackPoint but also carries
+// heading/COG/SOG at that instant, needed for the yaw/leeway math below.
+class AnchorYawPoint {
+  const AnchorYawPoint({
+    required this.t,
+    required this.lat,
+    required this.lon,
+    this.headingDeg,
+    this.cogDeg,
+    this.sogKn,
+  });
+  final DateTime t;
+  final double lat;
+  final double lon;
+  final double? headingDeg;
+  final double? cogDeg;
+  final double? sogKn;
+}
+
+// Live, in-memory rolling buffer for Guiñada's "Última hora" (high-
+// resolution) mode — NOT persisted across app restarts/reconnects, unlike
+// OwnTrackHistory: the point of this window is "what is the boat doing
+// right now", so starting empty after a restart is correct, not a gap to
+// backfill. Sampled far more often than OwnTrackHistory's 15s (oscillation
+// itself can complete a full cycle in well under a minute), but only kept
+// for 2h — comfortably past the 1h the UI actually offers, with margin.
+class YawTrackHistory {
+  final List<AnchorYawPoint> points = [];
+  void add({
+    required double? lat,
+    required double? lon,
+    double? headingDeg,
+    double? cogDeg,
+    double? sogKn,
+  }) {
+    if (lat == null || lon == null) return;
+    final now = DateTime.now();
+    if (points.isNotEmpty &&
+        now.difference(points.last.t) < const Duration(seconds: 3)) {
+      return;
+    }
+    points.add(
+      AnchorYawPoint(
+        t: now,
+        lat: lat,
+        lon: lon,
+        headingDeg: headingDeg,
+        cogDeg: cogDeg,
+        sogKn: sogKn,
+      ),
+    );
+    points.removeWhere((p) => now.difference(p.t) > const Duration(hours: 2));
+  }
+
+  void clear() => points.clear();
+}
+
+// Δψ: how far the bow is pointing away from directly away-from-the-anchor
+// (i.e. away from the reciprocal of the rode) — 0° means lying calmly
+// head-to-rode, ±90° means lying broadside to it. Signed, -180..180.
+double? yawMisalignmentDeg({
+  required double anchorLat,
+  required double anchorLon,
+  required double boatLat,
+  required double boatLon,
+  required double headingDeg,
+}) {
+  final expected = bearingDistanceMeters(
+    anchorLat,
+    anchorLon,
+    boatLat,
+    boatLon,
+  ).bearingDeg;
+  return normalizeRelativeAngle(headingDeg - expected);
+}
+
+// Leeway/abatimiento: how far the boat's actual movement (COG) diverges
+// from where the bow points (heading) — near 0 lying still or moving
+// straight ahead, larger when sliding sideways (typical mid-swing, chain
+// still slack). Signed, -180..180.
+double? leewayDeg({required double cogDeg, required double headingDeg}) =>
+    normalizeRelativeAngle(cogDeg - headingDeg);
+
+class YawAnalysisResult {
+  const YawAnalysisResult({
+    required this.samples,
+    required this.yawSeries,
+    required this.yawAmplitudeDeg,
+    required this.oscillationPeriod,
+    required this.sweptAreaM2,
+  });
+  // (time, Δψ) — the plotted series.
+  final List<({DateTime t, double yawDeg})> yawSeries;
+  final int samples;
+  final double? yawAmplitudeDeg;
+  final Duration? oscillationPeriod;
+  final double? sweptAreaM2;
+}
+
+// Odd-length centered moving average — enough to take the worst of raw GPS/
+// compass jitter off the yaw series before amplitude/period/area are
+// measured from it, without a full signal-processing library.
+List<double> _movingAverage(List<double> values, int window) {
+  if (window < 3 || values.length < window) return values;
+  final w = window.isOdd ? window : window + 1;
+  final half = w ~/ 2;
+  return [
+    for (var i = 0; i < values.length; i++)
+      () {
+        final lo = (i - half).clamp(0, values.length - 1);
+        final hi = (i + half).clamp(0, values.length - 1);
+        var sum = 0.0;
+        for (var j = lo; j <= hi; j++) {
+          sum += values[j];
+        }
+        return sum / (hi - lo + 1);
+      }(),
+  ];
+}
+
+// Turns a raw track (own position + heading, since the current drop) into
+// the KPIs Guiñada shows. anchorLat/anchorLon is the CURRENT drop position
+// (config.dropLat/dropLon) — same "known, not fitted" spirit as
+// fitAnchorCenterKnownRadius, just used here as a fixed reference instead
+// of something to solve for.
+YawAnalysisResult computeYawAnalysis({
+  required List<AnchorYawPoint> points,
+  required double anchorLat,
+  required double anchorLon,
+}) {
+  final usable = points.where((p) => p.headingDeg != null).toList();
+  if (usable.length < 4) {
+    return const YawAnalysisResult(
+      samples: 0,
+      yawSeries: [],
+      yawAmplitudeDeg: null,
+      oscillationPeriod: null,
+      sweptAreaM2: null,
+    );
+  }
+  final rawYaw = [
+    for (final p in usable)
+      yawMisalignmentDeg(
+        anchorLat: anchorLat,
+        anchorLon: anchorLon,
+        boatLat: p.lat,
+        boatLon: p.lon,
+        headingDeg: p.headingDeg!,
+      )!,
+  ];
+  // Smoothing window scales a little with sample count so a handful of
+  // points (start of the "última hora" window) isn't over-smoothed into a
+  // flat line, but a long dense series still gets real noise reduction.
+  final smoothed = _movingAverage(rawYaw, (usable.length ~/ 20).clamp(3, 9));
+  final yawSeries = [
+    for (var i = 0; i < usable.length; i++)
+      (t: usable[i].t, yawDeg: smoothed[i]),
+  ];
+  final amplitude =
+      smoothed.reduce(math.max) - smoothed.reduce(math.min);
+
+  // Oscillation period — average time between consecutive UPWARD
+  // zero-crossings of the smoothed yaw series (one full cycle = port to
+  // starboard and back). A simple, honest approximation, not a spectral
+  // analysis — deliberately ignores crossings closer together than 20s
+  // (GPS/compass jitter, not a real half-cycle) and requires the series to
+  // have actually swung at least a couple of degrees either side of zero.
+  Duration? period;
+  if (amplitude > 4) {
+    final crossings = <DateTime>[];
+    for (var i = 1; i < smoothed.length; i++) {
+      if (smoothed[i - 1] <= 0 && smoothed[i] > 0) {
+        if (crossings.isEmpty ||
+            usable[i].t.difference(crossings.last) >
+                const Duration(seconds: 20)) {
+          crossings.add(usable[i].t);
+        }
+      }
+    }
+    if (crossings.length >= 2) {
+      final totalMs = crossings.last
+          .difference(crossings.first)
+          .inMilliseconds;
+      period = Duration(
+        milliseconds: (totalMs / (crossings.length - 1)).round(),
+      );
+    }
+  }
+
+  // Swept area: the footprint the boat has actually occupied, in a local
+  // flat projection centered on the anchor (same convention used
+  // throughout this file). NOT a shoelace over the raw TIME-ordered
+  // points — a boat yawing is oscillating back and forth over roughly the
+  // SAME arc, not tracing one clean loop, so a time-ordered shoelace
+  // mostly cancels itself out to near zero (verified empirically: a
+  // realistic 40° yaw over 40 cycles came out as 0.0 m²). The convex hull
+  // of the visited points, then shoelace on THAT (properly boundary-
+  // ordered) polygon, gives the actual occupied area instead.
+  final cosLat = math.cos(anchorLat * math.pi / 180);
+  final xy = [
+    for (final p in usable)
+      (
+        x: (p.lon - anchorLon) * cosLat * 111320,
+        y: (p.lat - anchorLat) * 110540,
+      ),
+  ];
+  final areaM2 = _convexHullArea(xy);
+
+  return YawAnalysisResult(
+    samples: usable.length,
+    yawSeries: yawSeries,
+    yawAmplitudeDeg: amplitude,
+    oscillationPeriod: period,
+    sweptAreaM2: areaM2,
+  );
+}
+
+// Andrew's monotone chain: convex hull in O(n log n), then shoelace on the
+// hull's own (properly boundary-ordered) vertices. See computeYawAnalysis's
+// doc comment above for why the hull is used instead of a direct
+// time-ordered shoelace.
+double _convexHullArea(List<({double x, double y})> pts) {
+  if (pts.length < 3) return 0;
+  final sorted = [...pts]
+    ..sort((a, b) => a.x != b.x ? a.x.compareTo(b.x) : a.y.compareTo(b.y));
+  double cross(
+    ({double x, double y}) o,
+    ({double x, double y}) a,
+    ({double x, double y}) b,
+  ) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  final lower = <({double x, double y})>[];
+  for (final p in sorted) {
+    while (lower.length >= 2 &&
+        cross(lower[lower.length - 2], lower.last, p) <= 0) {
+      lower.removeLast();
+    }
+    lower.add(p);
+  }
+  final upper = <({double x, double y})>[];
+  for (final p in sorted.reversed) {
+    while (upper.length >= 2 &&
+        cross(upper[upper.length - 2], upper.last, p) <= 0) {
+      upper.removeLast();
+    }
+    upper.add(p);
+  }
+  lower.removeLast();
+  upper.removeLast();
+  final hull = [...lower, ...upper];
+  if (hull.length < 3) return 0;
+  double shoelace = 0;
+  for (var i = 0; i < hull.length; i++) {
+    final j = (i + 1) % hull.length;
+    shoelace += hull[i].x * hull[j].y - hull[j].x * hull[i].y;
+  }
+  return shoelace.abs() / 2;
 }
 
 class ModelForecastPoint {

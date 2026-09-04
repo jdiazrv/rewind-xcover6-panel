@@ -64,6 +64,7 @@ part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
 part 'widgets/saved_server_row.dart';
+part 'widgets/yaw_analysis_dialog.dart';
 
 // Last uncaught error, if any — shown in CFG > Diagnóstico rather than only
 // living in logcat, since the tablet running this has no attached console
@@ -345,6 +346,10 @@ class _DashboardState extends State<Dashboard> {
   // of whether ANC is the open tab, same as signalK's own fields, so the
   // track already covers the last 24h whenever the anchor screen opens.
   final _ownTrack = OwnTrackHistory();
+  // High-resolution live buffer for ANC > Guiñada's "Última hora" mode —
+  // see YawTrackHistory's own doc comment for why this is a separate,
+  // non-persisted buffer from _ownTrack rather than reusing it.
+  final _yawTrack = YawTrackHistory();
   // Fed by NativeAnchorView's onEffectivePositionChanged — its own
   // device-GPS fallback lives inside that widget, invisible from here
   // otherwise. Used by the "sin posición" alarm below so it doesn't fire
@@ -3078,6 +3083,7 @@ class _DashboardState extends State<Dashboard> {
       signalK.reset();
       _aisTargets.clear();
       _ownTrack.clear();
+      _yawTrack.clear();
       _selfContext = null;
       _selfMmsi = null;
       // Both live outside signalK's own model (see their declarations),
@@ -3465,6 +3471,13 @@ class _DashboardState extends State<Dashboard> {
           signalK.latitude = newLat;
           signalK.longitude = newLon;
           _ownTrack.add(newLat, newLon);
+          _yawTrack.add(
+            lat: newLat,
+            lon: newLon,
+            headingDeg: _freshHeading,
+            cogDeg: _freshCog,
+            sogKn: _freshSog,
+          );
           if (hadNoPos &&
               newLat != null &&
               newLon != null &&
@@ -3690,6 +3703,7 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer = null;
     _aisTargets.clear();
     _ownTrack.clear();
+    _yawTrack.clear();
   }
 
   void _tickDemo() {
@@ -8392,6 +8406,7 @@ class _DashboardState extends State<Dashboard> {
         unawaited(_saveSettings());
       },
       onVerifyLogin: _loginToSignalK,
+      demo: settings.demoMode,
       gpsFallbackConsent: settings.gpsFallbackConsent,
       onGpsFallbackConsentChanged: (allow) {
         setState(() => settings.gpsFallbackConsent = allow);
@@ -8412,6 +8427,37 @@ class _DashboardState extends State<Dashboard> {
       shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
       alarmsMuted: _anchorAlarmsMuted,
       onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
+      onOpenYawAnalysis: _openYawAnalysisDialog,
+    );
+  }
+
+  // ANC > Guiñada — "analizar analíticamente cómo 'navega' el barco sobre
+  // el ancla... en lugar de limitarse a mostrar solo el círculo de borneo
+  // estático" (reported live 2026-09-04). Single-boat only — comparing
+  // against another boat happens by talking over the radio, not in-app,
+  // and the effect of paying out more/less chain is judged by eye,
+  // re-opening this screen before/after, not by an automatic annotation
+  // (both explicitly descoped by the user).
+  void _openYawAnalysisDialog() {
+    final cfg = settings.anchorConfig;
+    if (cfg.dropLat == null || cfg.dropLon == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => YawAnalysisDialog(
+        liveTrack: _yawTrack.points,
+        anchorLat: cfg.dropLat!,
+        anchorLon: cfg.dropLon!,
+        demo: settings.demoMode,
+        historySource: settings.historySource,
+        skHost: settings.host,
+        skPort: settings.port,
+        skAuthBase64: settings.authBase64,
+        influxHost: settings.effectiveInfluxHost,
+        influxOrg: settings.influxOrg,
+        influxToken: settings.influxToken,
+        bucket: settings.influxBucket,
+        archiveBucket: settings.influxArchiveBucket,
+      ),
     );
   }
 

@@ -69,6 +69,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.skPassword,
     required this.onCredentialsChanged,
     this.onVerifyLogin,
+    this.demo = false,
     required this.gpsFallbackConsent,
     required this.onGpsFallbackConsentChanged,
     required this.onEffectivePositionChanged,
@@ -86,6 +87,7 @@ class NativeAnchorView extends StatefulWidget {
     this.windPeak3sKn,
     this.windGustFloorKn,
     this.onDragStatusChanged,
+    required this.onOpenYawAnalysis,
   });
 
   final AnchorConfig config;
@@ -115,6 +117,10 @@ class NativeAnchorView extends StatefulWidget {
   // it isn't" logic this screen already gets right).
   final void Function(bool outside, bool isDragging, double? dragSpeedMPerMin)?
   onDragStatusChanged;
+  // ANC > Guiñada — opens a main.dart-scope dialog (needs
+  // LineGraph/GraphPoint/history-query helpers only visible there), same
+  // bridge pattern as onConfigChanged/onCredentialsChanged.
+  final VoidCallback onOpenYawAnalysis;
   final double? gustKn;
   final int? gustAgeMin;
   final List<AisTarget> aisTargets;
@@ -130,6 +136,14 @@ class NativeAnchorView extends StatefulWidget {
   // as "trust the fields", the old behavior) — always provided in
   // practice (see main.dart's _loginToSignalK).
   final Future<bool> Function()? onVerifyLogin;
+  // DEMO mode has no real Signal K server to verify against — a real
+  // POST would always fail, blocking Fondear/Levar/Recolocar entirely and
+  // making it impossible to try the anchor watch out risk-free, exactly
+  // what DEMO exists for. Skips _ensureLoggedIn's verification (not the
+  // "has credentials" check — DEMO still shouldn't need real credentials
+  // typed in at all) while active. Reported live 2026-09-04 (found while
+  // testing "Guiñada" in DEMO mode).
+  final bool demo;
   final bool? gpsFallbackConsent;
   final ValueChanged<bool> onGpsFallbackConsentChanged;
   // Lets main.dart's "sin posición" alarm know this screen's own
@@ -628,6 +642,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       widget.skUsername.trim().isNotEmpty && widget.skPassword.isNotEmpty;
 
   Future<bool> _ensureLoggedIn() async {
+    if (widget.demo) return true;
     if (!_hasCredentials) {
       final result = await showDialog<(String, String)>(
         context: context,
@@ -770,9 +785,70 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return null;
   }
 
+  // Display-only — the angular span the track has actually swept around
+  // the CURRENT drop point, purely for the confirmation dialog's summary
+  // (not a gating condition; fitAnchorCenterKnownRadius has its own,
+  // stricter checks for whether to trust the fit at all).
+  double _swingArcDeg(double refLat, double refLon) {
+    final angles =
+        [
+          for (final p in _trackSinceDrop)
+            bearingDistanceMeters(refLat, refLon, p.lat, p.lon).bearingDeg,
+        ]..sort();
+    if (angles.length < 2) return 0;
+    var largestGap = 360.0 - (angles.last - angles.first);
+    for (var i = 1; i < angles.length; i++) {
+      final gap = angles[i] - angles[i - 1];
+      if (gap > largestGap) largestGap = gap;
+    }
+    return 360.0 - largestGap;
+  }
+
+  // "no hace nada" (reported live 2026-09-04) — the fit was actually being
+  // applied, but a correction is often only a few meters, invisible at a
+  // normal map zoom, with nothing telling the user anything happened at
+  // all. Now shows exactly what's about to change and asks first — also
+  // what was explicitly requested: "resumen de los datos... angulo de
+  // borneo, maximo estiramiento de la cadena, modificacion que va a
+  // hacer... pregunta si esta de acuerdo".
   Future<void> _repositionAnchor() async {
     final fit = _repositionFit;
     if (fit == null) return;
+    final dropLat = widget.config.dropLat!, dropLon = widget.config.dropLon!;
+    final move = bearingDistanceMeters(dropLat, dropLon, fit.lat, fit.lon);
+    final arcDeg = _swingArcDeg(dropLat, dropLon);
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cPanel,
+        title: const Text(
+          'Recolocar ancla',
+          style: TextStyle(color: cText),
+        ),
+        content: Text(
+          'Se ha calculado una posición más precisa a partir del giro '
+          'registrado desde que fondeaste.\n\n'
+          'Ángulo de borneo: ${arcDeg.round()}°\n'
+          'Radio (cadena tensa): ${widget.config.radiusM.round()} m\n'
+          'Puntos usados: ${_trackSinceDrop.length}\n\n'
+          'Quedará a ${move.distanceM.round()} m de la posición actual, '
+          'en rumbo ${move.bearingDeg.round()}°.',
+          style: const TextStyle(color: cMuted),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Recolocar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
     if (!await _ensureLoggedIn()) return;
     HapticFeedback.mediumImpact();
     _updateConfig((c) {
@@ -780,6 +856,16 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.dropLon = fit.lon;
       c.armedOrMovedAt = skNow();
     });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Ancla recolocada — ${move.distanceM.round()} m, '
+            'rumbo ${move.bearingDeg.round()}°',
+          ),
+        ),
+      );
+    }
   }
 
   void _openLayersSheet() {
@@ -2397,6 +2483,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
             : _repositionAnchor,
         disabledReason: _repositionDisabledReason,
       ),
+      const SizedBox(width: 8),
+      _toolBtn(Icons.ssid_chart, 'Guiñada', widget.onOpenYawAnalysis),
       const SizedBox(width: 14),
       FilledButton.icon(
         onPressed: widget.config.armed ? _raiseAnchor : _dropAnchor,

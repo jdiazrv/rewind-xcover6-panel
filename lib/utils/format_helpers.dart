@@ -193,17 +193,9 @@ Color depthColor(double? meters) {
   return cCyan;
 }
 
-double normalize360(double value) {
-  var out = value % 360.0;
-  if (out < 0) out += 360.0;
-  return out;
-}
-
-double normalizeRelativeAngle(double value) {
-  var out = normalize360(value);
-  if (out > 180.0) out -= 360.0;
-  return out;
-}
+// normalize360/normalizeRelativeAngle moved to models.dart (needed there
+// too, by computeYawAnalysis) — already in scope here via main.dart's own
+// import of models.dart.
 
 double? relativeWindAngle(double? directionDeg, double? referenceDeg) {
   if (directionDeg == null || referenceDeg == null) return null;

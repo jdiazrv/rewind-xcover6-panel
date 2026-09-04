@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:latlong2/latlong.dart' as ll;
 
-import 'main.dart';
 import 'models.dart';
 import 'theme.dart';
 
