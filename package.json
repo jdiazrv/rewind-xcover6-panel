@@ -1,6 +1,6 @@
 {
   "name": "rewind-xcover6-panel",
-  "version": "1.4.126",
+  "version": "1.4.127",
   "description": "REWIND instrument panel for sailing yachts — navigation, wind, power, tanks, weather, forecast, AIS radar and history charts, served straight from your Signal K server.",
   "keywords": [
     "signalk-webapp",

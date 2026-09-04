@@ -170,31 +170,36 @@ module.exports = function (app) {
     return '';
   }
 
+  // `value: null` for the clear case, NOT a `{state: 'normal', ...}`
+  // object — that's the actual Signal K convention for "no active
+  // notification here anymore" (same thing hoekens-anchor-alarm's own
+  // updateAnchorAlarm does), and some consumers (Signal K's own admin UI
+  // included) keep treating a still-present notification object as
+  // active regardless of its `state` field. Sending an object instead of
+  // null here was very likely why raising the anchor didn't actually
+  // silence an already-firing alarm. Reported live 2026-09-04.
   function setNotification(state, message) {
-    const key = `${state}|${message}`;
+    const key = state === 'normal' ? 'normal' : `${state}|${message}`;
     if (key === lastNotifKey) return;
     lastNotifKey = key;
+    const value =
+      state === 'normal'
+        ? null
+        : {
+            state,
+            method: ['visual', 'sound'],
+            message,
+            timestamp: new Date().toISOString(),
+          };
     app.handleMessage(plugin.id, {
       updates: [
-        {
-          values: [
-            {
-              path: 'notifications.navigation.anchor',
-              value: {
-                state,
-                method: state === 'normal' ? ['visual'] : ['visual', 'sound'],
-                message,
-                timestamp: new Date().toISOString(),
-              },
-            },
-          ],
-        },
+        { values: [{ path: 'notifications.navigation.anchor', value }] },
       ],
     });
   }
 
   function clearAlarmIfAny(reason) {
-    if (lastNotifKey && !lastNotifKey.startsWith('normal|')) {
+    if (lastNotifKey && lastNotifKey !== 'normal') {
       app.debug(`clearing anchor alarm: ${reason}`);
     }
     setNotification('normal', reason);
