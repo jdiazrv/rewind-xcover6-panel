@@ -73,6 +73,19 @@ part 'widgets/battery_curve_dialog.dart';
 // screen the error widget was mounted under, when Flutter reports one.
 String? lastCrashInfo;
 
+// CFG > Sensores > Química de batería — shared segment list between the
+// Arranque and Bow thruster selectors (independent settings, but the same
+// four choices either way).
+const _batteryChemistrySegments = <ButtonSegment<String>>[
+  ButtonSegment(value: 'lead', label: Text('Plomo', style: TextStyle(fontSize: 12))),
+  ButtonSegment(value: 'agm', label: Text('AGM', style: TextStyle(fontSize: 12))),
+  ButtonSegment(value: 'gel', label: Text('Gel', style: TextStyle(fontSize: 12))),
+  ButtonSegment(
+    value: 'lithium',
+    label: Text('Litio', style: TextStyle(fontSize: 12)),
+  ),
+];
+
 void main() {
   // Everything — including ensureInitialized() and the async orientation/
   // system-UI setup — now runs INSIDE the guarded zone, not just runApp().
@@ -2285,6 +2298,11 @@ class _DashboardState extends State<Dashboard> {
     settings.anchorTotalChainLengthM =
         prefs.getDouble('anchorTotalChainLengthM') ??
         settings.anchorTotalChainLengthM;
+    settings.batteryChemistryStart =
+        prefs.getString('batteryChemistryStart') ??
+        settings.batteryChemistryStart;
+    settings.batteryChemistryBow =
+        prefs.getString('batteryChemistryBow') ?? settings.batteryChemistryBow;
     settings.ntfyTopic = prefs.getString('ntfyTopic') ?? settings.ntfyTopic;
     settings.ntfyAlarmKeys
       ..clear()
@@ -2600,6 +2618,11 @@ class _DashboardState extends State<Dashboard> {
       'anchorTotalChainLengthM',
       settings.anchorTotalChainLengthM,
     );
+    await prefs.setString(
+      'batteryChemistryStart',
+      settings.batteryChemistryStart,
+    );
+    await prefs.setString('batteryChemistryBow', settings.batteryChemistryBow);
     await prefs.setString('ntfyTopic', settings.ntfyTopic);
     await prefs.setStringList('ntfyAlarmKeys', settings.ntfyAlarmKeys.toList());
     await prefs.setInt('ntfyMinIntervalSec', settings.ntfyMinIntervalSec);
@@ -7681,6 +7704,7 @@ class _DashboardState extends State<Dashboard> {
                             voltage: signalK.startV,
                             trend: _startVTrend.direction,
                             color: startColor,
+                            chemistry: settings.batteryChemistryStart,
                           ),
                   ),
                 ),
@@ -7706,6 +7730,7 @@ class _DashboardState extends State<Dashboard> {
                             voltage: signalK.bowthrusterV,
                             trend: _bowVTrend.direction,
                             color: bowColor,
+                            chemistry: settings.batteryChemistryBow,
                           ),
                   ),
                 ),
@@ -8550,6 +8575,7 @@ class _DashboardState extends State<Dashboard> {
     required double? voltage,
     required int trend,
     required Color color,
+    required String chemistry,
   }) {
     showDialog<void>(
       context: context,
@@ -8558,6 +8584,7 @@ class _DashboardState extends State<Dashboard> {
         voltage: voltage,
         trendDirection: trend,
         color: color,
+        chemistry: chemistry,
       ),
     );
   }
@@ -9240,6 +9267,54 @@ class _DashboardState extends State<Dashboard> {
                                   await _saveSettings();
                                   _connectSignalK();
                                 }
+                              },
+                            ),
+                          ],
+                        ),
+                        SettingsGroup(
+                          title: 'QUÍMICA DE BATERÍA',
+                          icon: Icons.battery_5_bar,
+                          children: [
+                            const Text(
+                              'Para la curva aproximada de carga/descarga '
+                              '(CFG > Sensores no aplica a Batería servicio, '
+                              'que ya tiene SoC real). Independiente por '
+                              'batería — no siempre son la misma química, y '
+                              'no todos los barcos tienen batería de proa.',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'Arranque',
+                              style: TextStyle(color: cText, fontSize: 13),
+                            ),
+                            const SizedBox(height: 4),
+                            SegmentedButton<String>(
+                              segments: _batteryChemistrySegments,
+                              selected: {settings.batteryChemistryStart},
+                              onSelectionChanged: (v) {
+                                setSt(
+                                  () => settings.batteryChemistryStart = v.first,
+                                );
+                                setState(() {});
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Bow thruster',
+                              style: TextStyle(color: cText, fontSize: 13),
+                            ),
+                            const SizedBox(height: 4),
+                            SegmentedButton<String>(
+                              segments: _batteryChemistrySegments,
+                              selected: {settings.batteryChemistryBow},
+                              onSelectionChanged: (v) {
+                                setSt(
+                                  () => settings.batteryChemistryBow = v.first,
+                                );
+                                setState(() {});
+                                unawaited(_saveSettings());
                               },
                             ),
                           ],

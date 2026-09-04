@@ -1426,38 +1426,95 @@ const kAnchorRefitMinPoints = 8;
   return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
 }
 
-// ─── Lead-acid voltage → SOC curve (batteries without a shunt) ────────────────
+// ─── Voltage → SOC curves, by chemistry (batteries without a shunt) ───────────
 // "en todas las baterias ademas de la grafica historica e gustaria ver la
-// curva de carga y descarga... vamos a asumir que son plomo" (reported live
-// 2026-09-04) — for the house battery there's already a real current sensor
-// and Signal K publishes a proper stateOfCharge, so none of this applies
-// there. For start/bow-thruster batteries there's only ever a voltage
-// reading, so this is the standard fallback: a resting-voltage lookup table,
-// ONLY meaningful when the battery isn't currently being charged or drained
-// (see _VoltageTrendTracker in trackers.dart, which is what qualifies
-// whether to trust it). Values are the widely-used approximate reference for
-// a 12V lead-acid battery at rest around room temperature — real cells vary
-// a few tenths of a volt by chemistry (flooded/AGM/gel) and temperature, so
-// this is always presented as an approximation, never an exact reading.
-const leadAcidSocCurve12V = <(int soc, double voltage)>[
-  (0, 11.00),
-  (10, 11.51),
-  (20, 11.66),
-  (30, 11.81),
-  (40, 11.96),
-  (50, 12.10),
-  (60, 12.24),
-  (70, 12.37),
-  (80, 12.50),
-  (90, 12.62),
-  (100, 12.70),
-];
+// curva de carga y descarga" then "en CFG debe poderse elegir plomo, agm,
+// gel o litio y poner la curva de carga aprox" (reported live 2026-09-04) —
+// for the house battery there's already a real current sensor and Signal K
+// publishes a proper stateOfCharge, so none of this applies there. For
+// start/bow-thruster batteries there's only ever a voltage reading, so this
+// is the standard fallback: a resting-voltage lookup table per chemistry
+// (settings.batteryChemistryStart / batteryChemistryBow — separate per
+// battery, see their own doc comment), ONLY meaningful when the battery
+// isn't currently being charged or drained (see _VoltageTrendTracker in
+// trackers.dart, which is what qualifies whether to trust it). Values are
+// widely-used approximate references at rest around room temperature —
+// real cells vary by brand and temperature, so this is always presented as
+// an approximation, never an exact reading.
+//
+// Lithium (LiFePO4) is a special case worth calling out: its curve is
+// famously almost FLAT across the whole 20-90% range (~13.0-13.3V) before
+// dropping sharply at each end — a few tens of millivolts of measurement
+// noise there swing the estimate by a huge SOC range, far more than for any
+// lead-based chemistry. BatteryCurveDialog surfaces that as an extra
+// caption rather than silently presenting a falsely precise number.
+const batterySocCurves = <String, List<(int soc, double voltage)>>{
+  'lead': [
+    (0, 11.00),
+    (10, 11.51),
+    (20, 11.66),
+    (30, 11.81),
+    (40, 11.96),
+    (50, 12.10),
+    (60, 12.24),
+    (70, 12.37),
+    (80, 12.50),
+    (90, 12.62),
+    (100, 12.70),
+  ],
+  'agm': [
+    (0, 11.30),
+    (10, 11.60),
+    (20, 11.80),
+    (30, 11.96),
+    (40, 12.10),
+    (50, 12.24),
+    (60, 12.37),
+    (70, 12.50),
+    (80, 12.60),
+    (90, 12.70),
+    (100, 12.80),
+  ],
+  'gel': [
+    (0, 11.50),
+    (10, 11.70),
+    (20, 11.90),
+    (30, 12.05),
+    (40, 12.20),
+    (50, 12.35),
+    (60, 12.45),
+    (70, 12.55),
+    (80, 12.65),
+    (90, 12.75),
+    (100, 12.85),
+  ],
+  'lithium': [
+    (0, 10.00),
+    (10, 12.50),
+    (20, 12.90),
+    (30, 13.00),
+    (40, 13.05),
+    (50, 13.10),
+    (60, 13.15),
+    (70, 13.20),
+    (80, 13.25),
+    (90, 13.30),
+    (100, 13.60),
+  ],
+};
 
-// Linear interpolation through leadAcidSocCurve12V — voltage in, approximate
-// SOC% out (clamped to the table's own range at both ends).
-double leadAcidSocFromVoltage(double voltageAt12VNominal) {
+const batteryChemistryLabels = <String, String>{
+  'lead': 'Plomo-ácido',
+  'agm': 'AGM',
+  'gel': 'Gel',
+  'lithium': 'Litio (LiFePO4)',
+};
+
+// Linear interpolation through batterySocCurves[chemistry] — voltage in,
+// approximate SOC% out (clamped to the table's own range at both ends).
+double socFromVoltage(double voltageAt12VNominal, String chemistry) {
   final v = voltageAt12VNominal;
-  final table = leadAcidSocCurve12V;
+  final table = batterySocCurves[chemistry] ?? batterySocCurves['lead']!;
   if (v <= table.first.$2) return table.first.$1.toDouble();
   if (v >= table.last.$2) return table.last.$1.toDouble();
   for (var i = 0; i < table.length - 1; i++) {
@@ -1996,6 +2053,15 @@ class SettingsModel {
   // alongside the anchor watch data, same paths hoekens used.
   double anchorBowRollerHeightM = 0;
   double anchorTotalChainLengthM = 100;
+  // Applies to start/bow-thruster's voltage→SOC curve (BatteryCurveDialog)
+  // — the house battery has a real current sensor and doesn't need this.
+  // Separate per battery, NOT one shared setting — they're not always the
+  // same chemistry, and plenty of boats don't even have a bow thruster
+  // battery at all (reported live 2026-09-04). 'lead' | 'agm' | 'gel' |
+  // 'lithium' — see batterySocCurves in models.dart for the reference
+  // tables.
+  String batteryChemistryStart = 'lead';
+  String batteryChemistryBow = 'lead';
   // ntfy.sh push, per-alarm opt-in — client-side, no Signal K plugin
   // involved. Empty topic gets a "SV_<nombre del barco>" default the first
   // time CFG is opened (see _settingsPage). Which alarms actually push is

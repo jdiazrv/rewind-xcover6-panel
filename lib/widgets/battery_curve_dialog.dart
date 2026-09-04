@@ -2,15 +2,17 @@ part of '../main.dart';
 
 // "en todas las baterias ademas de la grafica historica e gustaria ver la
 // curva de carga y descarga... para house da igual [ya tiene SOC real].
-// pero quiero ver la curva graficamente para las que no tengan shunt"
-// (reported live 2026-09-04) — start and bow-thruster batteries only ever
-// publish voltage, so this is the closest thing to a SOC reading available
-// for them: a resting-voltage lookup curve (leadAcidSocFromVoltage, in
-// models.dart), with the live voltage marked on it. trendDirection (from
-// the matching _VoltageTrendTracker, fed every real delta) is what keeps
-// this honest — the curve is only meaningful at rest, so charging/
-// discharging is called out explicitly instead of presenting a number that
-// would otherwise just be wrong under load.
+// pero quiero ver la curva graficamente para las que no tengan shunt" then
+// "en CFG debe poderse elegir plomo, agm, gel o litio y poner la curva de
+// carga aprox" (reported live 2026-09-04) — start and bow-thruster
+// batteries only ever publish voltage, so this is the closest thing to a
+// SOC reading available for them: a resting-voltage lookup curve
+// (socFromVoltage, in models.dart, keyed by settings.batteryChemistry),
+// with the live voltage marked on it. trendDirection (from the matching
+// _VoltageTrendTracker, fed every real delta) is what keeps this honest —
+// the curve is only meaningful at rest, so charging/discharging is called
+// out explicitly instead of presenting a number that would otherwise just
+// be wrong under load.
 class BatteryCurveDialog extends StatelessWidget {
   const BatteryCurveDialog({
     super.key,
@@ -18,17 +20,20 @@ class BatteryCurveDialog extends StatelessWidget {
     required this.voltage,
     required this.trendDirection,
     required this.color,
+    required this.chemistry,
   });
 
   final String title;
   final double? voltage;
   final int trendDirection; // -1 descargando, 0 en reposo, 1 cargando
   final Color color;
+  final String chemistry; // 'lead' | 'agm' | 'gel' | 'lithium'
 
   @override
   Widget build(BuildContext context) {
     final v = voltage;
-    final soc = v == null ? null : leadAcidSocFromVoltage(v);
+    final soc = v == null ? null : socFromVoltage(v, chemistry);
+    final chemLabel = batteryChemistryLabels[chemistry] ?? 'Plomo-ácido';
     return Dialog(
       backgroundColor: cPanel,
       insetPadding: const EdgeInsets.all(20),
@@ -56,9 +61,9 @@ class BatteryCurveDialog extends StatelessWidget {
                 ),
               ],
             ),
-            const Text(
-              'Curva de carga/descarga — plomo-ácido, en reposo (aproximado)',
-              style: TextStyle(color: cMuted, fontSize: 12),
+            Text(
+              'Curva de carga/descarga — $chemLabel, en reposo (aproximado)',
+              style: const TextStyle(color: cMuted, fontSize: 12),
             ),
             const SizedBox(height: 16),
             SizedBox(
@@ -73,14 +78,25 @@ class BatteryCurveDialog extends StatelessWidget {
                     )
                   : CustomPaint(
                       size: Size.infinite,
-                      painter: _LeadAcidCurvePainter(
+                      painter: _BatteryCurvePainter(
                         voltage: v,
                         soc: soc!,
                         color: color,
+                        chemistry: chemistry,
                       ),
                     ),
             ),
             if (v != null) ...[const SizedBox(height: 14), _trendBanner(soc!)],
+            if (v != null && chemistry == 'lithium') ...[
+              const SizedBox(height: 10),
+              const Text(
+                'El litio (LiFePO4) mantiene el voltaje casi plano entre el '
+                '20% y el 90% — pequeñas variaciones de lectura cambian '
+                'mucho la estimación. Fíate más de un BMS/shunt real si '
+                'tienes uno.',
+                style: TextStyle(color: cMuted, fontSize: 11),
+              ),
+            ],
           ],
         ),
       ),
@@ -102,7 +118,7 @@ class BatteryCurveDialog extends StatelessWidget {
       _ => (
         Icons.trending_flat,
         'En reposo',
-        '~${soc.round()}% — estimación razonable (±15%, plomo-ácido).',
+        '~${soc.round()}% — estimación aproximada.',
       ),
     };
     return Container(
@@ -140,28 +156,34 @@ class BatteryCurveDialog extends StatelessWidget {
   }
 }
 
-class _LeadAcidCurvePainter extends CustomPainter {
-  _LeadAcidCurvePainter({
+class _BatteryCurvePainter extends CustomPainter {
+  _BatteryCurvePainter({
     required this.voltage,
     required this.soc,
     required this.color,
+    required this.chemistry,
   });
   final double voltage;
   final double soc;
   final Color color;
-
-  static const _minV = 11.0, _maxV = 12.9;
+  final String chemistry;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const padL = 38.0, padB = 22.0, padT = 14.0, padR = 12.0;
+    final table = batterySocCurves[chemistry] ?? batterySocCurves['lead']!;
+    // A little headroom above/below the table's own extremes so the top
+    // and bottom points aren't drawn flush against the axes.
+    final minV = table.first.$2 - 0.15;
+    final maxV = table.last.$2 + 0.15;
+
+    const padL = 42.0, padB = 22.0, padT = 14.0, padR = 12.0;
     final plotW = size.width - padL - padR;
     final plotH = size.height - padT - padB;
     if (plotW <= 0 || plotH <= 0) return;
 
     double xFor(double socPct) => padL + plotW * (socPct / 100);
     double yFor(double v) =>
-        padT + plotH * (1 - (v.clamp(_minV, _maxV) - _minV) / (_maxV - _minV));
+        padT + plotH * (1 - (v.clamp(minV, maxV) - minV) / (maxV - minV));
 
     final axisPaint = Paint()
       ..color = cMuted.withValues(alpha: 0.3)
@@ -178,8 +200,8 @@ class _LeadAcidCurvePainter extends CustomPainter {
     );
 
     final path = Path();
-    for (var i = 0; i < leadAcidSocCurve12V.length; i++) {
-      final (s, v) = leadAcidSocCurve12V[i];
+    for (var i = 0; i < table.length; i++) {
+      final (s, v) = table[i];
       final p = Offset(xFor(s.toDouble()), yFor(v));
       if (i == 0) {
         path.moveTo(p.dx, p.dy);
@@ -231,10 +253,10 @@ class _LeadAcidCurvePainter extends CustomPainter {
         size: 10,
       );
     }
-    _text(canvas, '${_maxV.toStringAsFixed(1)}V', Offset(0, padT - 4), cMuted, size: 10);
+    _text(canvas, '${maxV.toStringAsFixed(1)}V', Offset(0, padT - 4), cMuted, size: 10);
     _text(
       canvas,
-      '${_minV.toStringAsFixed(1)}V',
+      '${minV.toStringAsFixed(1)}V',
       Offset(0, padT + plotH - 8),
       cMuted,
       size: 10,
@@ -267,6 +289,6 @@ class _LeadAcidCurvePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _LeadAcidCurvePainter old) =>
-      old.voltage != voltage || old.color != color;
+  bool shouldRepaint(covariant _BatteryCurvePainter old) =>
+      old.voltage != voltage || old.color != color || old.chemistry != chemistry;
 }
