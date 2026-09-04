@@ -822,6 +822,9 @@ class _DashboardState extends State<Dashboard> {
   AudioPlayer? _alarmPlayer;
   bool _alarmSoundPlaying = false;
   String? _alarmSoundPlayingAsset;
+  // See _maybeUnlockWebAudio's own doc comment — only ever needs doing
+  // once per tab.
+  bool _webAudioUnlocked = false;
   static const _engineAlarmKeys = {
     'engineOil',
     'engineTemp',
@@ -1330,6 +1333,35 @@ class _DashboardState extends State<Dashboard> {
     iOS: AudioContextIOS(category: AVAudioSessionCategory.playback),
   );
 
+  // Chrome/Safari block any audio .play() call that wasn't triggered by a
+  // genuine user gesture in the same call stack — an alarm is triggered by
+  // an incoming Signal K delta, not a tap, so on web it silently never
+  // actually sounded even though _syncAlarmSound below believed it was
+  // playing (the browser's rejected Promise was thrown straight past its
+  // un-try/catch'd `await .play()`, permanently stuck in that mistaken
+  // state until the alarm condition cleared and re-armed). Playing (then
+  // immediately stopping) a real asset once, on the very first
+  // pointer-down anywhere in the app, satisfies the browser's gesture
+  // requirement for the rest of the tab's session. A no-op on native
+  // (Android/iOS never blocked this in the first place). Reported live
+  // 2026-09-04 ("entro en la webapp desde mi mac y no suena alarma").
+  Future<void> _maybeUnlockWebAudio() async {
+    if (!kIsWeb || _webAudioUnlocked) return;
+    _webAudioUnlocked = true;
+    try {
+      _alarmPlayer ??= AudioPlayer();
+      await _alarmPlayer!.setAudioContext(_alarmAudioContext);
+      await _alarmPlayer!.setVolume(0);
+      await _alarmPlayer!.play(AssetSource(_alarmSoundAsset));
+      await _alarmPlayer!.stop();
+      await _alarmPlayer!.setVolume(1);
+    } catch (e) {
+      // Best-effort — a real alarm later just tries (and, on web, possibly
+      // fails silently) on its own, exactly as it did before this existed.
+      debugPrint('[alarm] web audio unlock failed: $e');
+    }
+  }
+
   Future<void> _syncAlarmSound() async {
     unawaited(_ntfyPush._maybeSendNtfyAlarms());
     final shouldPlay = _alarmSoundShouldPlay;
@@ -1338,10 +1370,19 @@ class _DashboardState extends State<Dashboard> {
         (!_alarmSoundPlaying || _alarmSoundPlayingAsset != asset)) {
       _alarmSoundPlaying = true;
       _alarmSoundPlayingAsset = asset;
-      _alarmPlayer ??= AudioPlayer();
-      await _alarmPlayer!.setAudioContext(_alarmAudioContext);
-      await _alarmPlayer!.setReleaseMode(ReleaseMode.loop);
-      await _alarmPlayer!.play(AssetSource(asset));
+      try {
+        _alarmPlayer ??= AudioPlayer();
+        await _alarmPlayer!.setAudioContext(_alarmAudioContext);
+        await _alarmPlayer!.setReleaseMode(ReleaseMode.loop);
+        await _alarmPlayer!.play(AssetSource(asset));
+      } catch (e) {
+        // A blocked/failed play() must not leave the app believing an
+        // alarm is audibly sounding when it isn't — retry on the next
+        // alarm re-evaluation instead of getting stuck silent forever.
+        _alarmSoundPlaying = false;
+        _alarmSoundPlayingAsset = null;
+        debugPrint('[alarm] play() failed: $e');
+      }
     } else if (!shouldPlay && _alarmSoundPlaying) {
       _alarmSoundPlaying = false;
       _alarmSoundPlayingAsset = null;
@@ -4466,7 +4507,20 @@ class _DashboardState extends State<Dashboard> {
         settings.brightnessMode == 'noche' ||
         (settings.brightnessMode == 'auto' && sysDark);
 
-    final scaffold = Scaffold(
+    // Chrome/Safari's autoplay policy blocks any audio .play() call that
+    // wasn't triggered by a genuine user gesture — an alarm is triggered
+    // by an incoming Signal K delta, not a tap, so on web it silently
+    // never actually sounded even though the app believed it was playing.
+    // A Listener (not a GestureDetector — this must never steal or
+    // interfere with any tap the rest of the tree already handles) "primes"
+    // the audio element on the very first pointer-down anywhere, which
+    // satisfies the browser's gesture requirement for the rest of the
+    // tab's session. Reported live 2026-09-04 ("entro en la webapp desde
+    // mi mac y no suena alarma").
+    final scaffold = Listener(
+      onPointerDown: (_) => unawaited(_maybeUnlockWebAudio()),
+      behavior: HitTestBehavior.translucent,
+      child: Scaffold(
       body: SafeArea(
         // Translucent, not opaque: an ancestor GestureDetector's onTap
         // still fires alongside whatever descendant (buttons, lamp chips,
@@ -4562,6 +4616,7 @@ class _DashboardState extends State<Dashboard> {
             ],
           ),
         ),
+      ),
       ),
     );
     if (!useNight) return scaffold;
