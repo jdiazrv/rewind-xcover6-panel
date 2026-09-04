@@ -1050,14 +1050,11 @@ class _DashboardState extends State<Dashboard> {
       out.add((
         key: key,
         label: 'Garreando — fuera de la zona de fondeo',
-        // TEMPORARY 2026-09-04: sound off while testing garreo detection —
-        // the real USAGE_ALARM sound firing on every test run was too
-        // disruptive to iterate against. The "GARREANDO" status now blinks
-        // instead (see _statusPanel) so a triggered test is still obvious.
-        // Revert to `true` once testing is done — this alarm is normally
-        // deliberately NOT a persistent user setting (see the comment
-        // where _muteAllActiveAlarms is defined).
-        sound: false,
+        // Sound re-enabled 2026-09-04 — was temporarily off while testing
+        // garreo detection (see the blinking "GARREANDO" status in
+        // _statusPanel, added for the same testing period). Testing done,
+        // user confirmed live.
+        sound: true,
         muted: _mutedAlarms.contains(key),
       ));
     }
@@ -1986,8 +1983,18 @@ class _DashboardState extends State<Dashboard> {
       // only writes to that device's local storage. Only seeds when
       // there's no saved list at all yet, so deleting entries later
       // doesn't bring them back.
+      // REWIND's own entry uses its Tailscale IP, NOT lysmarine.local —
+      // this list is CFG > Admin's remotes-only switcher (see
+      // _currentServerConfigKey's doc comment above and "todos los
+      // remotos requieren tailscale, la conexión local está en otra
+      // pantalla", 2026-09-02); a .local mDNS name only ever resolves on
+      // the boat's own LAN, so seeding it here would silently never work
+      // the one time this list is actually useful — while genuinely away
+      // from the boat. lysmarine.local stays reachable from CFG >
+      // Conexión's own quick-select chips. Reported live 2026-09-04
+      // ("en cfg admin el lysmarine no es .local es el 100.85.109.61").
       settings.savedServers = [
-        SavedServer(name: 'REWIND', host: 'lysmarine.local'),
+        SavedServer(name: 'REWIND', host: '100.85.109.61'),
         SavedServer(name: 'DRAGUEUR', host: '100.75.26.38'),
         SavedServer(name: 'AREA SECADA', host: '100.105.32.16'),
         SavedServer(name: 'QUINTO REAL', host: '100.73.92.66'),
@@ -8293,6 +8300,19 @@ class _DashboardState extends State<Dashboard> {
           }
         }
         _currentServerConfigKey = matching?.name;
+        // A saved server's OWN Signal K credentials, not whatever is left
+        // over in settings.skUsername/skPassword from a previous boat —
+        // these fields are live-bound (see skUsernameController's
+        // onChanged below), so editing ONLY the host here otherwise left
+        // them at whichever server was last actually SWITCHED to via
+        // Admin, silently authenticating this new connection with the
+        // wrong boat's login. Reported live 2026-09-04.
+        if (matching != null) {
+          settings.skUsername = matching.skUsername;
+          settings.skPassword = matching.skPassword;
+          skUsernameController.text = matching.skUsername;
+          skPasswordController.text = matching.skPassword;
+        }
         final hostKey = _serverConfigKey;
         final savedSensor = settings.sensorConfigJsonByHost[hostKey];
         settings.sensorConfig = savedSensor != null
