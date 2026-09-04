@@ -2857,9 +2857,11 @@ class _DashboardState extends State<Dashboard> {
       // — another phone/tablet, or the web version — which means the
       // shared anchor watch actually changed and this install should sync
       // to match (see _applyRemoteAnchorState); or a genuinely different
-      // source (hoekens etc.), which still drives the "other plugin still
-      // armed" disarm banner via signalK.anchorState as before. Without
-      // this distinction every install used to ignore ALL anchor.* data
+      // source (hoekens etc.), which just updates signalK.anchorState —
+      // now only read by CFG > Diagnóstico's raw-path row, since hoekens
+      // is a deliberately-synced backup watchdog (see
+      // _syncHoekensAnchorAlarm), not something to warn about anymore.
+      // Without this distinction every install used to ignore ALL anchor.* data
       // carrying its own label, including from other installs — meaning
       // anchoring from the webapp never showed as anchored on Android.
       String sourceLabel = '';
@@ -2889,7 +2891,7 @@ class _DashboardState extends State<Dashboard> {
           }
           // else: falls through to _routeValue below, same as any other
           // path — a genuinely foreign source (hoekens) updates
-          // signalK.anchorState there, driving the disarm banner.
+          // signalK.anchorState there (see CFG > Diagnóstico).
         }
         if (isSelf) {
           changed = _routeValue(path, item['value'], dataTime) || changed;
@@ -3631,68 +3633,6 @@ class _DashboardState extends State<Dashboard> {
   }
 
   bool? _skLoginOk; // null = not attempted, true/false = last attempt result
-
-  // "Borrar" a rival anchor watch (hoekens-anchor-alarm) still armed
-  // server-side — the one write this otherwise 100% read-only app makes,
-  // only on this explicit, user-confirmed action.
-  //
-  // The plugin's config (`/plugins/.../config`, `on: true/false`) is NOT
-  // its live armed state — that field never actually changes what the
-  // running plugin is watching. Found the real mechanism by opening the
-  // plugin's own web UI and inspecting what its "Raise" button calls
-  // (2026-09-01): a plain POST to plugins/hoekens-anchor-alarm/raiseAnchor,
-  // no body, same Bearer-token auth as everything else here. Confirmed by
-  // watching the anchor actually raise in the plugin's own UI afterward.
-  Future<bool> _disarmOtherAnchorPlugin() async {
-    if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) {
-      return false;
-    }
-    try {
-      final loginResp = await http
-          .post(
-            Uri.parse(
-              'http://${settings.host}:${settings.port}/signalk/v1/auth/login',
-            ),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'username': settings.skUsername,
-              'password': settings.skPassword,
-            }),
-          )
-          .timeout(const Duration(seconds: 8));
-      if (loginResp.statusCode != 200) return false;
-      final token = (jsonDecode(loginResp.body) as Map)['token'] as String?;
-      if (token == null) return false;
-      final authHeaders = {'Authorization': 'Bearer $token'};
-
-      final raiseResp = await http
-          .post(
-            Uri.parse(
-              'http://${settings.host}:${settings.port}/plugins/hoekens-anchor-alarm/raiseAnchor',
-            ),
-            headers: authHeaders,
-          )
-          .timeout(const Duration(seconds: 8));
-      if (raiseResp.statusCode != 200) return false;
-
-      // Don't just trust the 200 — read the real state back from Signal K
-      // before telling the user it worked.
-      final stateResp = await http
-          .get(
-            Uri.parse(
-              'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self/navigation/anchor/state',
-            ),
-            headers: authHeaders,
-          )
-          .timeout(const Duration(seconds: 8));
-      if (stateResp.statusCode != 200) return false;
-      final stateDoc = jsonDecode(stateResp.body);
-      final value = stateDoc is Map ? stateDoc['value'] : null;
-      return value == 'off';
-    } catch (_) {
-      return false;
-    }
-  }
 
   Future<Map<String, dynamic>> _fetchRawSkNode(String path) async {
     final uri = Uri.parse(
@@ -4610,12 +4550,12 @@ class _DashboardState extends State<Dashboard> {
         settings.motorPanelEnabled &&
         (_engineRunning || _kMotorPanelAlwaysVisible);
     // settings.anchorConfig.armed, NOT signalK.anchorArmed — the latter is
-    // deliberately fed only by a truly foreign source (hoekens etc., see
-    // _onSignalKMessage's routing), never by this app's own state even
-    // when synced in from another install (Android/webapp) — that's the
-    // right field for the "disarm other plugin" banner, but wrong here:
-    // it meant arming from one install never showed "Fondeado" on
-    // another. Confirmed live 2026-09-02.
+    // fed only by whatever a foreign source (hoekens etc.) is reporting on
+    // navigation.anchor.state (see _onSignalKMessage's routing), which lags
+    // behind our own arm/disarm by however long _syncHoekensAnchorAlarm
+    // takes and never reflects it at all when that sync fails — this app's
+    // own state, kept in sync across installs, is the right field here.
+    // Confirmed live 2026-09-02.
     final premiumScreens = <Widget>[
       _navPremiumSailPage(),
       if (showMotorPage) _navPremiumMotorPage(),
@@ -7964,8 +7904,6 @@ class _DashboardState extends State<Dashboard> {
     detectPhoneLeftByWifi: settings.anchorDetectPhoneLeftByWifi,
     boatWifiSsid: settings.anchorBoatWifiSsid,
     shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
-    otherPluginAnchorArmed: signalK.anchorArmed,
-    onDisarmOtherAnchorPlugin: _disarmOtherAnchorPlugin,
     alarmsMuted: _anchorAlarmsMuted,
     onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
     );

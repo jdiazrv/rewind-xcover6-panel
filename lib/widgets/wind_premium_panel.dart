@@ -853,7 +853,13 @@ class _WindCompassPainter extends CustomPainter {
     canvas.drawLine(baseL, peak, bowPaint);
     canvas.drawLine(peak, baseR, bowPaint);
 
-    for (var deg = -150; deg <= 150; deg += 30) {
+    // -150..180 (not the old -150..150) — the printed scale used to leave
+    // a 60° gap unlabeled at dead astern, which read as "only goes to
+    // 150" even after the needle itself was already able to swing all
+    // the way there. -180 and 180 are the same screen position, so this
+    // draws exactly one tick at the bottom, not two. Reported live
+    // 2026-09-04.
+    for (var deg = -150; deg <= 180; deg += 30) {
       final a = _screenRad(deg.toDouble());
       final dir = Offset(math.cos(a), math.sin(a));
       canvas.drawLine(
@@ -877,7 +883,7 @@ class _WindCompassPainter extends CustomPainter {
       final lp = center + dir * (tickInner - s * 0.07);
       tp.paint(canvas, Offset(lp.dx - tp.width / 2, lp.dy - tp.height / 2));
 
-      if (deg < 150) {
+      if (deg < 180) {
         for (var m = 1; m < 3; m++) {
           final ma = _screenRad(deg + 10.0 * m);
           final mdir = Offset(math.cos(ma), math.sin(ma));

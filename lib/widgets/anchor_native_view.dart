@@ -77,8 +77,6 @@ class NativeAnchorView extends StatefulWidget {
     required this.detectPhoneLeftByWifi,
     required this.boatWifiSsid,
     this.shipIconAsset = 'assets/img/own_ship.png',
-    this.otherPluginAnchorArmed = false,
-    this.onDisarmOtherAnchorPlugin,
     this.alarmsMuted = false,
     this.onToggleAlarmsMuted,
     this.isGusting = false,
@@ -146,11 +144,6 @@ class NativeAnchorView extends StatefulWidget {
   final bool detectPhoneLeftByWifi;
   final String boatWifiSsid;
   final String shipIconAsset;
-  // Signal K still reports another anchor watch (e.g. hoekens-anchor-alarm)
-  // armed server-side — surfaced as a banner offering to turn it off, so
-  // two independent alarms can't quietly disagree about what's watched.
-  final bool otherPluginAnchorArmed;
-  final Future<bool> Function()? onDisarmOtherAnchorPlugin;
   final bool alarmsMuted;
   final VoidCallback? onToggleAlarmsMuted;
   final bool isGusting;
@@ -204,7 +197,6 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   bool _ignoreMotionDetector = false;
   bool _ignoreStepsDetector = false;
   bool _ignoreWifiDetector = false;
-  bool _disarmingOtherPlugin = false;
 
   // Rolling window of (time, distance-to-anchor) so "outside the circle"
   // can be told apart from "actually garreando": a boat that swung out
@@ -1095,7 +1087,6 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                   dragSpeedMPerMin,
                   graceSecondsLeft,
                 ),
-                if (widget.otherPluginAnchorArmed) _otherPluginBanner(),
                 if (_usingDeviceGpsAsSource) _deviceGpsBanner(),
                 if (widget.config.showWind) ...[
                   const SizedBox(height: 8),
@@ -1940,72 +1931,6 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
             fontSize: 12,
           ),
         ),
-      ],
-    ),
-  );
-
-  Widget _otherPluginBanner() => Container(
-    margin: const EdgeInsets.only(top: 8),
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-    constraints: const BoxConstraints(maxWidth: 280),
-    decoration: BoxDecoration(
-      color: cRed,
-      borderRadius: BorderRadius.circular(8),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.white, size: 15),
-            SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                'Otro plugin (hoekens-anchor-alarm) tiene un fondeo '
-                'armado en el servidor',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
-        ),
-        if (widget.onDisarmOtherAnchorPlugin != null) ...[
-          const SizedBox(height: 6),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white70),
-                visualDensity: VisualDensity.compact,
-              ),
-              onPressed: _disarmingOtherPlugin
-                  ? null
-                  : () async {
-                      setState(() => _disarmingOtherPlugin = true);
-                      final ok = await widget.onDisarmOtherAnchorPlugin!();
-                      if (!mounted) return;
-                      setState(() => _disarmingOtherPlugin = false);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            ok
-                                ? 'Fondeo del otro plugin desactivado'
-                                : 'No se pudo desactivar — desactívalo desde '
-                                      'la configuración de plugins de Signal K',
-                          ),
-                        ),
-                      );
-                    },
-              child: Text(_disarmingOtherPlugin ? 'Desactivando…' : 'Desactivarlo'),
-            ),
-          ),
-        ],
       ],
     ),
   );
