@@ -88,6 +88,7 @@ class NativeAnchorView extends StatefulWidget {
     this.windGustFloorKn,
     this.onDragStatusChanged,
     required this.onOpenYawAnalysis,
+    required this.totalChainLengthM,
   });
 
   final AnchorConfig config;
@@ -121,6 +122,7 @@ class NativeAnchorView extends StatefulWidget {
   // LineGraph/GraphPoint/history-query helpers only visible there), same
   // bridge pattern as onConfigChanged/onCredentialsChanged.
   final VoidCallback onOpenYawAnalysis;
+  final double totalChainLengthM;
   final double? gustKn;
   final int? gustAgeMin;
   final List<AisTarget> aisTargets;
@@ -742,22 +744,45 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return widget.ownTrack.where((p) => !p.t.isBefore(since)).toList();
   }
 
+  // config.radiusM is the watch's own ALARM radius, usually set with a
+  // safety margin above the true taut-chain swing — using it as the
+  // "known radius" for the fit meant a real, meaningful swing could still
+  // fail the readiness checks below (reported live 2026-09-04: 30° of
+  // genuine taut-chain swing still showing "no ha tensado"). When the
+  // user has entered a real chain-out length (widget.totalChainLengthM)
+  // and a current depth reading exists, the true horizontal swing radius
+  // is ground truth, not a guess: a straight line from bow roller to
+  // anchor is the hypotenuse (chain length) with depth as one leg, so the
+  // horizontal leg is sqrt(chain² − depth²) (ignores catenary sag and
+  // roller height above the waterline — an accepted simplification, same
+  // one the scope panel already uses). Falls back to the configured watch
+  // radius only when there's no usable chain/depth pair.
+  double get _effectiveRepositionRadiusM {
+    final chain = widget.totalChainLengthM;
+    final depth = widget.depthM;
+    if (chain > 0 && depth != null && depth > 0 && chain > depth) {
+      final horizontal = math.sqrt(chain * chain - depth * depth);
+      if (horizontal >= 3) return horizontal;
+    }
+    return widget.config.radiusM;
+  }
+
   // "recolocar automaticamente el ancla en el origen del radio de ese
   // sector" (reported live 2026-09-04) — re-derives the anchor's true
   // position from the arc the boat has actually swung through, which can
   // be more accurate than the originally recorded drop fix. The known
-  // radius (config.radiusM, the watch's own alarm radius) is what makes
-  // this reliable down to a fairly narrow swing — see
-  // fitAnchorCenterKnownRadius's own doc comment for the method. Null
-  // (rather than just "enough points") is also what gates the toolbar
-  // button itself — a coarse point-count check alone could leave the
-  // button looking enabled while a tap silently did nothing.
+  // radius (_effectiveRepositionRadiusM — ground truth from chain+depth
+  // when available) is what makes this reliable down to a fairly narrow
+  // swing — see fitAnchorCenterKnownRadius's own doc comment for the
+  // method. Null (rather than just "enough points") is also what gates
+  // the toolbar button itself — a coarse point-count check alone could
+  // leave the button looking enabled while a tap silently did nothing.
   ({double lat, double lon})? get _repositionFit {
     final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
     if (dropLat == null || dropLon == null) return null;
     return fitAnchorCenterKnownRadius(
       _trackSinceDrop,
-      radiusM: widget.config.radiusM,
+      radiusM: _effectiveRepositionRadiusM,
       refLat: dropLat,
       refLon: dropLon,
     );
@@ -817,6 +842,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     final dropLat = widget.config.dropLat!, dropLon = widget.config.dropLon!;
     final move = bearingDistanceMeters(dropLat, dropLon, fit.lat, fit.lon);
     final arcDeg = _swingArcDeg(dropLat, dropLon);
+    final effectiveRadius = _effectiveRepositionRadiusM;
+    final radiusFromChain = effectiveRadius != widget.config.radiusM;
     if (!mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -830,7 +857,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
           'Se ha calculado una posición más precisa a partir del giro '
           'registrado desde que fondeaste.\n\n'
           'Ángulo de borneo: ${arcDeg.round()}°\n'
-          'Radio (cadena tensa): ${widget.config.radiusM.round()} m\n'
+          'Radio (cadena tensa): ${effectiveRadius.round()} m'
+          '${radiusFromChain ? ' (calculado: cadena + profundidad)' : ' (radio configurado)'}\n'
           'Puntos usados: ${_trackSinceDrop.length}\n\n'
           'Quedará a ${move.distanceM.round()} m de la posición actual, '
           'en rumbo ${move.bearingDeg.round()}°.',

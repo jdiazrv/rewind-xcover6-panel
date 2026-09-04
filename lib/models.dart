@@ -1363,20 +1363,23 @@ const kAnchorRefitMinPoints = 8;
   final n = xs.length;
   if (n < kAnchorRefitMinPoints) return null;
 
-  // Not enough real spread in the raw data to mean anything — the chain
-  // simply hasn't gone taut this session, regardless of how the fit below
-  // might be coaxed to respond. Checked against the RAW data, before any
-  // fitting could pull points toward R (avoids the circularity of judging
-  // trust by the fit's own output).
-  final cxRaw = xs.reduce((a, b) => a + b) / n;
-  final cyRaw = ys.reduce((a, b) => a + b) / n;
-  final rawSpread = [
-    for (var i = 0; i < n; i++)
-      math.sqrt(
-        (xs[i] - cxRaw) * (xs[i] - cxRaw) + (ys[i] - cyRaw) * (ys[i] - cyRaw),
-      ),
-  ].reduce(math.max);
-  if (rawSpread < radiusM * 0.3) return null;
+  // "Ready" doesn't require a wide swinging ARC — a boat held by a
+  // steadily taut chain with barely any angular swing (e.g. a steady
+  // current pinning it in one direction, no wind oscillation) is just as
+  // valid a case, and produces a TIGHT cluster of points that's still far
+  // from ref. The previous check measured spread around the cluster's OWN
+  // centroid, which is near-zero for a tight cluster regardless of how far
+  // offset it sits from ref — so it kept reporting "hasn't gone taut" even
+  // after a full day of steady tension. Reported live 2026-09-04 ("lleva
+  // todo el día con la cadena tensa"). What actually matters is how far
+  // the boat's TYPICAL position is from the recorded drop point (ref),
+  // checked against the RAW data before any fitting could pull points
+  // toward R.
+  final distFromRef = [
+    for (var i = 0; i < n; i++) math.sqrt(xs[i] * xs[i] + ys[i] * ys[i]),
+  ]..sort();
+  final medianDistFromRef = distFromRef[distFromRef.length ~/ 2];
+  if (medianDistFromRef < radiusM * 0.3) return null;
 
   var cx = 0.0, cy = 0.0;
   const learningRate = 0.3;
@@ -1395,16 +1398,21 @@ const kAnchorRefitMinPoints = 8;
     cy -= learningRate * gy / n;
     if (!cx.isFinite || !cy.isFinite) return null;
   }
-  // Require a real FRACTION of points actually near the fitted radius
-  // afterward (not just an absolute count of 3) — the two-sided loss can
-  // otherwise "explain" a tight, spurious cluster from far enough away;
-  // a real taut-chain boundary is supported by a meaningful share of the
-  // whole track, not a handful of points.
+  // Require a real ABSOLUTE count of points actually near the fitted
+  // radius afterward — guards against the two-sided loss "explaining" a
+  // tight, spurious cluster from far enough away. This used to also
+  // require a FRACTION of the whole track (25%), but that's wrong for a
+  // real anchor watch: a boat rides calm and well inside scope most of a
+  // 24h day, only reaching taut chain in wind/tide gusts, so genuinely
+  // good swing data can easily be well under 25% of a day's worth of
+  // samples. Reported live 2026-09-04 ("lleva todo el día tensa" and
+  // still getting rejected). The absolute floor alone still requires a
+  // real, non-trivial cluster of near-radius points to trust the fit.
   final nearRadiusCount = [
     for (var i = 0; i < n; i++)
       math.sqrt((cx - xs[i]) * (cx - xs[i]) + (cy - ys[i]) * (cy - ys[i])),
   ].where((d) => d >= radiusM * 0.7 && d <= radiusM * 1.3).length;
-  if (nearRadiusCount < 3 || nearRadiusCount / n < 0.25) return null;
+  if (nearRadiusCount < 15) return null;
   return (lat: refLat + cy / 110540, lon: refLon + cx / (cosRef * 111320));
 }
 
