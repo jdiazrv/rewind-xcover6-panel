@@ -336,6 +336,13 @@ class _NtfyPushService {
   // Sends (rate-limited) a push for every currently-active, unmuted alarm
   // whose key is checked in CFG → Alarmas.
   Future<void> _maybeSendNtfyAlarms() async {
+    // _s._staleWatchdog calls this unconditionally every 2s, DEMO mode or
+    // not — DEMO's own tick feeds signalK real-looking oscillating wind/
+    // battery/etc. values specifically to LOOK like live data, which can
+    // genuinely cross a configured alarm threshold and would otherwise
+    // push a real ntfy alert built entirely from fabricated demo numbers.
+    // Reported live 2026-09-04.
+    if (_s.settings.demoMode) return;
     if (_s.settings.ntfyTopic.trim().isEmpty || _s.settings.ntfyAlarmKeys.isEmpty) {
       return;
     }

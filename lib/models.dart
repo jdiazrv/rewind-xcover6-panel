@@ -443,6 +443,16 @@ class SignalKModel {
   double? courseVmgKn;
   // Environment
   double? depthM;
+  // Dedicated, not the shared navUpdate — depth arrives through a
+  // dynamic handler (_buildDynamicHandlers), which _routeValue dispatches
+  // to and returns from BEFORE ever reaching the code that used to try to
+  // stamp navUpdate for it, so that never actually ran. Without its own
+  // timestamp, depth's "fresh" status silently depended on whatever OTHER
+  // navigation.* path happened to be updating nearby — reading as fresh
+  // forever if GPS/SOG kept flowing even after a real depth-sounder
+  // dropout, or as stale even with a perfectly live depth feed if nothing
+  // else on navUpdate happened to be moving. Reported live 2026-09-04.
+  DateTime? depthMUpdate;
   double? waterTempK;
   double? outsideTempK;
   double? outsideHumidity; // 0-100 %
@@ -573,6 +583,7 @@ class SignalKModel {
     gnssMethodQuality = null;
     courseVmgKn = null;
     depthM = null;
+    depthMUpdate = null;
     waterTempK = null;
     outsideTempK = null;
     outsideHumidity = null;
@@ -1064,10 +1075,18 @@ class AisTarget {
   int? shipTypeId; // AIS ship type code, e.g. 70 = cargo, 80 = tanker
   DateTime? lastUpdate;
   // Provided by a Signal K collision-alert plugin (navigation.closestApproach.*),
-  // if installed — preferred over our own client-side CPA geometry when present.
+  // if installed — preferred over our own client-side CPA geometry when
+  // present AND recent (see pluginCpaUpdate). NOT gated by the target's
+  // own shared `lastUpdate` above — that refreshes on ANY field (name,
+  // position, mmsi, ...), so if the collision plugin itself stopped
+  // publishing while ordinary AIS reception for this target kept going,
+  // lastUpdate stayed fresh while these three quietly froze at a stale
+  // prediction that would otherwise keep winning over a fresh local
+  // calculation forever. Reported live 2026-09-04.
   double? pluginCpaNm;
   double? pluginTcpaMin;
   double? pluginCpaBearingDeg;
+  DateTime? pluginCpaUpdate;
   // Rolling 1h position history for the optional on-screen track.
   final List<({DateTime t, double lat, double lon})> track = [];
   void recordTrackPoint() {

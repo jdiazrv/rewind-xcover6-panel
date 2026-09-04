@@ -39,8 +39,17 @@ class _ClosestApproachService {
       if (last != null && DateTime.now().difference(last).inMinutes > 10) {
         continue;
       }
-      double? cpaNm = target.pluginCpaNm;
-      double? tcpaMin = target.pluginTcpaMin;
+      // Only trust the plugin's own CPA/TCPA while it's actually recent —
+      // see pluginCpaUpdate's doc comment. A stopped-publishing plugin
+      // means these fall through to null here, which the local geometry
+      // calculation below fills in as normal (its own `??=`), rather than
+      // an old prediction winning forever just because it's non-null.
+      final pluginCpaFresh =
+          target.pluginCpaUpdate != null &&
+          DateTime.now().difference(target.pluginCpaUpdate!) <
+              const Duration(seconds: 120);
+      double? cpaNm = pluginCpaFresh ? target.pluginCpaNm : null;
+      double? tcpaMin = pluginCpaFresh ? target.pluginTcpaMin : null;
       double? bearingDeg;
       double? distNm;
       String? crossing;

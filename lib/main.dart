@@ -411,6 +411,14 @@ class _DashboardState extends State<Dashboard> {
   // hoekens-anchor-alarm used to — same paths, own $source label so it's
   // identifiable as coming from this app rather than that plugin.
   Future<void> _publishAnchorDelta() async {
+    // DEMO mode's own tick keeps signalK.latitude/longitude oscillating
+    // through fake positions — _anchorPublishChannel is a SEPARATE
+    // websocket from the main receive channel (see its own doc comment),
+    // never touched by DEMO's channel?.sink.close(), so without this
+    // guard a still-open connection from BEFORE entering DEMO would
+    // happily keep publishing fabricated anchor state onto the real
+    // boat's Signal K server. Reported live 2026-09-04.
+    if (settings.demoMode) return;
     final ch = await _ensureAnchorPublishChannel();
     if (ch == null) return;
     final cfg = settings.anchorConfig;
@@ -586,6 +594,7 @@ class _DashboardState extends State<Dashboard> {
   // server without our plugin installed/enabled 404s harmlessly, and a
   // failure here must never affect this app's own anchor watch.
   Future<void> _syncOwnAnchorPluginConfig() async {
+    if (settings.demoMode) return; // never touch the real server's plugin from DEMO
     if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) return;
     final base =
         'http://${settings.host}:${settings.port}/plugins/rewind-xcover6-panel/config';
@@ -898,15 +907,24 @@ class _DashboardState extends State<Dashboard> {
   }
 
   void _routeNotification(String path, dynamic value) {
+    // 'sk:$path', NOT the bare path — that's the actual key _activeAlarms
+    // stores in _mutedAlarms (see its 'sk:${entry.key}' key below).
+    // Removing the bare path here was always a no-op against the wrong
+    // key, and the value:null branch didn't even try — so once muted, an
+    // SK zone alarm's mute silently never cleared: it cleared, and then a
+    // genuinely NEW occurrence of the same alarm later started muted too,
+    // never actually sounding. Reported live 2026-09-04.
+    final muteKey = 'sk:$path';
     if (value is! Map) {
       _notifications.remove(path);
+      _mutedAlarms.remove(muteKey);
       return;
     }
     final state = value['state'] as String?;
     final message = value['message'] as String?;
     if (state == null || !_activeAlertStates.contains(state)) {
       _notifications.remove(path);
-      _mutedAlarms.remove(path);
+      _mutedAlarms.remove(muteKey);
       return;
     }
     _notifications[path] = (state: state, message: message);
@@ -1015,12 +1033,24 @@ class _DashboardState extends State<Dashboard> {
       if (hasPositionNow) {
         _everHadAnchorPosition = true;
       } else if (settings.alarmAnchorNoPositionEnabled &&
-          // Only once a position was actually being tracked before and
-          // then lost — not during the ordinary few seconds right after
-          // launch/reconnect before the first fix has even arrived, which
-          // used to alarm immediately every time the app opened onto an
-          // already-armed watch. Confirmed live 2026-09-02.
-          _everHadAnchorPosition) {
+          // Either a position was actually being tracked before and then
+          // lost, OR — armed from the very start with no position ever
+          // arriving at all — enough time has passed that this can no
+          // longer be "the ordinary few seconds right after launch/
+          // reconnect before the first fix arrives" (that grace-window
+          // case is why _everHadAnchorPosition exists at all, confirmed
+          // live 2026-09-02). Without the second half, a watch that
+          // launched already armed onto a genuinely dead GPS/connection
+          // never had ANY position to lose in the first place, so
+          // _everHadAnchorPosition stayed false forever and this alarm —
+          // the one meant to catch exactly that failure — could never
+          // fire. Reported live 2026-09-04.
+          (_everHadAnchorPosition ||
+              (settings.anchorConfig.armedOrMovedAt != null &&
+                  DateTime.now().difference(
+                        settings.anchorConfig.armedOrMovedAt!,
+                      ) >
+                      const Duration(seconds: 30)))) {
         const key = 'anchorNoPosition';
         out.add((
           key: key,
@@ -2411,6 +2441,7 @@ class _DashboardState extends State<Dashboard> {
       h[c.depthPath!] = (v) {
         final n = _num(v);
         signalK.depthM = n;
+        signalK.depthMUpdate = DateTime.now();
         _depthTrend.add(n);
       };
     }
@@ -2748,6 +2779,14 @@ class _DashboardState extends State<Dashboard> {
       _ownTrack.clear();
       _selfContext = null;
       _selfMmsi = null;
+      // Both live outside signalK's own model (see their declarations),
+      // so signalK.reset() never touched them — a real SK zone alarm or
+      // custom temp-alarm reading from the PREVIOUS boat could otherwise
+      // keep showing/sounding/pushing after switching to a different one
+      // that never happens to touch that same path itself. Reported live
+      // 2026-09-04.
+      _notifications.clear();
+      _customTempValues.clear();
     }
     _buildDynamicHandlers();
     final uri = Uri.parse(
@@ -3011,10 +3050,13 @@ class _DashboardState extends State<Dashboard> {
       // when installed — see [[project_rewind_android]] for the on-boat plugin discovery notes.
       case 'navigation.closestApproach.distance':
         t.pluginCpaNm = n == null ? null : n / 1852.0;
+        t.pluginCpaUpdate = DateTime.now();
       case 'navigation.closestApproach.timeTo':
         t.pluginTcpaMin = n == null ? null : n / 60.0;
+        t.pluginCpaUpdate = DateTime.now();
       case 'navigation.closestApproach.bearing':
         t.pluginCpaBearingDeg = n == null ? null : n * 57.2957795;
+        t.pluginCpaUpdate = DateTime.now();
     }
   }
 
@@ -3105,10 +3147,13 @@ class _DashboardState extends State<Dashboard> {
     final ts = dataTime ?? DateTime.now();
     if (path.startsWith('environment.wind.')) {
       signalK.windUpdate = ts;
-    } else if (path.startsWith('navigation.') ||
-        path == settings.sensorConfig.depthPath) {
+    } else if (path.startsWith('navigation.')) {
       signalK.navUpdate = ts;
     }
+    // NOT `|| path == settings.sensorConfig.depthPath` — depth is always
+    // in _dynamicHandlers (see _buildDynamicHandlers), so this function
+    // returns above before ever reaching here for it; that clause was
+    // dead code (depthMUpdate is stamped in the handler itself instead).
     switch (path) {
       case 'navigation.position':
         if (value is Map) {
@@ -3305,6 +3350,23 @@ class _DashboardState extends State<Dashboard> {
     reconnectTimer?.cancel();
     _skStatusGraceTimer?.cancel();
     channel?.sink.close();
+    // Invalidates any _connectSignalK() still in flight (e.g. stuck
+    // resolving mDNS) so it can't land a real connection after DEMO was
+    // entered — every check against _connectGeneration inside it compares
+    // against the value captured when IT started, so bumping this here
+    // makes that stale attempt a no-op once it does resolve.
+    ++_connectGeneration;
+    // The anchor-publish channel is a SEPARATE websocket (see its own doc
+    // comment) that channel?.sink.close() above never touches, and its
+    // periodic republish (_syncAnchorPublishTimer) would otherwise keep
+    // sending DEMO's fabricated position to the real server every 5s —
+    // _publishAnchorDelta itself now also refuses to run during DEMO, but
+    // stopping the timer too means it doesn't even try. Reported live
+    // 2026-09-04.
+    _anchorPublishTimer?.cancel();
+    _anchorPublishTimer = null;
+    unawaited(_anchorPublishChannel?.sink.close());
+    _anchorPublishChannel = null;
     setState(() {
       signalK.connected = true;
       signalK.status = 'DEMO';
@@ -4968,7 +5030,7 @@ class _DashboardState extends State<Dashboard> {
     final stw = _freshStw;
     final heading = _freshHeading;
     final cog = _freshCog;
-    final depth = _fresh(signalK.depthM);
+    final depth = _freshEngine(signalK.depthM, signalK.depthMUpdate);
     final heel = _fresh(signalK.heelDeg);
     final positionFresh =
         _navFresh && signalK.latitude != null && signalK.longitude != null;
@@ -7935,7 +7997,7 @@ class _DashboardState extends State<Dashboard> {
     // moments later at rest. Falls back to the raw last-known value here.
     headingDeg: _freshHeading ?? signalK.headingTrueDeg,
     sogKn: _freshSog,
-    depthM: _fresh(signalK.depthM),
+    depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
     awaDeg: _freshWind(_dAwa),
     awsKn: _freshWind(_dAws),
     twdDeg: _freshWind(_dTwd),
