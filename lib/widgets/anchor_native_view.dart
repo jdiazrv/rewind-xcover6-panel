@@ -88,7 +88,6 @@ class NativeAnchorView extends StatefulWidget {
     this.windGustFloorKn,
     this.onDragStatusChanged,
     required this.onOpenYawAnalysis,
-    required this.totalChainLengthM,
   });
 
   final AnchorConfig config;
@@ -122,7 +121,6 @@ class NativeAnchorView extends StatefulWidget {
   // LineGraph/GraphPoint/history-query helpers only visible there), same
   // bridge pattern as onConfigChanged/onCredentialsChanged.
   final VoidCallback onOpenYawAnalysis;
-  final double totalChainLengthM;
   final double? gustKn;
   final int? gustAgeMin;
   final List<AisTarget> aisTargets;
@@ -701,6 +699,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.dropLon = dropPoint.longitude;
       c.dropDepthM = depth;
       c.droppedAt = DateTime.now();
+      c.chainOutM = null;
       // 7:1 swing radius is the initial watch-circle size on drop.
       c.radiusM = depth != null ? (depth * 7).clamp(15, 150) : 30;
       c.initialRadiusM = c.radiusM;
@@ -749,19 +748,31 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   // "known radius" for the fit meant a real, meaningful swing could still
   // fail the readiness checks below (reported live 2026-09-04: 30° of
   // genuine taut-chain swing still showing "no ha tensado"). When the
-  // user has entered a real chain-out length (widget.totalChainLengthM)
-  // and a current depth reading exists, the true horizontal swing radius
-  // is ground truth, not a guess: a straight line from bow roller to
-  // anchor is the hypotenuse (chain length) with depth as one leg, so the
+  // chain paid out for THIS anchoring is known (config.chainOutM — asked
+  // directly in _repositionAnchor, since it's per-drop and can change
+  // mid-anchorage, unlike the boat's fixed total chain length) and a
+  // current depth reading exists, the true horizontal swing radius is
+  // ground truth, not a guess: a straight line from bow roller to anchor
+  // is the hypotenuse (chain length) with depth as one leg, so the
   // horizontal leg is sqrt(chain² − depth²) (ignores catenary sag and
   // roller height above the waterline — an accepted simplification, same
   // one the scope panel already uses). Falls back to the configured watch
-  // radius only when there's no usable chain/depth pair.
-  double get _effectiveRepositionRadiusM {
-    final chain = widget.totalChainLengthM;
+  // radius only when there's no usable chain/depth pair (e.g. before the
+  // user has been asked yet — this getter also drives the toolbar
+  // button's live enabled state, which can't wait on a dialog).
+  double get _effectiveRepositionRadiusM =>
+      _repositionRadiusFor(widget.config.chainOutM);
+
+  double _repositionRadiusFor(double? chainOutM) {
     final depth = widget.depthM;
-    if (chain > 0 && depth != null && depth > 0 && chain > depth) {
-      final horizontal = math.sqrt(chain * chain - depth * depth);
+    if (chainOutM != null &&
+        chainOutM > 0 &&
+        depth != null &&
+        depth > 0 &&
+        chainOutM > depth) {
+      final horizontal = math.sqrt(
+        chainOutM * chainOutM - depth * depth,
+      );
       if (horizontal >= 3) return horizontal;
     }
     return widget.config.radiusM;
@@ -798,14 +809,19 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   // Explicit \n line breaks — Tooltip's own text does not reliably
   // soft-wrap a long single-line message, it can just overflow past the
   // screen edge instead. Reported live 2026-09-04.
+  //
+  // Does NOT also pre-check _repositionFit here (unlike before) — that
+  // used to require the CONFIGURED watch radius (or a stale/never-entered
+  // chain-out value) to already look right before letting the user even
+  // try, which could grey the button out forever if that radius happened
+  // to be off. _repositionAnchor now asks for the real chain paid out
+  // fresh on every tap and only THEN decides whether a fit is possible,
+  // reporting that as a message instead of a permanently disabled button.
   String? get _repositionDisabledReason {
     if (!widget.config.armed) return 'Solo con el\nancla fondeada';
     final n = _trackSinceDrop.length;
     if (n < kAnchorRefitMinPoints) {
       return 'Acumulando traza\n($n/$kAnchorRefitMinPoints puntos)';
-    }
-    if (_repositionFit == null) {
-      return 'Cadena aún no\nse ha tensado lo\nbastante (viento/marea)';
     }
     return null;
   }
@@ -829,16 +845,79 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return 360.0 - largestGap;
   }
 
+  // Chain paid out is per-drop and can change mid-anchorage (letting out
+  // more or recovering some) — asked fresh every time rather than reused
+  // silently, pre-filled with whatever was entered last as a convenience.
+  // Cancelling (or leaving it blank) falls back to the configured watch
+  // radius, same as before this existed.
+  Future<double?> _promptChainOutM() async {
+    final controller = TextEditingController(
+      text: widget.config.chainOutM?.round().toString() ?? '',
+    );
+    final result = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cPanel,
+        title: const Text(
+          '¿Cuánta cadena tienes largada?',
+          style: TextStyle(color: cText),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          style: const TextStyle(color: cText),
+          decoration: const InputDecoration(
+            suffixText: 'm',
+            hintText: 'p. ej. 45',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final v = double.tryParse(controller.text.replaceAll(',', '.'));
+              Navigator.of(ctx).pop(v);
+            },
+            child: const Text('Continuar'),
+          ),
+        ],
+      ),
+    );
+    return (result != null && result > 0) ? result : null;
+  }
+
   // "no hace nada" (reported live 2026-09-04) — the fit was actually being
   // applied, but a correction is often only a few meters, invisible at a
   // normal map zoom, with nothing telling the user anything happened at
   // all. Now shows exactly what's about to change and asks first — also
   // what was explicitly requested: "resumen de los datos... angulo de
   // borneo, maximo estiramiento de la cadena, modificacion que va a
-  // hacer... pregunta si esta de acuerdo".
+  // hacer... pregunta si esta de acuerdo". Also asks for the chain paid
+  // out first (reported live 2026-09-04: using the boat's fixed total
+  // chain length instead gave a nonsensical radius, e.g. 90 m out of only
+  // 45 m of actual chain).
   Future<void> _repositionAnchor() async {
+    final chainOutM = await _promptChainOutM();
+    if (!mounted) return;
+    if (chainOutM != null) {
+      _updateConfig((c) => c.chainOutM = chainOutM);
+    }
     final fit = _repositionFit;
-    if (fit == null) return;
+    if (fit == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No hay giro suficiente registrado para calcular una '
+            'posición fiable con ese radio.',
+          ),
+        ),
+      );
+      return;
+    }
     final dropLat = widget.config.dropLat!, dropLon = widget.config.dropLon!;
     final move = bearingDistanceMeters(dropLat, dropLon, fit.lat, fit.lon);
     final arcDeg = _swingArcDeg(dropLat, dropLon);
@@ -2506,7 +2585,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       _toolBtn(
         Icons.center_focus_strong,
         'Recolocar',
-        (!widget.config.armed || _repositionFit == null)
+        (!widget.config.armed || _trackSinceDrop.length < kAnchorRefitMinPoints)
             ? null
             : _repositionAnchor,
         disabledReason: _repositionDisabledReason,

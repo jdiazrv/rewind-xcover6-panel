@@ -8428,7 +8428,6 @@ class _DashboardState extends State<Dashboard> {
       alarmsMuted: _anchorAlarmsMuted,
       onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
       onOpenYawAnalysis: _openYawAnalysisDialog,
-      totalChainLengthM: settings.anchorTotalChainLengthM,
     );
   }
 

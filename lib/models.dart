@@ -888,6 +888,14 @@ class AnchorConfig {
   // threshold.
   double? dropDepthM;
   double radiusM = 30;
+  // Chain actually paid out for THIS anchoring — distinct from the boat's
+  // fixed total chain length (settings.anchorTotalChainLengthM, published
+  // as design.* and unrelated to any specific drop). Asked directly when
+  // using "Recolocar" (reported live 2026-09-04: using the boat's total
+  // chain length gave a wildly-too-large radius when only a fraction of
+  // it was actually let out) since it can change mid-anchorage as more or
+  // less chain is paid out or recovered.
+  double? chainOutM;
   // The radius set on drop (or last manually confirmed via the "Radio"
   // handle) — radiusM itself may grow past this automatically to keep the
   // watch circle around the boat, and shrinks back to this baseline once
@@ -928,6 +936,7 @@ class AnchorConfig {
     'dropDepthM': dropDepthM,
     'droppedAt': droppedAt?.toIso8601String(),
     'radiusM': radiusM,
+    'chainOutM': chainOutM,
     'initialRadiusM': initialRadiusM,
     'armedOrMovedAt': armedOrMovedAt?.toIso8601String(),
     'shape': shape,
@@ -953,6 +962,7 @@ class AnchorConfig {
     final droppedAtStr = j['droppedAt'] as String?;
     c.droppedAt = droppedAtStr == null ? null : DateTime.tryParse(droppedAtStr);
     c.radiusM = (j['radiusM'] as num?)?.toDouble() ?? c.radiusM;
+    c.chainOutM = (j['chainOutM'] as num?)?.toDouble();
     c.initialRadiusM = (j['initialRadiusM'] as num?)?.toDouble();
     final armedOrMovedAtStr = j['armedOrMovedAt'] as String?;
     c.armedOrMovedAt = armedOrMovedAtStr == null
