@@ -742,6 +742,30 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return fitCircleToTrack(_trackSinceDrop, refLat: dropLat, refLon: dropLon);
   }
 
+  // Why the button is greyed out right now — surfaced as its tooltip.
+  // "por qué sale disabled el botón recolocar si hay trazas de 24h"
+  // (reported live 2026-09-04): 24h of own-track HISTORY existing doesn't
+  // mean the boat has actually SWUNG through much of an arc in that
+  // time — calm, steady wind/tide for the whole anchorage genuinely
+  // leaves nothing reliable to fit, which is correct, not a bug, but the
+  // button gave no indication of why.
+  // Explicit \n line breaks — Tooltip's own text does not reliably
+  // soft-wrap a long single-line message, it can just overflow past the
+  // screen edge instead. Reported live 2026-09-04.
+  String? get _repositionDisabledReason {
+    if (!widget.config.armed) return 'Solo con el\nancla fondeada';
+    final n = _trackSinceDrop.length;
+    if (n < kAnchorRefitMinPoints) {
+      return 'Acumulando traza\n($n/$kAnchorRefitMinPoints puntos)';
+    }
+    if (_repositionFit == null) {
+      return 'Falta girar más\n'
+          '(mín. ${kAnchorRefitMinArcDeg.round()}°,\n'
+          'más viento/marea)';
+    }
+    return null;
+  }
+
   Future<void> _repositionAnchor() async {
     final fit = _repositionFit;
     if (fit == null) return;
@@ -2367,6 +2391,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         (!widget.config.armed || _repositionFit == null)
             ? null
             : _repositionAnchor,
+        disabledReason: _repositionDisabledReason,
       ),
       const SizedBox(width: 14),
       FilledButton.icon(
@@ -2387,34 +2412,43 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     String label,
     VoidCallback? onTap, {
     bool active = false,
-  }) => Material(
-    color: active ? cCyan : cPanel,
-    borderRadius: BorderRadius.circular(10),
-    child: InkWell(
-      onTap: onTap,
+    String? disabledReason,
+  }) => Tooltip(
+    // Only actually shown while disabled — "por qué sale disabled" was
+    // otherwise a dead end with no way to tell "not armed" apart from
+    // "not enough swing recorded yet" from looking at the button alone.
+    // Reported live 2026-09-04.
+    message: onTap == null ? (disabledReason ?? '') : '',
+    triggerMode: TooltipTriggerMode.tap,
+    child: Material(
+      color: active ? cCyan : cPanel,
       borderRadius: BorderRadius.circular(10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 18,
-              color: onTap == null
-                  ? cMuted.withValues(alpha: 0.4)
-                  : (active ? Colors.black : cText),
-            ),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 9,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 18,
                 color: onTap == null
                     ? cMuted.withValues(alpha: 0.4)
-                    : (active ? Colors.black : cMuted),
+                    : (active ? Colors.black : cText),
               ),
-            ),
-          ],
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 9,
+                  color: onTap == null
+                      ? cMuted.withValues(alpha: 0.4)
+                      : (active ? Colors.black : cMuted),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     ),

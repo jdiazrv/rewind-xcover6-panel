@@ -3400,7 +3400,15 @@ class _DashboardState extends State<Dashboard> {
         // heading+TWA) emit a signed radian in -π..π instead — normalize so
         // the UI never shows a negative degree. Reported live 2026-09-02.
         signalK.twdDeg = n == null ? null : normalize360(n * 57.2957795);
-        _dTwd = _twdDamp.angle(signalK.twdDeg);
+        // _WindCircularDamper.angle() recovers its smoothed result via
+        // atan2, which always returns -180..180 — correct as-is for AWA/
+        // TWA (signed relative angles), but TWD is a compass BEARING and
+        // must stay 0..360 same as the raw value just normalized above,
+        // or the smoothed figure can show negative again even though
+        // signalK.twdDeg itself is fine. Reported live 2026-09-04 ("el
+        // TWD en la pantalla ANC sale negativo").
+        final dampedTwd = _twdDamp.angle(signalK.twdDeg);
+        _dTwd = dampedTwd == null ? null : normalize360(dampedTwd);
         _twdShiftHistory.add(_dTwd);
       case 'environment.wind.speedTrue':
         signalK.twsKn = n == null ? null : n * 1.94384;
