@@ -472,6 +472,26 @@ class _DashboardState extends State<Dashboard> {
         'path': 'design.totalAnchorChainLength',
         'value': settings.anchorTotalChainLengthM,
       },
+      // InfluxDB connection — shared across every device once entered on
+      // ONE of them, instead of retyping a token on each phone/tablet
+      // ("pero el token tengo que ponerlo en cada dispositivo?", reported
+      // live 2026-09-04). Never publishes an EMPTY value: a freshly
+      // installed device that hasn't been configured yet must not be able
+      // to wipe an already-working setup on every other device just by
+      // connecting and echoing its own blank defaults.
+      if (settings.influxHost.isNotEmpty)
+        {'path': 'design.influxHost', 'value': settings.influxHost},
+      if (settings.influxOrg.isNotEmpty)
+        {'path': 'design.influxOrg', 'value': settings.influxOrg},
+      if (settings.influxToken.isNotEmpty)
+        {'path': 'design.influxToken', 'value': settings.influxToken},
+      if (settings.influxBucket.isNotEmpty)
+        {'path': 'design.influxBucket', 'value': settings.influxBucket},
+      if (settings.influxArchiveBucket.isNotEmpty)
+        {
+          'path': 'design.influxArchiveBucket',
+          'value': settings.influxArchiveBucket,
+        },
       {'path': 'navigation.anchor.state', 'value': cfg.armed ? 'on' : 'off'},
     ];
     // Every numeric anchor.* path is always present — 0 rather than
@@ -3219,6 +3239,11 @@ class _DashboardState extends State<Dashboard> {
       'navigation.anchor.currentRadius',
       'navigation.anchor.maxRadius',
       'navigation.anchor.apparentBearing',
+      'design.influxHost',
+      'design.influxOrg',
+      'design.influxToken',
+      'design.influxBucket',
+      'design.influxArchiveBucket',
       'notifications.*',
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
@@ -3608,6 +3633,41 @@ class _DashboardState extends State<Dashboard> {
         signalK.bowthrusterTempK = n;
       case 'electrical.venus.dcPower':
         signalK.dcW = n;
+      // Adopts whichever device's InfluxDB connection was entered — see
+      // the publish side's own comment (_publishAnchorDelta) for why an
+      // empty incoming value is always ignored rather than adopted: it
+      // would otherwise let a never-configured device silently wipe a
+      // working setup on every other device.
+      case 'design.influxHost':
+        final s = value?.toString() ?? '';
+        if (s.isNotEmpty && settings.influxHost != s) {
+          settings.influxHost = s;
+          unawaited(_saveSettings());
+        }
+      case 'design.influxOrg':
+        final s = value?.toString() ?? '';
+        if (s.isNotEmpty && settings.influxOrg != s) {
+          settings.influxOrg = s;
+          unawaited(_saveSettings());
+        }
+      case 'design.influxToken':
+        final s = value?.toString() ?? '';
+        if (s.isNotEmpty && settings.influxToken != s) {
+          settings.influxToken = s;
+          unawaited(_saveSettings());
+        }
+      case 'design.influxBucket':
+        final s = value?.toString() ?? '';
+        if (s.isNotEmpty && settings.influxBucket != s) {
+          settings.influxBucket = s;
+          unawaited(_saveSettings());
+        }
+      case 'design.influxArchiveBucket':
+        final s = value?.toString() ?? '';
+        if (s.isNotEmpty && settings.influxArchiveBucket != s) {
+          settings.influxArchiveBucket = s;
+          unawaited(_saveSettings());
+        }
       default:
         return false;
     }
