@@ -21,6 +21,7 @@ class YawAnalysisDialog extends StatefulWidget {
     required this.liveTrack,
     required this.anchorLat,
     required this.anchorLon,
+    required this.radiusM,
     required this.demo,
     required this.historySource,
     required this.skHost,
@@ -36,6 +37,7 @@ class YawAnalysisDialog extends StatefulWidget {
   final List<AnchorYawPoint> liveTrack;
   final double anchorLat;
   final double anchorLon;
+  final double radiusM;
   final bool demo;
   final String historySource; // 'auto' | 'influx' | 'sk'
   final String skHost;
@@ -249,7 +251,11 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   List<AnchorYawPoint> _demo24hSeries() {
     final rnd = math.Random(7);
     final now = DateTime.now();
-    const radiusM = 22.0;
+    // Matches widget.radiusM (not a fixed value) — computeYawAnalysis
+    // filters guiñada to points near full scope, so a demo radius that
+    // drifted from the real configured one would silently empty that
+    // section out.
+    final radiusM = widget.radiusM;
     // Sampled every 120s below — a period much shorter than a few times
     // that (e.g. the "última hora" scale of ~100s) would alias into a
     // false, much-longer-looking period once downsampled, exactly the
@@ -297,6 +303,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
       points: _points,
       anchorLat: widget.anchorLat,
       anchorLon: widget.anchorLon,
+      radiusM: widget.radiusM,
     );
     return Dialog.fullscreen(
       backgroundColor: cBg,
@@ -392,25 +399,26 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Text(
+            '${result.samples} muestras',
+            style: const TextStyle(color: cMuted, fontSize: 11),
+          ),
+          const SizedBox(height: 14),
+          _SectionHeader(
+            title: 'BORNEO',
+            subtitle:
+                'Giro de la POSICIÓN del barco alrededor del ancla — lento, '
+                'de gran escala (viento/marea cambiando de dirección).',
+          ),
+          const SizedBox(height: 8),
           Row(
             children: [
               Expanded(
                 child: _KpiCard(
-                  label: 'Amplitud de guiñada',
-                  value: result.yawAmplitudeDeg == null
+                  label: 'Arco de borneo',
+                  value: result.borneoArcDeg == null
                       ? '--'
-                      : '${result.yawAmplitudeDeg!.round()}°',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _KpiCard(
-                  label: 'Período',
-                  value: result.oscillationPeriod == null
-                      ? '--'
-                      : result.oscillationPeriod!.inSeconds < 120
-                      ? '${result.oscillationPeriod!.inSeconds} s'
-                      : '${(result.oscillationPeriod!.inSeconds / 60).toStringAsFixed(1)} min',
+                      : '${result.borneoArcDeg!.round()}°',
                 ),
               ),
               const SizedBox(width: 10),
@@ -424,37 +432,131 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          Text(
-            '${result.samples} muestras',
-            style: const TextStyle(color: cMuted, fontSize: 11),
-          ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 10),
           const Text(
-            'Δψ — desalineación respecto a la línea del ancla (°)',
+            'Rumbo del ancla al barco, relativo al inicio de la ventana (°)',
             style: TextStyle(color: cMuted, fontSize: 12),
           ),
           const SizedBox(height: 6),
           SizedBox(
-            height: 220,
-            child: result.yawSeries.isEmpty
+            height: 180,
+            child: result.borneoSeries.isEmpty
                 ? const SizedBox.shrink()
                 : LineGraph(
                     points: [
-                      for (final p in result.yawSeries)
-                        GraphPoint(time: p.t, value: p.yawDeg),
+                      for (final p in result.borneoSeries)
+                        GraphPoint(time: p.t, value: p.deg),
                     ],
-                    color: cCyan,
+                    color: cOrange,
                     unit: '°',
-                    windowStart: result.yawSeries.first.t,
-                    windowEnd: result.yawSeries.last.t,
+                    windowStart: result.borneoSeries.first.t,
+                    windowEnd: result.borneoSeries.last.t,
                     expectedStepMs: _last24h ? 120000 : 3000,
                   ),
           ),
+          const SizedBox(height: 22),
+          _SectionHeader(
+            title: 'GUIÑADA',
+            subtitle:
+                'Oscilación del RUMBO (proa) sobre la línea que une el '
+                'barco con el ancla — más rápida, independiente de dónde '
+                'esté el barco dentro del círculo de borneo.',
+          ),
+          const SizedBox(height: 8),
+          if (result.guinadaSamples < 4)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'Cadena no ha estado tensa (o casi) lo suficiente en esta '
+                'ventana como para medir guiñada — solo cuenta el tramo '
+                'largado a tope.',
+                style: const TextStyle(color: cMuted, fontSize: 12.5),
+              ),
+            )
+          else ...[
+            Row(
+              children: [
+                Expanded(
+                  child: _KpiCard(
+                    label: 'Amplitud de guiñada',
+                    value: result.guinadaAmplitudeDeg == null
+                        ? '--'
+                        : '${result.guinadaAmplitudeDeg!.round()}°',
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _KpiCard(
+                    label: 'Período',
+                    value: result.guinadaPeriod == null
+                        ? '--'
+                        : result.guinadaPeriod!.inSeconds < 120
+                        ? '${result.guinadaPeriod!.inSeconds} s'
+                        : '${(result.guinadaPeriod!.inSeconds / 60).toStringAsFixed(1)} min',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${result.guinadaSamples} de ${result.samples} muestras con '
+              'cadena a tope',
+              style: const TextStyle(color: cMuted, fontSize: 11),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Δψ — desalineación de la proa respecto a la línea del ancla (°)',
+              style: TextStyle(color: cMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: 180,
+              child: result.guinadaSeries.isEmpty
+                  ? const SizedBox.shrink()
+                  : LineGraph(
+                      points: [
+                        for (final p in result.guinadaSeries)
+                          GraphPoint(time: p.t, value: p.deg),
+                      ],
+                      color: cCyan,
+                      unit: '°',
+                      windowStart: result.guinadaSeries.first.t,
+                      windowEnd: result.guinadaSeries.last.t,
+                      expectedStepMs: _last24h ? 120000 : 3000,
+                    ),
+            ),
+          ],
         ],
       ),
     );
   }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title, required this.subtitle});
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        title,
+        style: const TextStyle(
+          color: cText,
+          fontSize: 13,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.6,
+        ),
+      ),
+      const SizedBox(height: 3),
+      Text(
+        subtitle,
+        style: const TextStyle(color: cMuted, fontSize: 11.5),
+      ),
+    ],
+  );
 }
 
 class _ModeButton extends StatelessWidget {

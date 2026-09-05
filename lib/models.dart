@@ -1620,20 +1620,40 @@ double? yawMisalignmentDeg({
 double? leewayDeg({required double cogDeg, required double headingDeg}) =>
     normalizeRelativeAngle(cogDeg - headingDeg);
 
+// "en el menu de guiñada tienes que diferenciar entre borneo y guiñada.
+// borneo es el movimiento con centro del radio de giro en el ancla.
+// guiñada es la oscilacion sobre la linea que une la proa con el ancla"
+// (reported live 2026-09-04) — two genuinely different phenomena, both
+// worth showing but never conflated into one number:
+//  - Borneo: the boat's POSITION swinging in an arc centered on the
+//    anchor — slow, large-scale, driven by wind/tide direction changes.
+//    Tracked here as the bearing FROM the anchor TO the boat over time.
+//  - Guiñada: the boat's HEADING oscillating around the anchor-rode
+//    line — faster, smaller-scale snaking, independent of where in the
+//    swing circle the boat currently sits. Already what yawMisalignmentDeg
+//    (Δψ) measures.
 class YawAnalysisResult {
   const YawAnalysisResult({
     required this.samples,
-    required this.yawSeries,
-    required this.yawAmplitudeDeg,
-    required this.oscillationPeriod,
+    required this.borneoSeries,
+    required this.borneoArcDeg,
     required this.sweptAreaM2,
+    required this.guinadaSamples,
+    required this.guinadaSeries,
+    required this.guinadaAmplitudeDeg,
+    required this.guinadaPeriod,
   });
-  // (time, Δψ) — the plotted series.
-  final List<({DateTime t, double yawDeg})> yawSeries;
   final int samples;
-  final double? yawAmplitudeDeg;
-  final Duration? oscillationPeriod;
+  // Borneo — (time, ° relative to the first bearing observed this window).
+  final List<({DateTime t, double deg})> borneoSeries;
+  final double? borneoArcDeg;
   final double? sweptAreaM2;
+  // Guiñada — (time, Δψ). A SUBSET of samples: only points with the chain
+  // at (near) full scope — see computeYawAnalysis's own comment for why.
+  final int guinadaSamples;
+  final List<({DateTime t, double deg})> guinadaSeries;
+  final double? guinadaAmplitudeDeg;
+  final Duration? guinadaPeriod;
 }
 
 // Odd-length centered moving average — enough to take the worst of raw GPS/
@@ -1662,79 +1682,104 @@ List<double> _movingAverage(List<double> values, int window) {
 // (config.dropLat/dropLon) — same "known, not fitted" spirit as
 // fitAnchorCenterKnownRadius, just used here as a fixed reference instead
 // of something to solve for.
+// Average time between consecutive UPWARD zero-crossings of a smoothed,
+// zero-centered series (one full cycle = one side to the other and back).
+// A simple, honest approximation, not a spectral analysis — deliberately
+// ignores crossings closer together than 20s (GPS/compass jitter, not a
+// real half-cycle) and requires the series to have actually swung at least
+// a few degrees either side of zero. Shared by both borneo and guiñada.
+Duration? _oscillationPeriod(
+  List<double> smoothed,
+  List<DateTime> times,
+  double amplitude,
+) {
+  if (amplitude <= 4) return null;
+  final crossings = <DateTime>[];
+  for (var i = 1; i < smoothed.length; i++) {
+    if (smoothed[i - 1] <= 0 && smoothed[i] > 0) {
+      if (crossings.isEmpty ||
+          times[i].difference(crossings.last) > const Duration(seconds: 20)) {
+        crossings.add(times[i]);
+      }
+    }
+  }
+  if (crossings.length < 2) return null;
+  final totalMs = crossings.last.difference(crossings.first).inMilliseconds;
+  return Duration(milliseconds: (totalMs / (crossings.length - 1)).round());
+}
+
+// Largest-angular-gap method: the true angular span a set of bearings
+// covers, robust to wrapping across 0°/360° (a naive max−min on raw
+// bearings breaks the moment the swing straddles that seam). Same
+// algorithm as NativeAnchorView's own _swingArcDeg, used here for borneo.
+double _angularArcDeg(List<double> bearingsDeg) {
+  if (bearingsDeg.length < 2) return 0;
+  final angles = [...bearingsDeg]..sort();
+  var largestGap = 360.0 - (angles.last - angles.first);
+  for (var i = 1; i < angles.length; i++) {
+    final gap = angles[i] - angles[i - 1];
+    if (gap > largestGap) largestGap = gap;
+  }
+  return 360.0 - largestGap;
+}
+
 YawAnalysisResult computeYawAnalysis({
   required List<AnchorYawPoint> points,
   required double anchorLat,
   required double anchorLon,
+  required double radiusM,
 }) {
   final usable = points.where((p) => p.headingDeg != null).toList();
   if (usable.length < 4) {
     return const YawAnalysisResult(
       samples: 0,
-      yawSeries: [],
-      yawAmplitudeDeg: null,
-      oscillationPeriod: null,
+      borneoSeries: [],
+      borneoArcDeg: null,
       sweptAreaM2: null,
+      guinadaSamples: 0,
+      guinadaSeries: [],
+      guinadaAmplitudeDeg: null,
+      guinadaPeriod: null,
     );
   }
-  final rawYaw = [
-    for (final p in usable)
-      yawMisalignmentDeg(
-        anchorLat: anchorLat,
-        anchorLon: anchorLon,
-        boatLat: p.lat,
-        boatLon: p.lon,
-        headingDeg: p.headingDeg!,
-      )!,
-  ];
-  // Smoothing window scales a little with sample count so a handful of
-  // points (start of the "última hora" window) isn't over-smoothed into a
-  // flat line, but a long dense series still gets real noise reduction.
-  final smoothed = _movingAverage(rawYaw, (usable.length ~/ 20).clamp(3, 9));
-  final yawSeries = [
-    for (var i = 0; i < usable.length; i++)
-      (t: usable[i].t, yawDeg: smoothed[i]),
-  ];
-  final amplitude =
-      smoothed.reduce(math.max) - smoothed.reduce(math.min);
 
-  // Oscillation period — average time between consecutive UPWARD
-  // zero-crossings of the smoothed yaw series (one full cycle = port to
-  // starboard and back). A simple, honest approximation, not a spectral
-  // analysis — deliberately ignores crossings closer together than 20s
-  // (GPS/compass jitter, not a real half-cycle) and requires the series to
-  // have actually swung at least a couple of degrees either side of zero.
-  Duration? period;
-  if (amplitude > 4) {
-    final crossings = <DateTime>[];
-    for (var i = 1; i < smoothed.length; i++) {
-      if (smoothed[i - 1] <= 0 && smoothed[i] > 0) {
-        if (crossings.isEmpty ||
-            usable[i].t.difference(crossings.last) >
-                const Duration(seconds: 20)) {
-          crossings.add(usable[i].t);
-        }
-      }
-    }
-    if (crossings.length >= 2) {
-      final totalMs = crossings.last
-          .difference(crossings.first)
-          .inMilliseconds;
-      period = Duration(
-        milliseconds: (totalMs / (crossings.length - 1)).round(),
-      );
-    }
-  }
+  // ── Borneo — the boat's POSITION swinging around the anchor ──────────────
+  final fixes = [
+    for (final p in usable)
+      bearingDistanceMeters(anchorLat, anchorLon, p.lat, p.lon),
+  ];
+  final bearingToBoat = [for (final f in fixes) f.bearingDeg];
+  // Plotted relative to the FIRST bearing observed this window — a fixed,
+  // simple reference that keeps the series near zero and wrap-safe for
+  // graphing, without needing a circular mean.
+  final refBearing = bearingToBoat.first;
+  final rawBorneo = [
+    for (final b in bearingToBoat) normalizeRelativeAngle(b - refBearing),
+  ];
+  final smoothedBorneo = _movingAverage(
+    rawBorneo,
+    (usable.length ~/ 20).clamp(3, 9),
+  );
+  final borneoSeries = [
+    for (var i = 0; i < usable.length; i++)
+      (t: usable[i].t, deg: smoothedBorneo[i]),
+  ];
+  // The arc itself is measured on the RAW bearings (not the smoothed,
+  // reference-relative series) via the wrap-safe largest-gap method —
+  // more robust than smoothedBorneo's own max−min for a swing that
+  // happens to straddle the reference bearing's own wrap point.
+  final borneoArcDeg = _angularArcDeg(bearingToBoat);
 
   // Swept area: the footprint the boat has actually occupied, in a local
   // flat projection centered on the anchor (same convention used
   // throughout this file). NOT a shoelace over the raw TIME-ordered
-  // points — a boat yawing is oscillating back and forth over roughly the
-  // SAME arc, not tracing one clean loop, so a time-ordered shoelace
-  // mostly cancels itself out to near zero (verified empirically: a
-  // realistic 40° yaw over 40 cycles came out as 0.0 m²). The convex hull
-  // of the visited points, then shoelace on THAT (properly boundary-
-  // ordered) polygon, gives the actual occupied area instead.
+  // points — a boat swinging/yawing oscillates back and forth over
+  // roughly the SAME arc, not tracing one clean loop, so a time-ordered
+  // shoelace mostly cancels itself out to near zero (verified
+  // empirically: a realistic 40° yaw over 40 cycles came out as 0.0 m²).
+  // The convex hull of the visited points, then shoelace on THAT
+  // (properly boundary-ordered) polygon, gives the actual occupied area
+  // instead.
   final cosLat = math.cos(anchorLat * math.pi / 180);
   final xy = [
     for (final p in usable)
@@ -1743,14 +1788,70 @@ YawAnalysisResult computeYawAnalysis({
         y: (p.lat - anchorLat) * 110540,
       ),
   ];
-  final areaM2 = _convexHullArea(xy);
+  final sweptAreaM2 = _convexHullArea(xy);
+
+  // ── Guiñada — the boat's HEADING oscillating around the rode line ────────
+  // "guiñada [es] la diferencia entre el heading y el rumbo al ancla...
+  // cuando la cadena está estirada en su totalidad o próximo a ella"
+  // (reported live 2026-09-04) — only meaningful riding at (near) the end
+  // of a taut rode: with slack chain the boat isn't constrained to yaw
+  // around any particular line at all, so a Δψ computed from those points
+  // would just be noise, not a real oscillation. radiusM is the same
+  // known, not-fitted chain-taut radius used throughout (config.radiusM).
+  final tautIdx = [
+    for (var i = 0; i < usable.length; i++)
+      if (fixes[i].distanceM >= radiusM * 0.85) i,
+  ];
+  if (tautIdx.length < 4) {
+    return YawAnalysisResult(
+      samples: usable.length,
+      borneoSeries: borneoSeries,
+      borneoArcDeg: borneoArcDeg,
+      sweptAreaM2: sweptAreaM2,
+      guinadaSamples: tautIdx.length,
+      guinadaSeries: const [],
+      guinadaAmplitudeDeg: null,
+      guinadaPeriod: null,
+    );
+  }
+  final tautUsable = [for (final i in tautIdx) usable[i]];
+  final rawGuinada = [
+    for (final i in tautIdx)
+      yawMisalignmentDeg(
+        anchorLat: anchorLat,
+        anchorLon: anchorLon,
+        boatLat: usable[i].lat,
+        boatLon: usable[i].lon,
+        headingDeg: usable[i].headingDeg!,
+      )!,
+  ];
+  // Smoothing window scales a little with sample count so a handful of
+  // points (start of the "última hora" window) isn't over-smoothed into a
+  // flat line, but a long dense series still gets real noise reduction.
+  final smoothedGuinada = _movingAverage(
+    rawGuinada,
+    (tautUsable.length ~/ 20).clamp(3, 9),
+  );
+  final guinadaSeries = [
+    for (var i = 0; i < tautUsable.length; i++)
+      (t: tautUsable[i].t, deg: smoothedGuinada[i]),
+  ];
+  final guinadaAmplitudeDeg =
+      smoothedGuinada.reduce(math.max) - smoothedGuinada.reduce(math.min);
 
   return YawAnalysisResult(
     samples: usable.length,
-    yawSeries: yawSeries,
-    yawAmplitudeDeg: amplitude,
-    oscillationPeriod: period,
-    sweptAreaM2: areaM2,
+    borneoSeries: borneoSeries,
+    borneoArcDeg: borneoArcDeg,
+    sweptAreaM2: sweptAreaM2,
+    guinadaSamples: tautUsable.length,
+    guinadaSeries: guinadaSeries,
+    guinadaAmplitudeDeg: guinadaAmplitudeDeg,
+    guinadaPeriod: _oscillationPeriod(
+      smoothedGuinada,
+      [for (final p in tautUsable) p.t],
+      guinadaAmplitudeDeg,
+    ),
   );
 }
 

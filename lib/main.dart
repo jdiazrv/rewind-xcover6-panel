@@ -3811,16 +3811,44 @@ class _DashboardState extends State<Dashboard> {
       signalK.navUpdate = DateTime.now();
       signalK.windUpdate = DateTime.now();
 
-      // Position: slow loop around the Aegean (demo cruising ground)
       final hadNoPos = signalK.latitude == null;
-      signalK.latitude = 37.75 + 0.012 * math.sin(t / 900) + jitter(0.0002);
-      signalK.longitude = 26.98 + 0.012 * math.cos(t / 900) + jitter(0.0002);
+      // "en las pruebas no esta guiñando porque no cambias rumbo" (reported
+      // live 2026-09-05) — while armed, simulate a real anchor swing
+      // (borneo: slow bearing drift around the anchor at ~full chain
+      // scope; guiñada: heading oscillating around that bearing) instead
+      // of the generic open-water cruising loop below, so ANC's Guiñada
+      // screen has something real to show in "Última hora" demo mode too
+      // (not just the dedicated "Últimas 24h" synthetic series).
+      final anchorCfg = settings.anchorConfig;
+      if (anchorCfg.armed &&
+          anchorCfg.dropLat != null &&
+          anchorCfg.dropLon != null) {
+        final cosAnchorLat = math.cos(anchorCfg.dropLat! * math.pi / 180);
+        final borneoBearing = normalize360(60 + osc(1800, 20, 0));
+        final r = (anchorCfg.radiusM * 0.97 + jitter(1.0)).clamp(1.0, 1e6);
+        final rad = borneoBearing * math.pi / 180;
+        final dx = r * math.sin(rad);
+        final dy = r * math.cos(rad);
+        signalK.latitude = anchorCfg.dropLat! + dy / 110540;
+        signalK.longitude =
+            anchorCfg.dropLon! + dx / (cosAnchorLat * 111320);
+        // Δψ = heading − bearingToBoat is 0 lying calmly head-to-rode (see
+        // yawMisalignmentDeg's own doc comment) — so heading = bearing +
+        // the guiñada wobble itself, not some unrelated wander.
+        final guinada = osc(90, 20, 0) + jitter(3);
+        signalK.headingTrueDeg = normalize360(borneoBearing + guinada);
+        signalK.cogTrueDeg = signalK.headingTrueDeg;
+        signalK.sogKn = (0.3 + jitter(0.2)).clamp(0, 2);
+      } else {
+        // Position: slow loop around the Aegean (demo cruising ground)
+        signalK.latitude = 37.75 + 0.012 * math.sin(t / 900) + jitter(0.0002);
+        signalK.longitude =
+            26.98 + 0.012 * math.cos(t / 900) + jitter(0.0002);
+        signalK.headingTrueDeg = normalize360(120 + osc(600, 25, 0));
+        signalK.cogTrueDeg = signalK.headingTrueDeg;
+        signalK.sogKn = (6.2 + osc(180, 1.4, 0.5) + jitter(0.2)).clamp(0, 11);
+      }
       if (hadNoPos) unawaited(_loadWeather(force: true));
-
-      // Navigation
-      signalK.headingTrueDeg = normalize360(120 + osc(600, 25, 0));
-      signalK.cogTrueDeg = signalK.headingTrueDeg;
-      signalK.sogKn = (6.2 + osc(180, 1.4, 0.5) + jitter(0.2)).clamp(0, 11);
       signalK.stwKn = signalK.sogKn == null
           ? null
           : (signalK.sogKn! - 0.2 + jitter(0.1)).clamp(0, 11);
@@ -8556,6 +8584,7 @@ class _DashboardState extends State<Dashboard> {
         liveTrack: _yawTrack.points,
         anchorLat: cfg.dropLat!,
         anchorLon: cfg.dropLon!,
+        radiusM: cfg.radiusM,
         demo: settings.demoMode,
         historySource: settings.historySource,
         skHost: settings.host,
