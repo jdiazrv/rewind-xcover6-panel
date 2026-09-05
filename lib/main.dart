@@ -77,9 +77,18 @@ String? lastCrashInfo;
 // Arranque and Bow thruster selectors (independent settings, but the same
 // four choices either way).
 const _batteryChemistrySegments = <ButtonSegment<String>>[
-  ButtonSegment(value: 'lead', label: Text('Plomo', style: TextStyle(fontSize: 12))),
-  ButtonSegment(value: 'agm', label: Text('AGM', style: TextStyle(fontSize: 12))),
-  ButtonSegment(value: 'gel', label: Text('Gel', style: TextStyle(fontSize: 12))),
+  ButtonSegment(
+    value: 'lead',
+    label: Text('Plomo', style: TextStyle(fontSize: 12)),
+  ),
+  ButtonSegment(
+    value: 'agm',
+    label: Text('AGM', style: TextStyle(fontSize: 12)),
+  ),
+  ButtonSegment(
+    value: 'gel',
+    label: Text('Gel', style: TextStyle(fontSize: 12)),
+  ),
   ButtonSegment(
     value: 'lithium',
     label: Text('Litio', style: TextStyle(fontSize: 12)),
@@ -398,6 +407,12 @@ class _DashboardState extends State<Dashboard> {
   // _syncOwnAnchorPluginConfig. Cleared on a 401 so the next sync logs
   // back in instead of retrying a dead token forever.
   String? _skConfigToken;
+  // Signal K can replay retained paths in separate delta updates, even when
+  // the writer originally sent them in one values array. Keep the companion
+  // revision per REWIND source so navigation.anchor.state can still be
+  // reconciled when stateChangedAt arrives before or after state.
+  final Map<String, int> _anchorRevisionBySource = {};
+  final Map<String, dynamic> _pendingAnchorStateBySource = {};
 
   Future<WebSocketChannel?> _ensureAnchorPublishChannel() async {
     if (_anchorPublishChannel != null) return _anchorPublishChannel;
@@ -564,10 +579,23 @@ class _DashboardState extends State<Dashboard> {
         // watchZone (same movedAtMs, same armed-only lifecycle) rather
         // than a separate path, since none of these mean anything while
         // not anchored.
-        'droppedAt': ?cfg.droppedAt?.millisecondsSinceEpoch,
-        'chainOutM': ?cfg.chainOutM,
-        'dropDepthM': ?cfg.dropDepthM,
-        'initialRadiusM': ?cfg.initialRadiusM,
+        // NOT the `?`-omit form movedAtMs above uses — these 4 keys must
+        // stay PRESENT even when their value is null (a fresh drop really
+        // does reset chainOutM to null), so the receiving end can tell
+        // "an old-version peer that doesn't know about this field at all"
+        // (key truly absent) apart from "a new-version peer explicitly
+        // saying it's unset right now" (key present, value null). Omitting
+        // the key here caused exactly that confusion: any old-version
+        // webapp/device on the same bus still periodically republishes its
+        // OWN watchZone without these keys at all, and every such message
+        // used to be read as "clear it" — silently wiping a real
+        // droppedAt/chainOutM back to null on this device within seconds.
+        // Reported live 2026-09-05 ("teniendo miles de puntos de historico
+        // ahora me dice 0 puntos" / "antes recolocaba perfectamente").
+        'droppedAt': cfg.droppedAt?.millisecondsSinceEpoch,
+        'chainOutM': cfg.chainOutM,
+        'dropDepthM': cfg.dropDepthM,
+        'initialRadiusM': cfg.initialRadiusM,
       };
       final lat = _anchorEffectiveLat ?? signalK.latitude;
       final lon = _anchorEffectiveLon ?? signalK.longitude;
@@ -811,6 +839,26 @@ class _DashboardState extends State<Dashboard> {
         // override a genuinely more recent arm/disarm from elsewhere,
         // exactly like position/watchZone could before they gained the
         // same check. Audit finding, verified 2026-09-05.
+        //
+        // UNLIKE position/watchZone, a missing timestamp here is NOT
+        // "trust it" — those two only ever apply when the actual VALUE
+        // differs from what's already known, so an old peer echoing a
+        // value that happens to already match is a harmless no-op. 'state'
+        // has no such safety net: an old-version peer (a not-yet-updated
+        // webapp tab, say) that has never heard of stateChangedAt at all
+        // republishes its OWN last-known 'armed' — off, if it was never
+        // used to arm — every few seconds, forever, and "trust it when we
+        // can't tell" silently disarmed the real watch within seconds of
+        // shipping the check above. Reported live 2026-09-05, immediately
+        // after that fix went out ("no funciona, prueba tú" — Recolocar
+        // and Guiñada both showing "solo con el ancla fondeada" even
+        // though the anchor was genuinely still down). Disarming is not
+        // self-correcting the way a slightly-wrong position is, so when
+        // we can't tell whether this is fresh, the only safe move is to
+        // not touch armed at all — an old peer's own genuine arm/disarm
+        // simply won't propagate until it (or something else) is updated,
+        // which is a far better failure mode than a phantom disarm.
+        if (batchMovedAtMs == null) break;
         if (_isStaleAnchorEdit(cfg, batchMovedAtMs)) break;
         final armed = value == 'on';
         if (cfg.armed != armed) {
@@ -868,28 +916,46 @@ class _DashboardState extends State<Dashboard> {
             cfg.sectorEndDeg = endDeg;
             changed = true;
           }
-          final droppedAtMs = value['droppedAt'] as int?;
-          final droppedAt = droppedAtMs == null
-              ? null
-              : DateTime.fromMillisecondsSinceEpoch(droppedAtMs);
-          if (cfg.droppedAt != droppedAt) {
-            cfg.droppedAt = droppedAt;
-            changed = true;
+          // containsKey, not just non-null — an older-version peer (or a
+          // not-yet-updated webapp tab still on the same bus) doesn't send
+          // these keys AT ALL, and that must leave these fields untouched,
+          // not clear them. Regression, verified 2026-09-05: with a plain
+          // null check, every periodic republish from any such peer read
+          // as "clear it", wiping a real droppedAt/chainOutM within
+          // seconds and breaking Recolocar/Guiñada's "since this drop"
+          // filtering. A genuine new-version reset (fresh drop, chainOutM
+          // back to null) still applies correctly since THAT message does
+          // carry the key, just with a null value — see _publishAnchorDelta.
+          if (value.containsKey('droppedAt')) {
+            final droppedAtMs = value['droppedAt'] as int?;
+            final droppedAt = droppedAtMs == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(droppedAtMs);
+            if (cfg.droppedAt != droppedAt) {
+              cfg.droppedAt = droppedAt;
+              changed = true;
+            }
           }
-          final chainOutM = _num(value['chainOutM']);
-          if (cfg.chainOutM != chainOutM) {
-            cfg.chainOutM = chainOutM;
-            changed = true;
+          if (value.containsKey('chainOutM')) {
+            final chainOutM = _num(value['chainOutM']);
+            if (cfg.chainOutM != chainOutM) {
+              cfg.chainOutM = chainOutM;
+              changed = true;
+            }
           }
-          final dropDepthM = _num(value['dropDepthM']);
-          if (cfg.dropDepthM != dropDepthM) {
-            cfg.dropDepthM = dropDepthM;
-            changed = true;
+          if (value.containsKey('dropDepthM')) {
+            final dropDepthM = _num(value['dropDepthM']);
+            if (cfg.dropDepthM != dropDepthM) {
+              cfg.dropDepthM = dropDepthM;
+              changed = true;
+            }
           }
-          final initialRadiusM = _num(value['initialRadiusM']);
-          if (cfg.initialRadiusM != initialRadiusM) {
-            cfg.initialRadiusM = initialRadiusM;
-            changed = true;
+          if (value.containsKey('initialRadiusM')) {
+            final initialRadiusM = _num(value['initialRadiusM']);
+            if (cfg.initialRadiusM != initialRadiusM) {
+              cfg.initialRadiusM = initialRadiusM;
+              changed = true;
+            }
           }
           _adoptAnchorEditTime(cfg, movedAtMs);
         }
@@ -2550,10 +2616,44 @@ class _DashboardState extends State<Dashboard> {
         }
       }
     }
+    _repairCorruptedAnchorDroppedAt();
     _migrateLegacyTempAlarmTargets();
     _applyWakelock();
     _applyPhoneHeelSetting();
     unawaited(_refreshPressureTrendFromInflux());
+  }
+
+  // One-time repair for damage done by a real bug shipped in 1.4.152 and
+  // fixed in 1.4.153 (reported live 2026-09-05): _applyRemoteAnchorState's
+  // new droppedAt/chainOutM/dropDepthM/initialRadiusM sync used to treat a
+  // KEY MISSING from an incoming navigation.anchor.watchZone message the
+  // same as "clear it" — so any older-version peer still on the same bus
+  // (a not-yet-updated webapp tab, say) silently wiped droppedAt to null on
+  // every one of its periodic republishes. Once null, the ANC screen's own
+  // 15-minute-armed gate (_yawAnalysisDisabledReason) and Recolocar's
+  // "points since this drop" filter (_trackSinceDrop) both stayed
+  // permanently blocked — installing the 1.4.153 fix stops FURTHER
+  // corruption but can't undo a null that was already persisted before it
+  // installed. armed && dropLat/dropLon known && droppedAt missing is a
+  // combination this app itself can never produce any other way (they're
+  // always set together in _dropAnchor), so it's a safe, unambiguous
+  // signal to repair rather than a state to just tolerate.
+  // armedOrMovedAt is used as the substitute time — unlike droppedAt, nothing
+  // in the sync path can ever null it out (_adoptAnchorEditTime only ever
+  // moves it forward), so it survived the corruption intact. It can be
+  // slightly LATER than the true drop (if the anchor was moved/resized
+  // since), never earlier — so this only ever under-counts time at anchor
+  // and excludes a few of the earliest legitimate track points, never the
+  // reverse.
+  void _repairCorruptedAnchorDroppedAt() {
+    final cfg = settings.anchorConfig;
+    if (cfg.armed &&
+        cfg.dropLat != null &&
+        cfg.dropLon != null &&
+        cfg.droppedAt == null) {
+      cfg.droppedAt = cfg.armedOrMovedAt ?? skNow().toLocal();
+      unawaited(_saveSettings());
+    }
   }
 
   // Pre-1.4.15 'tempAbove' alarms stored a fixed key ('fridge1', 'battery'...)
@@ -3156,6 +3256,8 @@ class _DashboardState extends State<Dashboard> {
     _anchorPublishChannel?.sink.close();
     _anchorPublishChannel = null;
     channel?.sink.close();
+    _anchorRevisionBySource.clear();
+    _pendingAnchorStateBySource.clear();
     // Bumped here, BEFORE the async mDNS gap below, not just right before
     // opening the socket — a second _connectSignalK() call (switching
     // servers again while this one is still resolving) must be able to
@@ -3284,9 +3386,15 @@ class _DashboardState extends State<Dashboard> {
       // actually be current, on any platform/device, rather than a stale
       // local copy. Reported live 2026-09-04 ("el último que modifica...
       // es el que modifica ubicación/radio/levar/fondear").
-      unawaited(
-        Future.delayed(const Duration(seconds: 2), _publishAnchorDelta),
-      );
+      // 1.4.152 could persist a corrupted local `armed=false` while the
+      // server still retained this device's valid armed state. Leave enough
+      // time for a retained replay (which Signal K may split by path) to
+      // repair local state before publishing anything back over it.
+      unawaited(Future.delayed(const Duration(seconds: 5), () {
+        if (myGeneration == _connectGeneration) {
+          unawaited(_publishAnchorDelta());
+        }
+      }));
       unawaited(_syncOwnAnchorPluginConfig());
       _syncAnchorPublishTimer();
       // A fresh connection always starts unsubscribed from AIS — re-derive
@@ -3442,29 +3550,62 @@ class _DashboardState extends State<Dashboard> {
           }
         }
       }
-      final isOwnDevice =
-          sourceLabel == 'rewind-panel-anchor-${settings.anchorDeviceId}';
-      final isOtherAppDevice =
-          !isOwnDevice && sourceLabel.startsWith('rewind-panel-anchor');
-      // 'navigation.anchor.state' itself carries no timestamp (kept a
-      // plain "on"/"off" string for interop — see _publishAnchorDelta) —
-      // its companion 'stateChangedAt' rides in this SAME batch, so it's
-      // scanned once up front rather than relying on values-array order.
+      // `stateChangedAt` normally rides in the same batch as state, but a
+      // retained replay may split the paths. Position/watchZone carry the
+      // same revision and are valid fallbacks for that split-replay case.
       int? anchorBatchMovedAtMs;
-      if (isOtherAppDevice) {
+      final isRewindAppDevice = sourceLabel.startsWith('rewind-panel-anchor');
+      if (isRewindAppDevice) {
         for (final v in values) {
-          if (v is Map && v['path'] == 'navigation.anchor.stateChangedAt') {
-            anchorBatchMovedAtMs = v['value'] as int?;
-            break;
+          if (v is! Map) continue;
+          final path = v['path'];
+          final value = v['value'];
+          final candidate = path == 'navigation.anchor.stateChangedAt'
+              ? (value is num ? value.toInt() : null)
+              : ((path == 'navigation.anchor.position' ||
+                        path == 'navigation.anchor.watchZone') &&
+                    value is Map &&
+                    value['movedAtMs'] is num)
+              ? (value['movedAtMs'] as num).toInt()
+              : null;
+          if (candidate != null &&
+              (anchorBatchMovedAtMs == null ||
+                  candidate > anchorBatchMovedAtMs)) {
+            anchorBatchMovedAtMs = candidate;
           }
+        }
+        if (anchorBatchMovedAtMs != null) {
+          final previous = _anchorRevisionBySource[sourceLabel];
+          if (previous == null || anchorBatchMovedAtMs > previous) {
+            _anchorRevisionBySource[sourceLabel] = anchorBatchMovedAtMs;
+          }
+        } else {
+          anchorBatchMovedAtMs = _anchorRevisionBySource[sourceLabel];
+        }
+
+        // A split retained replay may have delivered state first. Apply it
+        // now that its companion revision has arrived.
+        final pendingState = _pendingAnchorStateBySource.remove(sourceLabel);
+        if (pendingState != null && anchorBatchMovedAtMs != null) {
+          changed =
+              _applyRemoteAnchorState(
+                'navigation.anchor.state',
+                pendingState,
+                batchMovedAtMs: anchorBatchMovedAtMs,
+              ) ||
+              changed;
         }
       }
       for (final item in values) {
         if (item is! Map) continue;
         final path = item['path'] as String? ?? '';
         if (path.startsWith('navigation.anchor.')) {
-          if (isOwnDevice) continue;
-          if (isOtherAppDevice) {
+          if (isRewindAppDevice) {
+            if (path == 'navigation.anchor.state' &&
+                anchorBatchMovedAtMs == null) {
+              _pendingAnchorStateBySource[sourceLabel] = item['value'];
+              continue;
+            }
             changed =
                 _applyRemoteAnchorState(
                   path,
@@ -3486,6 +3627,7 @@ class _DashboardState extends State<Dashboard> {
         }
       }
     }
+    if (changed) _repairCorruptedAnchorDroppedAt();
     if ((changed || aisChanged) && mounted) {
       if (changed) _skStatusGraceTimer?.cancel();
       if (changed && !signalK.connected) {
@@ -3943,23 +4085,19 @@ class _DashboardState extends State<Dashboard> {
         final dx = r * math.sin(rad);
         final dy = r * math.cos(rad);
         signalK.latitude = anchorCfg.dropLat! + dy / 110540;
-        signalK.longitude =
-            anchorCfg.dropLon! + dx / (cosAnchorLat * 111320);
+        signalK.longitude = anchorCfg.dropLon! + dx / (cosAnchorLat * 111320);
         // Calm heading points back toward the anchor — the reciprocal of
         // borneoBearing (anchor→boat) — see yawMisalignmentDeg's own doc
         // comment. Heading = that + the guiñada wobble itself, not some
         // unrelated wander.
         final guinada = osc(90, 20, 0) + jitter(3);
-        signalK.headingTrueDeg = normalize360(
-          borneoBearing + 180 + guinada,
-        );
+        signalK.headingTrueDeg = normalize360(borneoBearing + 180 + guinada);
         signalK.cogTrueDeg = signalK.headingTrueDeg;
         signalK.sogKn = (0.3 + jitter(0.2)).clamp(0, 2);
       } else {
         // Position: slow loop around the Aegean (demo cruising ground)
         signalK.latitude = 37.75 + 0.012 * math.sin(t / 900) + jitter(0.0002);
-        signalK.longitude =
-            26.98 + 0.012 * math.cos(t / 900) + jitter(0.0002);
+        signalK.longitude = 26.98 + 0.012 * math.cos(t / 900) + jitter(0.0002);
         signalK.headingTrueDeg = normalize360(120 + osc(600, 25, 0));
         signalK.cogTrueDeg = signalK.headingTrueDeg;
         signalK.sogKn = (6.2 + osc(180, 1.4, 0.5) + jitter(0.2)).clamp(0, 11);
@@ -8704,12 +8842,22 @@ class _DashboardState extends State<Dashboard> {
   void _openYawAnalysisDialog() {
     final cfg = settings.anchorConfig;
     if (cfg.dropLat == null || cfg.dropLon == null) return;
+    // Same known-radius-over-alarm-radius correction NativeAnchorView's own
+    // reposition gate already uses — cfg.radiusM alone (the alarm's safety
+    // margin) understated how taut the chain really was, causing guiñada's
+    // taut-chain filter to discard genuinely taut samples. Audit finding,
+    // verified 2026-09-05.
+    final effectiveRadiusM = effectiveWatchRadiusM(
+      cfg.radiusM,
+      cfg.chainOutM,
+      _freshEngine(signalK.depthM, signalK.depthMUpdate),
+    );
     showDialog<void>(
       context: context,
       builder: (ctx) => YawAnalysisDialog(
         anchorLat: cfg.dropLat!,
         anchorLon: cfg.dropLon!,
-        radiusM: cfg.radiusM,
+        radiusM: effectiveRadiusM,
         demo: settings.demoMode,
         historySource: settings.historySource,
         skHost: settings.host,
@@ -9448,7 +9596,8 @@ class _DashboardState extends State<Dashboard> {
                               selected: {settings.batteryChemistryStart},
                               onSelectionChanged: (v) {
                                 setSt(
-                                  () => settings.batteryChemistryStart = v.first,
+                                  () =>
+                                      settings.batteryChemistryStart = v.first,
                                 );
                                 setState(() {});
                                 unawaited(_saveSettings());

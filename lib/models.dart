@@ -1246,7 +1246,19 @@ class OwnTrackHistory {
   final List<AnchorTrackPoint> points = [];
   void add(double? lat, double? lon) {
     if (lat == null || lon == null) return;
-    final now = DateTime.now();
+    // skNow(), NOT DateTime.now() — droppedAt/armedOrMovedAt (what
+    // _trackSinceDrop compares every point here against) are stamped with
+    // skNow() precisely to survive a device clock that disagrees with the
+    // Signal K server's, sometimes by "many minutes to hours" (see skNow's
+    // own doc comment). Every point recorded here used to carry the RAW,
+    // uncorrected device clock instead — on any device whose clock runs
+    // behind the server's, droppedAt ended up stamped LATER than any point
+    // this function could ever produce, so _trackSinceDrop's `!p.t.isBefore
+    // (since)` filter silently excluded every single point forever, not
+    // just until enough time passed. Reported live 2026-09-05 (Recolocar
+    // stuck at "0/8 puntos" no matter how long the boat had genuinely been
+    // swinging at anchor).
+    final now = skNow();
     if (points.isNotEmpty &&
         now.difference(points.last.t) < const Duration(seconds: 15)) {
       return;
@@ -1270,7 +1282,12 @@ class OwnTrackHistory {
   // backfill points OLDER than whatever's already there, prepending them —
   // live data always wins for anything it already covers.
   void seedFromHistory(List<AnchorTrackPoint> historical) {
-    final now = DateTime.now();
+    // skNow(), matching add() above — historical's own timestamps come
+    // from Signal K's server-side history, already on the server's clock,
+    // so comparing them against the device's raw (possibly skewed) clock
+    // here would reintroduce the exact same mismatch add() just got fixed
+    // for, just for the backfilled points instead of the live ones.
+    final now = skNow();
     final cutoff = points.isEmpty ? now : points.first.t;
     final sorted = [...historical]..sort((a, b) => a.t.compareTo(b.t));
     final backfill = <AnchorTrackPoint>[];
@@ -1286,6 +1303,36 @@ class OwnTrackHistory {
     }
     points.insertAll(0, backfill);
   }
+}
+
+// configRadiusM is the watch's own ALARM radius, usually set with a safety
+// margin above the true taut-chain swing (see _dropAnchor's 7:1 scope rule)
+// — using it as if it were the true physical swing radius understates how
+// taut the chain actually is. When the chain paid out for THIS anchoring is
+// known (chainOutM) and a depth reading exists, the true horizontal swing
+// radius is ground truth, not a guess: a straight line from bow roller to
+// anchor is the hypotenuse (chain length) with depth as one leg, so the
+// horizontal leg is sqrt(chain² − depth²) (ignores catenary sag and roller
+// height above the waterline — an accepted simplification, same one the
+// scope panel already uses). Falls back to configRadiusM whenever there's
+// no usable chain/depth pair. Shared by NativeAnchorView's own reposition
+// gate and computeYawAnalysis's guiñada taut-chain filter (audit finding,
+// verified 2026-09-05: guiñada used to filter on configRadiusM alone, the
+// same alarm-safety-margin bias this function exists to correct for).
+double effectiveWatchRadiusM(
+  double configRadiusM,
+  double? chainOutM,
+  double? depthM,
+) {
+  if (chainOutM != null &&
+      chainOutM > 0 &&
+      depthM != null &&
+      depthM > 0 &&
+      chainOutM > depthM) {
+    final horizontal = math.sqrt(chainOutM * chainOutM - depthM * depthM);
+    if (horizontal >= 3) return horizontal;
+  }
+  return configRadiusM;
 }
 
 // Minimum points (since the current drop — see ANC's "Recolocar" use)
@@ -1645,9 +1692,24 @@ class YawAnalysisResult {
   final Duration? guinadaPeriod;
 }
 
-// Odd-length centered moving average — enough to take the worst of raw GPS/
-// compass jitter off the yaw series before amplitude/period/area are
-// measured from it, without a full signal-processing library.
+// Odd-length centered CIRCULAR moving average (values are degrees) — enough
+// to take the worst of raw GPS/compass jitter off the yaw series before
+// amplitude/period/area are measured from it, without a full signal-
+// processing library.
+//
+// Was a plain arithmetic mean until 2026-09-05 (audit finding): borneo feeds
+// this the boat's raw 0-360° bearing to the anchor, which crosses the
+// 0°/360° seam every time the boat lies roughly north of it — completely
+// ordinary, not an edge case. A window straddling that seam (e.g.
+// 359°,1°,358°,2°) averaged to ~180°, a wildly wrong "smoothed" point
+// plotted right in the middle of the graph. Averaging via atan2(mean sin,
+// mean cos) is seam-safe; the extra step below then picks whichever
+// multiple-of-360° representation of that circular mean sits closest to
+// the window's own center sample, so the output stays numerically
+// continuous with its neighbors instead of snapping to atan2's native
+// (-180, 180] branch — needed because callers plot this directly (borneo
+// as 0-360°, guiñada as a signed relative angle) and neither wants an
+// artificial jump introduced by the smoothing step itself.
 List<double> _movingAverage(List<double> values, int window) {
   if (window < 3 || values.length < window) return values;
   final w = window.isOdd ? window : window + 1;
@@ -1657,11 +1719,18 @@ List<double> _movingAverage(List<double> values, int window) {
       () {
         final lo = (i - half).clamp(0, values.length - 1);
         final hi = (i + half).clamp(0, values.length - 1);
-        var sum = 0.0;
+        var sumSin = 0.0, sumCos = 0.0;
         for (var j = lo; j <= hi; j++) {
-          sum += values[j];
+          final rad = values[j] * math.pi / 180;
+          sumSin += math.sin(rad);
+          sumCos += math.cos(rad);
         }
-        return sum / (hi - lo + 1);
+        final n = hi - lo + 1;
+        final circularMean =
+            math.atan2(sumSin / n, sumCos / n) * 180 / math.pi;
+        final diff =
+            ((circularMean - values[i] + 180) % 360 + 360) % 360 - 180;
+        return values[i] + diff;
       }(),
   ];
 }

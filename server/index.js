@@ -86,7 +86,7 @@ function isOutsideZone(dropLat, dropLon, lat, lon, zone) {
 function sendNtfy(app, topic, title, body) {
   return new Promise((resolve) => {
     if (!topic || !topic.trim()) {
-      resolve();
+      resolve(true); // nothing configured to push to — not a failure to retry
       return;
     }
     // Node's http client validates header VALUES as Latin-1/ASCII and
@@ -117,16 +117,20 @@ function sendNtfy(app, topic, title, body) {
         },
         (res) => {
           res.resume(); // drain, we don't care about the body
-          resolve();
+          // Status was never checked before — a 401 (bad topic)/404/500
+          // from ntfy.sh resolved exactly like a real 200, so the caller
+          // had no way to tell "delivered" from "silently dropped".
+          // Audit finding, verified 2026-09-05.
+          resolve(res.statusCode >= 200 && res.statusCode < 300);
         },
       );
-      req.on('error', () => resolve()); // best-effort — never throw
+      req.on('error', () => resolve(false)); // best-effort — never throw
       req.on('timeout', () => req.destroy());
       req.write(payload);
       req.end();
     } catch (err) {
       app.debug(`ntfy push failed: ${err && err.message}`);
-      resolve();
+      resolve(false);
     }
   });
 }
@@ -186,6 +190,18 @@ module.exports = function (app) {
   // keep standing down for the other rather than resuming just because
   // the one we happened to be tracking went away.
   const foreignArmedSources = new Set();
+  // Last time we saw ANY navigation.anchor.* update from each foreign
+  // label — a source genuinely still armed and working keeps republishing
+  // SOMETHING under these paths (position/currentRadius etc, the same
+  // live-display cadence REWIND's own app uses), so total silence this
+  // long means it's gone (crashed, uninstalled, host offline), not just
+  // quiet. Before this, foreignArmedSources only ever shrank via an
+  // explicit "off" — a source that just stopped existing without
+  // publishing one stayed in the set forever, permanently standing down
+  // REWIND's own backup watchdog with no way to recover short of
+  // restarting the Signal K server. Audit finding, verified 2026-09-05.
+  const foreignLastSeenMs = new Map();
+  const FOREIGN_SILENCE_TIMEOUT_MS = 5 * 60 * 1000;
   let lastNotifKey = null; // `${state}|${message}` — dedup only, not a lock
   let lastPushAt = 0;
   // GPS glitch filter — mirrors lib/main.dart's own alarmAnchorFilterGlitches
@@ -284,22 +300,25 @@ module.exports = function (app) {
           } else if (path === 'navigation.anchor.watchZone') {
             zone = value && typeof value === 'object' ? value : null;
           }
-        } else if (isForeign && path === 'navigation.anchor.state') {
-          const wasAnyForeignArmed = foreignArmedSources.size > 0;
-          if (value === 'on') {
-            foreignArmedSources.add(label);
-          } else {
-            foreignArmedSources.delete(label);
-          }
-          const isAnyForeignArmed = foreignArmedSources.size > 0;
-          if (isAnyForeignArmed !== wasAnyForeignArmed) {
-            if (isAnyForeignArmed) {
-              app.setPluginStatus(
-                `Standing down — "${label}" has its own anchor watch armed`,
-              );
-              clearAlarmIfAny('another anchor watch plugin took over');
+        } else if (isForeign) {
+          foreignLastSeenMs.set(label, Date.now());
+          if (path === 'navigation.anchor.state') {
+            const wasAnyForeignArmed = foreignArmedSources.size > 0;
+            if (value === 'on') {
+              foreignArmedSources.add(label);
             } else {
-              app.setPluginStatus('Watching for the REWIND app\'s anchor state');
+              foreignArmedSources.delete(label);
+            }
+            const isAnyForeignArmed = foreignArmedSources.size > 0;
+            if (isAnyForeignArmed !== wasAnyForeignArmed) {
+              if (isAnyForeignArmed) {
+                app.setPluginStatus(
+                  `Standing down — "${label}" has its own anchor watch armed`,
+                );
+                clearAlarmIfAny('another anchor watch plugin took over');
+              } else {
+                app.setPluginStatus('Watching for the REWIND app\'s anchor state');
+              }
             }
           }
         }
@@ -308,6 +327,22 @@ module.exports = function (app) {
   }
 
   async function checkDragging() {
+    if (foreignArmedSources.size > 0) {
+      const now = Date.now();
+      for (const label of [...foreignArmedSources]) {
+        const lastSeen = foreignLastSeenMs.get(label) ?? 0;
+        if (now - lastSeen > FOREIGN_SILENCE_TIMEOUT_MS) {
+          foreignArmedSources.delete(label);
+          foreignLastSeenMs.delete(label);
+          app.debug(
+            `foreign anchor source "${label}" went silent — resuming own watchdog`,
+          );
+        }
+      }
+      if (foreignArmedSources.size === 0) {
+        app.setPluginStatus('Watching for the REWIND app\'s anchor state');
+      }
+    }
     if (!armed || foreignArmedSources.size > 0 || !dropPosition || !zone) {
       return;
     }
@@ -411,7 +446,6 @@ module.exports = function (app) {
     const minIntervalMs = 1000 * Math.max(10, Number(cfg.pushMinIntervalSec) || 60);
     const now = Date.now();
     if (now - lastPushAt >= minIntervalMs) {
-      lastPushAt = now;
       // Fixed, plain-ASCII title — NOT interpolating the vessel name (or
       // the em dash) in here, since ntfy.sh's Title goes out as a raw HTTP
       // header and Node's http client rejects non-ASCII header content
@@ -423,12 +457,20 @@ module.exports = function (app) {
       // plain constant — any real charset content (vessel name included)
       // belongs in the body instead, which has no such restriction.
       const vesselName = app.getSelfPath('name.value') || 'REWIND';
-      await sendNtfy(
+      // Only stamp lastPushAt on a CONFIRMED delivery (sendNtfy now reports
+      // its own success/failure — see its own doc comment) — this used to
+      // stamp unconditionally right before the request, so a failed
+      // attempt (network error, or an unnoticed 401/404/500) silently
+      // burned the same pushMinIntervalSec window as a real push, delaying
+      // the next retry while the boat kept dragging. Audit finding,
+      // verified 2026-09-05.
+      const delivered = await sendNtfy(
         app,
         cfg.ntfyTopic,
         'REWIND Panel - Garreando',
         `${vesselName}: ${message}\n(aviso del vigilante de respaldo, sin ningún dispositivo conectado)`,
       );
+      if (delivered) lastPushAt = now;
     }
   }
 
@@ -439,6 +481,7 @@ module.exports = function (app) {
     dropPosition = null;
     zone = null;
     foreignArmedSources.clear();
+    foreignLastSeenMs.clear();
     lastNotifKey = null;
     lastPushAt = 0;
     lastGoodPosition = null;

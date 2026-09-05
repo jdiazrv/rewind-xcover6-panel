@@ -128,15 +128,15 @@ class _NtfyPushService {
         now.difference(last) < Duration(seconds: _s.settings.ntfyMinIntervalSec)) {
       return;
     }
-    _lastNtfyPushAt[key] = now;
     final vessel = _s.signalK.vesselName ?? 'REWIND';
     final detail = _ntfyBodyForAlarm(key, label);
+    var delivered = false;
     try {
       // ASCII-only header values — alarm labels and vessel names routinely
       // have accents/em-dashes, which throw in Dart's http client if put
       // directly in a header. The real message (any charset) goes in the
       // UTF-8 body instead, same fix as the test-push button.
-      await http
+      final resp = await http
           .post(
             Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
             headers: const {
@@ -147,16 +147,25 @@ class _NtfyPushService {
             body: '$vessel: $label\n$detail',
           )
           .timeout(const Duration(seconds: 8));
+      delivered = resp.statusCode >= 200 && resp.statusCode < 300;
     } catch (_) {
       // Best-effort — a failed push shouldn't affect the on-device alarm.
     }
+    // Only start the throttle window on a CONFIRMED delivery — this used to
+    // stamp _lastNtfyPushAt unconditionally before even attempting the
+    // request, so a failed attempt (network error, or ntfy.sh itself
+    // returning 401/404/500, never checked before) silently burned the
+    // same ntfyMinIntervalSec window as a real push, delaying the next
+    // retry by up to a minute while the boat kept dragging. Audit finding,
+    // verified 2026-09-05.
+    if (delivered) _lastNtfyPushAt[key] = now;
     // Genuinely awaited, not fire-and-forget — garreo is almost always
     // noticed from the phone notification while the app is backgrounded,
     // and Android can freeze/kill a backgrounded isolate's pending work the
     // moment the awaited call above returns, so an unawaited follow-up here
     // frequently never actually ran. Confirmed live 2026-09-01: the text
     // alert always arrived, the attachment never did — this is why.
-    if (key == 'anchorDrag') {
+    if (key == 'anchorDrag' && delivered) {
       await _sendNtfyMapSnapshot(topic);
     }
   }

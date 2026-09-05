@@ -257,6 +257,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     _wifiCheckTimer?.cancel();
     _editTimeoutTimer?.cancel();
     _mapController.dispose();
+    // This screen is the only source of onEffectivePositionChanged — while
+    // it's gone (scrolled far enough away in the tab PageView to be
+    // disposed, not just off-screen) nothing else ever calls it again, so
+    // the parent's _anchorEffectiveLat/Lon otherwise froze at whatever the
+    // device GPS last reported here and kept feeding it to the drag alarm/
+    // publish indefinitely, even after Signal K's own position came back.
+    // Audit finding, verified 2026-09-05.
+    widget.onEffectivePositionChanged(null, null);
     super.dispose();
   }
 
@@ -504,7 +512,15 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     if (!widget.config.armed || !_usingDeviceGpsAsSource) return;
     try {
       final ssid = await NetworkInfo().getWifiName();
-      final clean = ssid?.replaceAll('"', '');
+      // null here commonly just means "Android hasn't granted location
+      // permission to read the SSID" (needed for getWifiName() regardless
+      // of whether the phone is even connected to any WiFi) — a routine,
+      // very common state, not evidence the phone left. Treating it the
+      // same as "connected to some OTHER network" used to nag on every
+      // 20s check on any phone without that permission granted, whether or
+      // not it had actually moved. Audit finding, verified 2026-09-05.
+      if (ssid == null) return;
+      final clean = ssid.replaceAll('"', '');
       if (clean != widget.boatWifiSsid) {
         _maybeShowPhoneLeftDialog(
           'El móvil ya no está conectado a la red WiFi del barco '
@@ -543,17 +559,39 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
             child: const Text('Ignorar'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(ctx).pop('raise'),
+            onPressed: () => Navigator.of(ctx).pop('stopGps'),
             style: FilledButton.styleFrom(backgroundColor: cRed),
-            child: const Text('Levar ancla'),
+            child: const Text('Dejar de usar el GPS del móvil'),
           ),
         ],
       ),
     );
     _phoneLeftDialogShowing = false;
     switch (action) {
-      case 'raise':
-        await _raiseAnchor();
+      case 'stopGps':
+        // NOT _raiseAnchor() — this dialog only fires while the PHONE's own
+        // GPS is standing in for Signal K's (_usingDeviceGpsAsSource, gated
+        // at every call site). The phone leaving the boat says nothing
+        // about whether the boat itself is still at risk of dragging — the
+        // old "Levar ancla" button here fully disarmed the watch, which
+        // also silently switched off the server-side backup watchdog
+        // (it stops on navigation.anchor.state going "off"), leaving the
+        // actual boat unwatched. The correct response is just to stop
+        // trusting this now-elsewhere phone's position — same teardown
+        // _offerSwitchBackToSk uses — so the watch falls back to whatever
+        // Signal K itself reports (or correctly shows "sin posición" if
+        // that's still nothing) instead of a stale or wandering-with-the-
+        // phone fix. Audit finding, verified 2026-09-05.
+        _geoSub?.cancel();
+        _geoSub = null;
+        _stepSub?.cancel();
+        _stepSub = null;
+        _wifiCheckTimer?.cancel();
+        _wifiCheckTimer = null;
+        setState(() {
+          _devicePosition = null;
+          _preferDeviceGps = false;
+        });
       case 'ignore':
         onIgnore();
       default:
@@ -698,7 +736,11 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.dropLat = dropPoint.latitude;
       c.dropLon = dropPoint.longitude;
       c.dropDepthM = depth;
-      c.droppedAt = DateTime.now();
+      // Track points use the Signal-K-adjusted clock as well. Keeping the
+      // drop on the raw device clock can put it hours after every recorded
+      // point on a device whose clock differs from the server, leaving both
+      // Recolocar and Guiñada permanently without a usable current session.
+      c.droppedAt = skNow().toLocal();
       c.chainOutM = null;
       // 7:1 swing radius is the initial watch-circle size on drop.
       c.radiusM = depth != null ? (depth * 7).clamp(15, 150) : 30;
@@ -727,7 +769,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
           ...c.history,
           AnchorHistoryEntry(
             droppedAt: c.droppedAt ?? DateTime.now(),
-            raisedAt: DateTime.now(),
+            raisedAt: skNow().toLocal(),
             lat: c.dropLat!,
             lon: c.dropLon!,
             radiusM: c.radiusM,
@@ -771,20 +813,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   double get _effectiveRepositionRadiusM =>
       _repositionRadiusFor(widget.config.chainOutM);
 
-  double _repositionRadiusFor(double? chainOutM) {
-    final depth = widget.depthM;
-    if (chainOutM != null &&
-        chainOutM > 0 &&
-        depth != null &&
-        depth > 0 &&
-        chainOutM > depth) {
-      final horizontal = math.sqrt(
-        chainOutM * chainOutM - depth * depth,
-      );
-      if (horizontal >= 3) return horizontal;
-    }
-    return widget.config.radiusM;
-  }
+  double _repositionRadiusFor(double? chainOutM) =>
+      effectiveWatchRadiusM(widget.config.radiusM, chainOutM, widget.depthM);
 
   // "recolocar automaticamente el ancla en el origen del radio de ese
   // sector" (reported live 2026-09-04) — re-derives the anchor's true
@@ -858,11 +888,10 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   // (not a gating condition; fitAnchorCenterKnownRadius has its own,
   // stricter checks for whether to trust the fit at all).
   double _swingArcDeg(double refLat, double refLon) {
-    final angles =
-        [
-          for (final p in _trackSinceDrop)
-            bearingDistanceMeters(refLat, refLon, p.lat, p.lon).bearingDeg,
-        ]..sort();
+    final angles = [
+      for (final p in _trackSinceDrop)
+        bearingDistanceMeters(refLat, refLon, p.lat, p.lon).bearingDeg,
+    ]..sort();
     if (angles.length < 2) return 0;
     var largestGap = 360.0 - (angles.last - angles.first);
     for (var i = 1; i < angles.length; i++) {
@@ -955,10 +984,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: cPanel,
-        title: const Text(
-          'Recolocar ancla',
-          style: TextStyle(color: cText),
-        ),
+        title: const Text('Recolocar ancla', style: TextStyle(color: cText)),
         content: Text(
           'Se ha calculado una posición más precisa a partir del giro '
           'registrado desde que fondeaste.\n\n'
@@ -1030,7 +1056,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.dropLat = dest.latitude;
       c.dropLon = dest.longitude;
       c.dropDepthM ??= widget.depthM;
-      c.droppedAt ??= DateTime.now();
+      c.droppedAt ??= skNow().toLocal();
       c.armedOrMovedAt = skNow();
     });
   }
@@ -1234,7 +1260,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return Container(
       // Plain black, not the app's usual navy-tinted cBg, when neither map
       // layer is on — a deliberately blank chart, not just "dark theme".
-      color: (!widget.config.showSatelliteLayer && !widget.config.showSeamarkLayer)
+      color:
+          (!widget.config.showSatelliteLayer && !widget.config.showSeamarkLayer)
           ? Colors.black
           : cBg,
       child: Stack(
@@ -1322,9 +1349,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                           ),
                         ],
                         strokeWidth: 0.9,
-                        color: _trackAgeColor(
-                          i / (widget.ownTrack.length - 1),
-                        ),
+                        color: _trackAgeColor(i / (widget.ownTrack.length - 1)),
                       ),
                   ],
                 ),
@@ -1348,7 +1373,10 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 fm.PolylineLayer(
                   polylines: [
                     fm.Polyline(
-                      points: [ll.LatLng(lat, lon), ll.LatLng(dropLat, dropLon)],
+                      points: [
+                        ll.LatLng(lat, lon),
+                        ll.LatLng(dropLat, dropLon),
+                      ],
                       strokeWidth: 1.5,
                       color: cCyan.withValues(alpha: 0.6),
                     ),
@@ -1496,26 +1524,29 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     ],
   );
 
-  Widget _miniMapBtn(IconData icon, VoidCallback? onTap, {bool active = false}) =>
-      Material(
-        color: active ? cYellow : cPanel.withValues(alpha: 0.92),
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 36,
-            height: 36,
-            child: Icon(
-              icon,
-              size: 18,
-              color: onTap == null
-                  ? cMuted.withValues(alpha: 0.4)
-                  : (active ? Colors.black : cText),
-            ),
-          ),
+  Widget _miniMapBtn(
+    IconData icon,
+    VoidCallback? onTap, {
+    bool active = false,
+  }) => Material(
+    color: active ? cYellow : cPanel.withValues(alpha: 0.92),
+    shape: const CircleBorder(),
+    child: InkWell(
+      customBorder: const CircleBorder(),
+      onTap: onTap,
+      child: SizedBox(
+        width: 36,
+        height: 36,
+        child: Icon(
+          icon,
+          size: 18,
+          color: onTap == null
+              ? cMuted.withValues(alpha: 0.4)
+              : (active ? Colors.black : cText),
         ),
-      );
+      ),
+    ),
+  );
 
   Widget _insideCircleDetector(double dropLat, double dropLon) =>
       GestureDetector(
@@ -1863,7 +1894,11 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
               color: _editMode == 'anchor' ? cYellow : cText,
               size: 24,
               shadows: const [
-                Shadow(color: Colors.black87, blurRadius: 4, offset: Offset(1, 1.5)),
+                Shadow(
+                  color: Colors.black87,
+                  blurRadius: 4,
+                  offset: Offset(1, 1.5),
+                ),
               ],
             ),
           ),
@@ -1881,12 +1916,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         // below when the sector happens to span east.
         final radiusHandleBearing = isSector
             ? ((_dragSectorStartDeg ?? widget.config.sectorStartDeg ?? 0) +
-                      (((_dragSectorEndDeg ?? widget.config.sectorEndDeg ?? 90) -
+                      (((_dragSectorEndDeg ??
+                                      widget.config.sectorEndDeg ??
+                                      90) -
                                   (_dragSectorStartDeg ??
                                       widget.config.sectorStartDeg ??
                                       0) +
-                              360) %
-                          360) /
+                                  360) %
+                              360) /
                           2) %
                   360
             : 90.0;
@@ -2258,89 +2295,87 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return GestureDetector(
       onLongPress: _showWindDebugDialog,
       child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: cPanel.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'VIENTO',
-                style: TextStyle(
-                  color: cMuted,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.6,
-                ),
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    aws != null
-                        ? '${aws.toStringAsFixed(0)} kt'
-                        : '--',
-                    style: const TextStyle(
-                      color: cCyan,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
-                    ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: cPanel.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'VIENTO',
+                  style: TextStyle(
+                    color: cMuted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
                   ),
-                  if (widget.twdDeg != null) ...[
-                    const SizedBox(width: 6),
-                    Text(
-                      'TWD ${widget.twdDeg!.round()}°',
-                      style: const TextStyle(color: cText, fontSize: 13),
-                    ),
-                  ],
-                  if (awa != null) ...[
-                    const SizedBox(width: 6),
-                    Text(
-                      'AWA ${awa.abs().round()}°',
-                      style: const TextStyle(color: cText, fontSize: 13),
-                    ),
-                  ],
-                  // Which side the wind is on — green (starboard) points
-                  // left, red (port) points right, alongside (not instead
-                  // of) the number above.
-                  if (awa != null) ...[
-                    const SizedBox(width: 2),
-                    Icon(
-                      awa >= 0 ? Icons.arrow_left : Icons.play_arrow,
-                      color: awa >= 0 ? cGreen : cRed,
-                      size: 18,
-                    ),
-                  ],
-                ],
-              ),
-              // Steady reading vs. the latest gust, kept visually separate —
-              // conflating them under one number hides exactly the swing
-              // that matters when judging how much scope to pay out.
-              // "Racha" here means the highest raw AWS sample in the last
-              // 30 min — shown with its own age, since a 24kt gust from 18
-              // min ago reads very differently from one that just happened.
-              if (gust != null)
-                Text(
-                  widget.gustAgeMin != null && widget.gustAgeMin! > 0
-                      ? 'Racha ${gust.toStringAsFixed(0)} kt · hace ${widget.gustAgeMin} min'
-                      : 'Racha ${gust.toStringAsFixed(0)} kt · ahora',
-                  style: const TextStyle(color: cMuted, fontSize: 11),
                 ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      aws != null ? '${aws.toStringAsFixed(0)} kt' : '--',
+                      style: const TextStyle(
+                        color: cCyan,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                      ),
+                    ),
+                    if (widget.twdDeg != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        'TWD ${widget.twdDeg!.round()}°',
+                        style: const TextStyle(color: cText, fontSize: 13),
+                      ),
+                    ],
+                    if (awa != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        'AWA ${awa.abs().round()}°',
+                        style: const TextStyle(color: cText, fontSize: 13),
+                      ),
+                    ],
+                    // Which side the wind is on — green (starboard) points
+                    // left, red (port) points right, alongside (not instead
+                    // of) the number above.
+                    if (awa != null) ...[
+                      const SizedBox(width: 2),
+                      Icon(
+                        awa >= 0 ? Icons.arrow_left : Icons.play_arrow,
+                        color: awa >= 0 ? cGreen : cRed,
+                        size: 18,
+                      ),
+                    ],
+                  ],
+                ),
+                // Steady reading vs. the latest gust, kept visually separate —
+                // conflating them under one number hides exactly the swing
+                // that matters when judging how much scope to pay out.
+                // "Racha" here means the highest raw AWS sample in the last
+                // 30 min — shown with its own age, since a 24kt gust from 18
+                // min ago reads very differently from one that just happened.
+                if (gust != null)
+                  Text(
+                    widget.gustAgeMin != null && widget.gustAgeMin! > 0
+                        ? 'Racha ${gust.toStringAsFixed(0)} kt · hace ${widget.gustAgeMin} min'
+                        : 'Racha ${gust.toStringAsFixed(0)} kt · ahora',
+                    style: const TextStyle(color: cMuted, fontSize: 11),
+                  ),
+              ],
+            ),
+            if (awa != null) ...[
+              const SizedBox(width: 10),
+              _windDirectionDial(awa),
             ],
-          ),
-          if (awa != null) ...[
-            const SizedBox(width: 10),
-            _windDirectionDial(awa),
           ],
-        ],
-      ),
+        ),
       ),
     );
   }
@@ -2354,10 +2389,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: cPanel,
-        title: const Text(
-          'Detección de racha',
-          style: TextStyle(color: cText),
-        ),
+        title: const Text('Detección de racha', style: TextStyle(color: cText)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2370,9 +2402,18 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 style: TextStyle(color: cMuted, fontSize: 13),
               )
             else ...[
-              _debugRow('Viento estable (media 10 min)', '${mean.toStringAsFixed(1)} kt'),
-              _debugRow('Desviación estándar', '${stddev.toStringAsFixed(2)} kt'),
-              _debugRow('Umbral 3σ', '${(mean + 3 * stddev).toStringAsFixed(1)} kt'),
+              _debugRow(
+                'Viento estable (media 10 min)',
+                '${mean.toStringAsFixed(1)} kt',
+              ),
+              _debugRow(
+                'Desviación estándar',
+                '${stddev.toStringAsFixed(2)} kt',
+              ),
+              _debugRow(
+                'Umbral 3σ',
+                '${(mean + 3 * stddev).toStringAsFixed(1)} kt',
+              ),
               _debugRow(
                 'Piso absoluto',
                 '${(mean + (floor ?? 0)).toStringAsFixed(1)} kt (media + ${(floor ?? 0).toStringAsFixed(1)} kt)',
@@ -2516,124 +2557,131 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-      _toolBtn(
-        widget.config.shape == 'circle'
-            ? Icons.circle_outlined
-            : Icons.pie_chart_outline,
-        widget.config.shape == 'circle' ? 'Círculo' : 'Sector',
-        () {
-          final lat = _effectiveLat, lon = _effectiveLon;
-          final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
-          setState(() {
-            _updateConfig((c) {
-              c.shape = c.shape == 'circle' ? 'sector' : 'circle';
-              if (c.shape == 'sector') {
-                // Centered on the anchor→boat bearing, 30° either side —
-                // the boat's own current position is inside the sector
-                // from the moment you switch, not some arbitrary default.
-                final centerDeg =
-                    (lat != null &&
-                        lon != null &&
-                        dropLat != null &&
-                        dropLon != null)
-                    ? bearingDistanceMeters(dropLat, dropLon, lat, lon).bearingDeg
-                    : 0.0;
-                c.sectorStartDeg = (centerDeg - 30) % 360;
-                c.sectorEndDeg = (centerDeg + 30) % 360;
+        _toolBtn(
+          widget.config.shape == 'circle'
+              ? Icons.circle_outlined
+              : Icons.pie_chart_outline,
+          widget.config.shape == 'circle' ? 'Círculo' : 'Sector',
+          () {
+            final lat = _effectiveLat, lon = _effectiveLon;
+            final dropLat = widget.config.dropLat,
+                dropLon = widget.config.dropLon;
+            setState(() {
+              _updateConfig((c) {
+                c.shape = c.shape == 'circle' ? 'sector' : 'circle';
+                if (c.shape == 'sector') {
+                  // Centered on the anchor→boat bearing, 30° either side —
+                  // the boat's own current position is inside the sector
+                  // from the moment you switch, not some arbitrary default.
+                  final centerDeg =
+                      (lat != null &&
+                          lon != null &&
+                          dropLat != null &&
+                          dropLon != null)
+                      ? bearingDistanceMeters(
+                          dropLat,
+                          dropLon,
+                          lat,
+                          lon,
+                        ).bearingDeg
+                      : 0.0;
+                  c.sectorStartDeg = (centerDeg - 30) % 360;
+                  c.sectorEndDeg = (centerDeg + 30) % 360;
+                }
+              });
+              // Straight into edit mode — the limits are meant to be
+              // adjusted right away, not found again via a second gesture.
+              if (widget.config.shape == 'sector' &&
+                  dropLat != null &&
+                  dropLon != null) {
+                _resetEditTimeout();
+                _editMode = 'radius';
+                _dragAnchor = ll.LatLng(dropLat, dropLon);
+                _dragRadiusM = widget.config.radiusM;
+                _dragSectorStartDeg = widget.config.sectorStartDeg;
+                _dragSectorEndDeg = widget.config.sectorEndDeg;
               }
             });
-            // Straight into edit mode — the limits are meant to be
-            // adjusted right away, not found again via a second gesture.
-            if (widget.config.shape == 'sector' &&
-                dropLat != null &&
-                dropLon != null) {
-              _resetEditTimeout();
-              _editMode = 'radius';
-              _dragAnchor = ll.LatLng(dropLat, dropLon);
-              _dragRadiusM = widget.config.radiusM;
-              _dragSectorStartDeg = widget.config.sectorStartDeg;
-              _dragSectorEndDeg = widget.config.sectorEndDeg;
-            }
-          });
-        },
-      ),
-      const SizedBox(width: 8),
-      _toolBtn(Icons.straighten, 'Cadena', _openChainDialog),
-      const SizedBox(width: 8),
-      _toolBtn(Icons.history, 'Historial', _openHistoryDialog),
-      const SizedBox(width: 8),
-      _toolBtn(
-        Icons.open_with,
-        'Mover ancla',
-        !widget.config.armed || widget.config.dropLat == null
-            ? null
-            : () {
-                if (_editMode == 'anchor') {
-                  _confirmEdit();
-                  return;
-                }
-                _resetEditTimeout();
-                setState(() {
-                  _editMode = 'anchor';
-                  _dragAnchor = ll.LatLng(
-                    widget.config.dropLat!,
-                    widget.config.dropLon!,
-                  );
-                });
-              },
-        active: _editMode == 'anchor',
-      ),
-      const SizedBox(width: 8),
-      _toolBtn(
-        Icons.radar,
-        'Radio',
-        !widget.config.armed || widget.config.dropLat == null
-            ? null
-            : () {
-                if (_editMode == 'radius') {
-                  _confirmEdit();
-                  return;
-                }
-                _resetEditTimeout();
-                setState(() {
-                  _editMode = 'radius';
-                  _dragAnchor = ll.LatLng(
-                    widget.config.dropLat!,
-                    widget.config.dropLon!,
-                  );
-                  _dragRadiusM = widget.config.radiusM;
-                  _dragSectorStartDeg = widget.config.sectorStartDeg;
-                  _dragSectorEndDeg = widget.config.sectorEndDeg;
-                });
-              },
-        active: _editMode == 'radius',
-      ),
-      const SizedBox(width: 8),
-      _toolBtn(
-        Icons.center_focus_strong,
-        'Recolocar',
-        (!widget.config.armed || _trackSinceDrop.length < kAnchorRefitMinPoints)
-            ? null
-            : _repositionAnchor,
-        disabledReason: _repositionDisabledReason,
-      ),
-      const SizedBox(width: 8),
-      _toolBtn(
-        Icons.ssid_chart,
-        'Guiñada',
-        _yawAnalysisDisabledReason == null ? widget.onOpenYawAnalysis : null,
-        disabledReason: _yawAnalysisDisabledReason,
-      ),
-      const SizedBox(width: 14),
-      FilledButton.icon(
-        onPressed: widget.config.armed ? _raiseAnchor : _dropAnchor,
-        style: FilledButton.styleFrom(
-          backgroundColor: widget.config.armed ? cRed : cGreen,
-          foregroundColor: Colors.black,
+          },
         ),
-        icon: const Icon(Icons.anchor),
-        label: Text(widget.config.armed ? 'Levar' : 'Fondear'),
-      ),
+        const SizedBox(width: 8),
+        _toolBtn(Icons.straighten, 'Cadena', _openChainDialog),
+        const SizedBox(width: 8),
+        _toolBtn(Icons.history, 'Historial', _openHistoryDialog),
+        const SizedBox(width: 8),
+        _toolBtn(
+          Icons.open_with,
+          'Mover ancla',
+          !widget.config.armed || widget.config.dropLat == null
+              ? null
+              : () {
+                  if (_editMode == 'anchor') {
+                    _confirmEdit();
+                    return;
+                  }
+                  _resetEditTimeout();
+                  setState(() {
+                    _editMode = 'anchor';
+                    _dragAnchor = ll.LatLng(
+                      widget.config.dropLat!,
+                      widget.config.dropLon!,
+                    );
+                  });
+                },
+          active: _editMode == 'anchor',
+        ),
+        const SizedBox(width: 8),
+        _toolBtn(
+          Icons.radar,
+          'Radio',
+          !widget.config.armed || widget.config.dropLat == null
+              ? null
+              : () {
+                  if (_editMode == 'radius') {
+                    _confirmEdit();
+                    return;
+                  }
+                  _resetEditTimeout();
+                  setState(() {
+                    _editMode = 'radius';
+                    _dragAnchor = ll.LatLng(
+                      widget.config.dropLat!,
+                      widget.config.dropLon!,
+                    );
+                    _dragRadiusM = widget.config.radiusM;
+                    _dragSectorStartDeg = widget.config.sectorStartDeg;
+                    _dragSectorEndDeg = widget.config.sectorEndDeg;
+                  });
+                },
+          active: _editMode == 'radius',
+        ),
+        const SizedBox(width: 8),
+        _toolBtn(
+          Icons.center_focus_strong,
+          'Recolocar',
+          (!widget.config.armed ||
+                  _trackSinceDrop.length < kAnchorRefitMinPoints)
+              ? null
+              : _repositionAnchor,
+          disabledReason: _repositionDisabledReason,
+        ),
+        const SizedBox(width: 8),
+        _toolBtn(
+          Icons.ssid_chart,
+          'Guiñada',
+          _yawAnalysisDisabledReason == null ? widget.onOpenYawAnalysis : null,
+          disabledReason: _yawAnalysisDisabledReason,
+        ),
+        const SizedBox(width: 14),
+        FilledButton.icon(
+          onPressed: widget.config.armed ? _raiseAnchor : _dropAnchor,
+          style: FilledButton.styleFrom(
+            backgroundColor: widget.config.armed ? cRed : cGreen,
+            foregroundColor: Colors.black,
+          ),
+          icon: const Icon(Icons.anchor),
+          label: Text(widget.config.armed ? 'Levar' : 'Fondear'),
+        ),
       ],
     ),
   );
@@ -2745,7 +2793,12 @@ class _WindArrowPainter extends CustomPainter {
     if (shadow) {
       canvas.save();
       canvas.translate(1.2, 1.6);
-      _drawArrow(canvas, size, Colors.black.withValues(alpha: 0.45), blurSigma: 1.1);
+      _drawArrow(
+        canvas,
+        size,
+        Colors.black.withValues(alpha: 0.45),
+        blurSigma: 1.1,
+      );
       canvas.restore();
     }
     _drawArrow(canvas, size, color);
