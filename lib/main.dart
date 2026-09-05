@@ -360,10 +360,6 @@ class _DashboardState extends State<Dashboard> {
   // of whether ANC is the open tab, same as signalK's own fields, so the
   // track already covers the last 24h whenever the anchor screen opens.
   final _ownTrack = OwnTrackHistory();
-  // High-resolution live buffer for ANC > Guiñada's "Última hora" mode —
-  // see YawTrackHistory's own doc comment for why this is a separate,
-  // non-persisted buffer from _ownTrack rather than reusing it.
-  final _yawTrack = YawTrackHistory();
   final _startVTrend = _VoltageTrendTracker();
   final _bowVTrend = _VoltageTrendTracker();
   // Fed by NativeAnchorView's onEffectivePositionChanged — its own
@@ -3131,7 +3127,6 @@ class _DashboardState extends State<Dashboard> {
       signalK.reset();
       _aisTargets.clear();
       _ownTrack.clear();
-      _yawTrack.clear();
       _selfContext = null;
       _selfMmsi = null;
       // Both live outside signalK's own model (see their declarations),
@@ -3524,13 +3519,6 @@ class _DashboardState extends State<Dashboard> {
           signalK.latitude = newLat;
           signalK.longitude = newLon;
           _ownTrack.add(newLat, newLon);
-          _yawTrack.add(
-            lat: newLat,
-            lon: newLon,
-            headingDeg: _freshHeading,
-            cogDeg: _freshCog,
-            sogKn: _freshSog,
-          );
           if (hadNoPos &&
               newLat != null &&
               newLon != null &&
@@ -3792,7 +3780,6 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer = null;
     _aisTargets.clear();
     _ownTrack.clear();
-    _yawTrack.clear();
   }
 
   void _tickDemo() {
@@ -3832,11 +3819,14 @@ class _DashboardState extends State<Dashboard> {
         signalK.latitude = anchorCfg.dropLat! + dy / 110540;
         signalK.longitude =
             anchorCfg.dropLon! + dx / (cosAnchorLat * 111320);
-        // Δψ = heading − bearingToBoat is 0 lying calmly head-to-rode (see
-        // yawMisalignmentDeg's own doc comment) — so heading = bearing +
-        // the guiñada wobble itself, not some unrelated wander.
+        // Calm heading points back toward the anchor — the reciprocal of
+        // borneoBearing (anchor→boat) — see yawMisalignmentDeg's own doc
+        // comment. Heading = that + the guiñada wobble itself, not some
+        // unrelated wander.
         final guinada = osc(90, 20, 0) + jitter(3);
-        signalK.headingTrueDeg = normalize360(borneoBearing + guinada);
+        signalK.headingTrueDeg = normalize360(
+          borneoBearing + 180 + guinada,
+        );
         signalK.cogTrueDeg = signalK.headingTrueDeg;
         signalK.sogKn = (0.3 + jitter(0.2)).clamp(0, 2);
       } else {
@@ -8552,6 +8542,16 @@ class _DashboardState extends State<Dashboard> {
       onEffectivePositionChanged: (lat, lon) {
         _anchorEffectiveLat = lat;
         _anchorEffectiveLon = lon;
+        // "cuando pierde la posicion y la coge del movil. si recupera la
+        // posicion de signalk no deberia perderse la traza del fondeo"
+        // (reported live 2026-09-05) — _ownTrack (the swing-track buffer
+        // Recolocar/Guiñada's borneo read from) used to only grow from
+        // real SK navigation.position deltas (see _routeValue), so a GPS-
+        // fallback stretch left a gap instead of continuing the track.
+        // add() already rate-limits to one point per 15s internally, so
+        // calling it every build (this fires via addPostFrameCallback on
+        // every NativeAnchorView build) is safe.
+        _ownTrack.add(lat, lon);
       },
       onDragStatusChanged: (outside, isDragging, dragSpeedMPerMin) {
         _anchorIsDragging = isDragging;
@@ -8581,7 +8581,6 @@ class _DashboardState extends State<Dashboard> {
     showDialog<void>(
       context: context,
       builder: (ctx) => YawAnalysisDialog(
-        liveTrack: _yawTrack.points,
         anchorLat: cfg.dropLat!,
         anchorLon: cfg.dropLon!,
         radiusM: cfg.radiusM,

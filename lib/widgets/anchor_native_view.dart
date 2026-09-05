@@ -826,6 +826,25 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return null;
   }
 
+  // "falta una salvaguarda para que no este habilitado el boton si al
+  // menos no llava 15 min fondeado" (reported live 2026-09-05) — both
+  // borneo and guiñada need real time at anchor to mean anything; opening
+  // this right after dropping (now also querying an hour of HISTORY, not
+  // just a live buffer) would just show pre-anchoring data or nothing at
+  // all, either way not useful.
+  static const _minTimeAtAnchor = Duration(minutes: 15);
+  String? get _yawAnalysisDisabledReason {
+    if (!widget.config.armed) return 'Solo con el\nancla fondeada';
+    final droppedAt = widget.config.droppedAt;
+    if (droppedAt == null) return 'Solo con el\nancla fondeada';
+    final elapsed = skNow().difference(droppedAt);
+    if (elapsed < _minTimeAtAnchor) {
+      final minsLeft = (_minTimeAtAnchor - elapsed).inMinutes + 1;
+      return 'Espera $minsLeft min\nmás fondeado';
+    }
+    return null;
+  }
+
   // Display-only — the angular span the track has actually swept around
   // the CURRENT drop point, purely for the confirmation dialog's summary
   // (not a gating condition; fitAnchorCenterKnownRadius has its own,
@@ -2591,7 +2610,12 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         disabledReason: _repositionDisabledReason,
       ),
       const SizedBox(width: 8),
-      _toolBtn(Icons.ssid_chart, 'Guiñada', widget.onOpenYawAnalysis),
+      _toolBtn(
+        Icons.ssid_chart,
+        'Guiñada',
+        _yawAnalysisDisabledReason == null ? widget.onOpenYawAnalysis : null,
+        disabledReason: _yawAnalysisDisabledReason,
+      ),
       const SizedBox(width: 14),
       FilledButton.icon(
         onPressed: widget.config.armed ? _raiseAnchor : _dropAnchor,
