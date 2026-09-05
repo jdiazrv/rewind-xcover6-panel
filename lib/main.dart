@@ -988,6 +988,27 @@ class _DashboardState extends State<Dashboard> {
       context == 'vessels.self' ||
       (_selfMmsi != null && t.mmsi == _selfMmsi);
 
+  // Second stage of AIS staleness, matching how every real plotter handles
+  // a target that stops transmitting (OpenCPN, Raymarine, Freeboard-SK):
+  // first it's marked "stale" after a shortish silence (ais_view.dart's
+  // own 6-minute repaint check, unchanged — just a color change), then
+  // actually REMOVED after a longer one. Without this second stage
+  // nothing ever pruned _aisTargets for a genuinely foreign vessel that
+  // went out of range or switched its transponder off — it just stayed
+  // drawn, pink, forever. 3x the paint threshold, the same multiple most
+  // plotters use between "lost" and "dropped". Reported live 2026-09-05
+  // ("cuanto tiempo tiene que pasar para que AIS deje de pintar un
+  // blanco que vio... eso no es buena practica").
+  static const _aisTargetExpiry = Duration(minutes: 18);
+  void _pruneStaleAisTargets() {
+    final now = DateTime.now();
+    _aisTargets.removeWhere((context, t) {
+      if (_isOwnShipTarget(context, t)) return false;
+      final last = t.lastUpdate;
+      return last == null || now.difference(last) > _aisTargetExpiry;
+    });
+  }
+
   // Every read of _aisTargets meant for display/CPA math should go through
   // this instead of the raw map, so the own ship never shows up as a
   // target no matter which of the two signals (context or mmsi) catches it.
@@ -2049,6 +2070,7 @@ class _DashboardState extends State<Dashboard> {
     // without a new Signal K message arriving to trigger a rebuild.
     _staleWatchdog = Timer.periodic(const Duration(seconds: 2), (_) {
       _checkCorredera();
+      _pruneStaleAisTargets();
       unawaited(_syncAlarmSound());
       if (mounted) setState(() {});
     });
