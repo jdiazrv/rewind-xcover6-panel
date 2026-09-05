@@ -72,10 +72,10 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   // reconnecting ("espera unos minutos"); it now fetches from history too
   // (same mechanism as "Últimas 24h", just a tighter range/resolution),
   // so both modes work immediately.
-  Future<void> _selectMode(bool last24h) async {
+  Future<void> _selectMode(bool last24h, {bool forceRefetch = false}) async {
     setState(() => _last24h = last24h);
     final alreadyFetched = last24h ? _fetched24h != null : _fetched1h != null;
-    if (alreadyFetched) return;
+    if (alreadyFetched && !forceRefetch) return;
     setState(() {
       _loading = true;
       _error = null;
@@ -148,6 +148,36 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
         } catch (_) {
           return _fetchSkMetric(def, last24h);
         }
+    }
+  }
+
+  // "no recupera la ultima hora en guiñada del historico almacenado en
+  // influxdb" (reported live 2026-09-05) — confirmed live against a real
+  // boat's InfluxDB that BOTH position and heading genuinely have data
+  // for the last hour, so the fetch itself wasn't the problem: the real
+  // bug was that _fetchHistorySeries ran position/heading/COG through a
+  // single Future.wait — if ANY ONE of the three throws (COG in
+  // particular is a likely culprit: it can easily have no data at all
+  // while lying calmly at anchor with no way over ground), the whole
+  // Future.wait rejects and throws away the other two results too, even
+  // though they succeeded. Wrapping each in its own try/catch so a
+  // failure in one just means that field stays empty, not that the
+  // fetch as a whole fails.
+  Future<List<GraphPoint>> _safeMetric(MetricDef def, bool last24h) async {
+    try {
+      return await _metric(def, last24h);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<({List<GraphPoint> lat, List<GraphPoint> lon})> _safePosition(
+    bool last24h,
+  ) async {
+    try {
+      return await _fetchPosition(last24h);
+    } catch (_) {
+      return (lat: const <GraphPoint>[], lon: const <GraphPoint>[]);
     }
   }
 
@@ -300,9 +330,9 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
     required bool last24h,
   }) async {
     final results = await Future.wait([
-      _fetchPosition(last24h),
-      _metric(mHeading, last24h),
-      _metric(mCog, last24h),
+      _safePosition(last24h),
+      _safeMetric(mHeading, last24h),
+      _safeMetric(mCog, last24h),
     ]);
     var pos = results[0] as ({List<GraphPoint> lat, List<GraphPoint> lon});
     final heading = results[1] as List<GraphPoint>;
@@ -483,6 +513,20 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
                       ),
                     ),
                   ),
+                  if (!widget.demo && !_loading)
+                    IconButton(
+                      // "no recupera la ultima hora en guiñada del
+                      // historico almacenado en influxdb" (reported live
+                      // 2026-09-05) — the current mode's result is cached
+                      // once fetched (so switching modes back and forth
+                      // doesn't refetch every time), which also means a
+                      // transient failure had no way to retry short of
+                      // closing and reopening the whole dialog. This
+                      // forces a fresh fetch of whichever mode is active.
+                      onPressed: () => _selectMode(_last24h, forceRefetch: true),
+                      icon: const Icon(Icons.refresh, color: cMuted),
+                      tooltip: 'Volver a consultar',
+                    ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close, color: cText),
@@ -609,7 +653,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
                     unit: '°',
                     windowStart: result.borneoSeries.first.t,
                     windowEnd: result.borneoSeries.last.t,
-                    expectedStepMs: _last24h ? 120000 : 3000,
+                    expectedStepMs: _last24h ? 120000 : 10000,
                   ),
           ),
           const SizedBox(height: 22),
@@ -695,7 +739,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
                       unit: '°',
                       windowStart: result.guinadaSeries.first.t,
                       windowEnd: result.guinadaSeries.last.t,
-                      expectedStepMs: _last24h ? 120000 : 3000,
+                      expectedStepMs: _last24h ? 120000 : 10000,
                     ),
             ),
           ],
