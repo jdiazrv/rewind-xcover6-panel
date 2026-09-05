@@ -505,6 +505,20 @@ class _DashboardState extends State<Dashboard> {
           'value': settings.influxArchiveBucket,
         },
       {'path': 'navigation.anchor.state', 'value': cfg.armed ? 'on' : 'off'},
+      // Not a standard SK path — an additive companion timestamp so a
+      // remote 'state' change can be staleness-checked the same way
+      // position/watchZone already are. 'state' itself stays a plain
+      // "on"/"off" string for interop with other tools that read it
+      // (hoekens, chartplotters); this is the only place that needs to
+      // know when it last changed. Fixes a real race: a device that
+      // reconnects after being offline republishes its own stale local
+      // 'armed' on its next periodic tick, which — with no timestamp —
+      // used to just win by arriving last. Reported via code audit,
+      // verified 2026-09-05.
+      {
+        'path': 'navigation.anchor.stateChangedAt',
+        'value': cfg.armedOrMovedAt?.millisecondsSinceEpoch,
+      },
     ];
     // Every numeric anchor.* path is always present — 0 rather than
     // omitted when there's no real value, so another client reads "0",
@@ -538,6 +552,22 @@ class _DashboardState extends State<Dashboard> {
         if (cfg.shape == 'sector') 'startDeg': cfg.sectorStartDeg,
         if (cfg.shape == 'sector') 'endDeg': cfg.sectorEndDeg,
         'movedAtMs': ?movedAtMs,
+        // This anchoring's own facts (when/how deep it was dropped, chain
+        // paid out, the radius it started at) rode along with NOTHING
+        // else in the sync mechanism before — only state/position/
+        // watchZone/computed metrics did. A second device (or the same
+        // one after a reinstall) never saw them, so e.g. "Recolocar"'s
+        // chain-out prompt had no cross-device memory and the reposition
+        // fit's known-radius math silently fell back to the alarm radius
+        // guess on any device that wasn't the one that dropped the
+        // anchor. Audit finding, verified 2026-09-05. Bundled into
+        // watchZone (same movedAtMs, same armed-only lifecycle) rather
+        // than a separate path, since none of these mean anything while
+        // not anchored.
+        'droppedAt': ?cfg.droppedAt?.millisecondsSinceEpoch,
+        'chainOutM': ?cfg.chainOutM,
+        'dropDepthM': ?cfg.dropDepthM,
+        'initialRadiusM': ?cfg.initialRadiusM,
       };
       final lat = _anchorEffectiveLat ?? signalK.latitude;
       final lon = _anchorEffectiveLon ?? signalK.longitude;
@@ -765,11 +795,23 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
-  bool _applyRemoteAnchorState(String path, dynamic value) {
+  bool _applyRemoteAnchorState(
+    String path,
+    dynamic value, {
+    int? batchMovedAtMs,
+  }) {
     final cfg = settings.anchorConfig;
     var changed = false;
     switch (path) {
       case 'navigation.anchor.state':
+        // batchMovedAtMs comes from this SAME delta's own
+        // 'navigation.anchor.stateChangedAt' entry (scanned by the caller
+        // before this loop runs) — without it, a stale reconnecting
+        // device's periodic republish of its own old 'armed' value could
+        // override a genuinely more recent arm/disarm from elsewhere,
+        // exactly like position/watchZone could before they gained the
+        // same check. Audit finding, verified 2026-09-05.
+        if (_isStaleAnchorEdit(cfg, batchMovedAtMs)) break;
         final armed = value == 'on';
         if (cfg.armed != armed) {
           cfg.armed = armed;
@@ -789,6 +831,7 @@ class _DashboardState extends State<Dashboard> {
           // live 2026-09-04, caught by code review before it shipped.
           changed = true;
         }
+        _adoptAnchorEditTime(cfg, batchMovedAtMs);
       case 'navigation.anchor.position':
         if (value is Map) {
           final movedAtMs = value['movedAtMs'] as int?;
@@ -823,6 +866,29 @@ class _DashboardState extends State<Dashboard> {
           if (cfg.sectorStartDeg != startDeg || cfg.sectorEndDeg != endDeg) {
             cfg.sectorStartDeg = startDeg;
             cfg.sectorEndDeg = endDeg;
+            changed = true;
+          }
+          final droppedAtMs = value['droppedAt'] as int?;
+          final droppedAt = droppedAtMs == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(droppedAtMs);
+          if (cfg.droppedAt != droppedAt) {
+            cfg.droppedAt = droppedAt;
+            changed = true;
+          }
+          final chainOutM = _num(value['chainOutM']);
+          if (cfg.chainOutM != chainOutM) {
+            cfg.chainOutM = chainOutM;
+            changed = true;
+          }
+          final dropDepthM = _num(value['dropDepthM']);
+          if (cfg.dropDepthM != dropDepthM) {
+            cfg.dropDepthM = dropDepthM;
+            changed = true;
+          }
+          final initialRadiusM = _num(value['initialRadiusM']);
+          if (cfg.initialRadiusM != initialRadiusM) {
+            cfg.initialRadiusM = initialRadiusM;
             changed = true;
           }
           _adoptAnchorEditTime(cfg, movedAtMs);
@@ -935,6 +1001,12 @@ class _DashboardState extends State<Dashboard> {
   int _pendingGlitchStreak = 0;
   static const _glitchConfirmStreak = 2;
   static const _glitchConfirmToleranceM = 30.0;
+  // "el filtro de saltos GPS cuenta evaluaciones, no posiciones nuevas"
+  // (external audit, verified 2026-09-05) — the raw (lat, lon) this
+  // function last actually did work for, and what it returned that time.
+  // See its use in _isOutsideAnchorZone below.
+  double? _lastRawAnchorLat, _lastRawAnchorLon;
+  bool _lastAnchorZoneResult = false;
   // Set once a real position (Signal K or the device-GPS fallback) has
   // actually been seen since the app started. The "fondeado sin posición"
   // alarm below must fire when a position was there and got lost — a real
@@ -967,6 +1039,18 @@ class _DashboardState extends State<Dashboard> {
     final lat = skLat ?? _anchorEffectiveLat;
     final lon = skLon ?? _anchorEffectiveLon;
     if (lat == null || lon == null) return false;
+    // _activeAlarms (this function's only caller) is a plain getter read
+    // many times per real position update — UI build, ntfy, sound sync,
+    // publish all read it independently within the same logical moment,
+    // well before a new GPS fix arrives. Without this guard, the SAME
+    // still-unconfirmed sample fed the corroboration streak below on
+    // every one of those re-reads, reaching _glitchConfirmStreak from
+    // pure re-evaluation of one fix against itself rather than a
+    // genuinely second, independent one — meaning a single bad fix could
+    // get "confirmed" as real movement in a single instant. Only the
+    // FIRST call for a given raw (lat, lon) does any real work below;
+    // every repeat read before a new sample arrives just returns the
+    // answer already computed for it.
     if (cfg.armedOrMovedAt != _lastAnchorCheckArmedAt) {
       _lastAnchorCheckArmedAt = cfg.armedOrMovedAt;
       _lastAnchorCheckLat = null;
@@ -974,7 +1058,18 @@ class _DashboardState extends State<Dashboard> {
       _pendingGlitchLat = null;
       _pendingGlitchLon = null;
       _pendingGlitchStreak = 0;
+      // Also invalidates the re-entrancy memo below — a fresh drop always
+      // needs its first sample evaluated for real, even on the (unlikely
+      // but possible) chance it exactly matches the previous anchorage's
+      // last raw fix.
+      _lastRawAnchorLat = null;
+      _lastRawAnchorLon = null;
     }
+    if (lat == _lastRawAnchorLat && lon == _lastRawAnchorLon) {
+      return _lastAnchorZoneResult;
+    }
+    _lastRawAnchorLat = lat;
+    _lastRawAnchorLon = lon;
     if (settings.alarmAnchorFilterGlitches &&
         _lastAnchorCheckLat != null &&
         _lastAnchorCheckLon != null) {
@@ -1011,7 +1106,9 @@ class _DashboardState extends State<Dashboard> {
           _pendingGlitchStreak = 1;
         }
         if (_pendingGlitchStreak < _glitchConfirmStreak) {
-          return false; // not yet corroborated — don't trust it, don't adopt it
+          // not yet corroborated — don't trust it, don't adopt it
+          _lastAnchorZoneResult = false;
+          return false;
         }
         _pendingGlitchLat = null;
         _pendingGlitchLon = null;
@@ -1023,7 +1120,7 @@ class _DashboardState extends State<Dashboard> {
     _lastAnchorCheckLat = lat;
     _lastAnchorCheckLon = lon;
     final r = bearingDistanceMeters(dropLat, dropLon, lat, lon);
-    return isOutsideWatchZone(
+    _lastAnchorZoneResult = isOutsideWatchZone(
       distanceM: r.distanceM,
       radiusM: cfg.radiusM,
       shape: cfg.shape,
@@ -1031,6 +1128,7 @@ class _DashboardState extends State<Dashboard> {
       sectorStartDeg: cfg.sectorStartDeg,
       sectorEndDeg: cfg.sectorEndDeg,
     );
+    return _lastAnchorZoneResult;
   }
 
   void _routeNotification(String path, dynamic value) {
@@ -1116,7 +1214,15 @@ class _DashboardState extends State<Dashboard> {
     }
     if (settings.anchorConfig.armed) {
       final dropDepth = settings.anchorConfig.dropDepthM;
-      final depth = signalK.depthM;
+      // "la alarma de profundidad usa signalK.depthM sin comprobar
+      // depthMUpdate" (external audit, verified 2026-09-05) — the wind
+      // alarm right below already guards with _freshWind; depth had no
+      // equivalent, so a sounder that stopped publishing (disconnected,
+      // out of water on a lift, etc.) kept alarming — or failing to
+      // alarm — off whatever value happened to be last received,
+      // forever. _freshEngine's 5s staleness window is the same one
+      // already used for other instrument-cluster readings.
+      final depth = _freshEngine(signalK.depthM, signalK.depthMUpdate);
       if (settings.alarmAnchorDepthEnabled &&
           dropDepth != null &&
           depth != null &&
@@ -3257,6 +3363,7 @@ class _DashboardState extends State<Dashboard> {
       'electrical.batteries.bowthruster.temperature',
       'electrical.venus.dcPower',
       'navigation.anchor.state',
+      'navigation.anchor.stateChangedAt',
       'navigation.anchor.position',
       'navigation.anchor.watchZone',
       'navigation.anchor.currentRadius',
@@ -3339,13 +3446,32 @@ class _DashboardState extends State<Dashboard> {
           sourceLabel == 'rewind-panel-anchor-${settings.anchorDeviceId}';
       final isOtherAppDevice =
           !isOwnDevice && sourceLabel.startsWith('rewind-panel-anchor');
+      // 'navigation.anchor.state' itself carries no timestamp (kept a
+      // plain "on"/"off" string for interop — see _publishAnchorDelta) —
+      // its companion 'stateChangedAt' rides in this SAME batch, so it's
+      // scanned once up front rather than relying on values-array order.
+      int? anchorBatchMovedAtMs;
+      if (isOtherAppDevice) {
+        for (final v in values) {
+          if (v is Map && v['path'] == 'navigation.anchor.stateChangedAt') {
+            anchorBatchMovedAtMs = v['value'] as int?;
+            break;
+          }
+        }
+      }
       for (final item in values) {
         if (item is! Map) continue;
         final path = item['path'] as String? ?? '';
         if (path.startsWith('navigation.anchor.')) {
           if (isOwnDevice) continue;
           if (isOtherAppDevice) {
-            changed = _applyRemoteAnchorState(path, item['value']) || changed;
+            changed =
+                _applyRemoteAnchorState(
+                  path,
+                  item['value'],
+                  batchMovedAtMs: anchorBatchMovedAtMs,
+                ) ||
+                changed;
             continue;
           }
           // else: falls through to _routeValue below, same as any other

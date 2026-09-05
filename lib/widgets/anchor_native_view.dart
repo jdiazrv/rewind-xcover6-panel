@@ -714,6 +714,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     HapticFeedback.mediumImpact();
     _updateConfig((c) {
       c.armed = false;
+      // Raise never used to bump this, unlike drop/move/resize — so a
+      // stale reconnecting device replaying its own last-known "armed"
+      // could win a race against a genuine, more recent raise from
+      // another device (audit finding, verified 2026-09-05: state sync
+      // had no timestamp gate at all). Publishing armedOrMovedAt for
+      // every transition, including this one, is what lets the sync
+      // check tell "this raise is newer" from "this is a stale echo".
+      c.armedOrMovedAt = skNow();
       if (c.dropLat != null && c.dropLon != null) {
         c.history = [
           ...c.history,
