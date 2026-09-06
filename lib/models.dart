@@ -123,6 +123,37 @@ double normalizeRelativeAngle(double value) {
   return (bearingDeg: brg, distanceM: r * c);
 }
 
+/// Inverse of bearingDistanceMeters: the point distanceM away from
+/// (lat, lon) along bearingDeg (true). Plain-doubles twin of
+/// NativeAnchorView's own private _destinationPoint (which uses the
+/// latlong2 package's LatLng, not imported here) — shared with main.dart
+/// so navigation.anchor.distanceFromBow/bearingTrue can apply the same
+/// GPS-antenna-to-bow correction _dropAnchor's drop point already does,
+/// instead of quietly measuring from the antenna while claiming to
+/// measure "from bow".
+({double lat, double lon}) destinationPoint(
+  double lat,
+  double lon,
+  double distanceM,
+  double bearingDeg,
+) {
+  const earthR = 6371000.0;
+  final brgRad = bearingDeg * math.pi / 180;
+  final lat1 = lat * math.pi / 180;
+  final lon1 = lon * math.pi / 180;
+  final lat2 = math.asin(
+    math.sin(lat1) * math.cos(distanceM / earthR) +
+        math.cos(lat1) * math.sin(distanceM / earthR) * math.cos(brgRad),
+  );
+  final lon2 =
+      lon1 +
+      math.atan2(
+        math.sin(brgRad) * math.sin(distanceM / earthR) * math.cos(lat1),
+        math.cos(distanceM / earthR) - math.sin(lat1) * math.sin(lat2),
+      );
+  return (lat: lat2 * 180 / math.pi, lon: lon2 * 180 / math.pi);
+}
+
 /// Whether a point [distanceM] from the drop position, at true bearing
 /// [bearingFromDropDeg] from it, counts as outside the anchor watch zone —
 /// circle: past the radius; sector: ALSO past the radius, or past the
@@ -179,8 +210,8 @@ class MetricDef {
 const mPressure = MetricDef(
   'environment.outside.pressure',
   'Presión',
-  'mbar',
-  scale: 1.0,
+  'hPa',
+  scale: 0.01,
   color: cPurple,
 );
 const mOutdoorTemp = MetricDef(
@@ -502,6 +533,7 @@ class SignalKModel {
   // staleness (vs. navUpdate) is what tells the VMG-to-waypoint card
   // "sin ruta" instead of showing a frozen old number.
   DateTime? courseUpdate;
+  DateTime? positionUpdate;
   // Navigation
   double? latitude;
   double? longitude;
@@ -509,6 +541,7 @@ class SignalKModel {
   double? stwKn;
   double? headingTrueDeg;
   double? headingMagneticDeg;
+  double? magneticVariationDeg;
   double? cogTrueDeg;
   // Each of these four also gets its own timestamp — navUpdate above is
   // shared by every navigation.* path, so a compass that dies while GPS
@@ -521,6 +554,7 @@ class SignalKModel {
   DateTime? stwKnUpdate;
   DateTime? headingTrueDegUpdate;
   DateTime? headingMagneticDegUpdate;
+  DateTime? magneticVariationUpdate;
   DateTime? cogTrueDegUpdate;
   double? heelDeg;
   double? pitchDeg;
@@ -567,8 +601,17 @@ class SignalKModel {
   double? awsKn;
   double? awaDeg;
   double? twaDeg;
+  double? twaWaterDeg;
+  double? twaGroundDeg;
   double? twsKn;
   double? twdDeg;
+  DateTime? awsUpdate;
+  DateTime? awaUpdate;
+  DateTime? twaUpdate;
+  DateTime? twaWaterUpdate;
+  DateTime? twaGroundUpdate;
+  DateTime? twsUpdate;
+  DateTime? twdUpdate;
   // Power
   double? houseV;
   double? houseA;
@@ -657,17 +700,25 @@ class SignalKModel {
     navUpdate = null;
     windUpdate = null;
     courseUpdate = null;
+    positionUpdate = null;
     sogKnUpdate = null;
     stwKnUpdate = null;
     headingTrueDegUpdate = null;
     headingMagneticDegUpdate = null;
+    magneticVariationUpdate = null;
     cogTrueDegUpdate = null;
+    awsUpdate = null;
+    awaUpdate = null;
+    twaUpdate = null;
+    twsUpdate = null;
+    twdUpdate = null;
     latitude = null;
     longitude = null;
     sogKn = null;
     stwKn = null;
     headingTrueDeg = null;
     headingMagneticDeg = null;
+    magneticVariationDeg = null;
     cogTrueDeg = null;
     heelDeg = null;
     pitchDeg = null;
@@ -697,6 +748,8 @@ class SignalKModel {
     awsKn = null;
     awaDeg = null;
     twaDeg = null;
+    twaWaterDeg = null;
+    twaGroundDeg = null;
     twsKn = null;
     twdDeg = null;
     houseV = null;
@@ -1033,8 +1086,7 @@ class AnchorHistoryEntry {
             DateTime.tryParse(j['droppedAt'] as String? ?? '') ??
             DateTime.now(),
         raisedAt:
-            DateTime.tryParse(j['raisedAt'] as String? ?? '') ??
-            DateTime.now(),
+            DateTime.tryParse(j['raisedAt'] as String? ?? '') ?? DateTime.now(),
         lat: (j['lat'] as num).toDouble(),
         lon: (j['lon'] as num).toDouble(),
         radiusM: (j['radiusM'] as num).toDouble(),
@@ -1204,6 +1256,9 @@ class AisTarget {
   double? sogKn;
   int? shipTypeId; // AIS ship type code, e.g. 70 = cargo, 80 = tanker
   DateTime? lastUpdate;
+  DateTime? positionUpdate;
+  DateTime? cogUpdate;
+  DateTime? sogUpdate;
   // Provided by a Signal K collision-alert plugin (navigation.closestApproach.*),
   // if installed — preferred over our own client-side CPA geometry when
   // present AND recent (see pluginCpaUpdate). NOT gated by the target's
@@ -1217,6 +1272,9 @@ class AisTarget {
   double? pluginTcpaMin;
   double? pluginCpaBearingDeg;
   DateTime? pluginCpaUpdate;
+  DateTime? pluginCpaDistanceUpdate;
+  DateTime? pluginTcpaUpdate;
+  DateTime? pluginCpaBearingUpdate;
   // Rolling 1h position history for the optional on-screen track.
   final List<({DateTime t, double lat, double lon})> track = [];
   void recordTrackPoint() {
@@ -1295,7 +1353,8 @@ class OwnTrackHistory {
     for (final p in sorted) {
       if (now.difference(p.t) > const Duration(hours: 24)) continue;
       if (!p.t.isBefore(cutoff)) continue;
-      if (last != null && p.t.difference(last.t) < const Duration(seconds: 15)) {
+      if (last != null &&
+          p.t.difference(last.t) < const Duration(seconds: 15)) {
         continue;
       }
       backfill.add(p);
@@ -1311,26 +1370,33 @@ class OwnTrackHistory {
 // taut the chain actually is. When the chain paid out for THIS anchoring is
 // known (chainOutM) and a depth reading exists, the true horizontal swing
 // radius is ground truth, not a guess: a straight line from bow roller to
-// anchor is the hypotenuse (chain length) with depth as one leg, so the
-// horizontal leg is sqrt(chain² − depth²) (ignores catenary sag and roller
-// height above the waterline — an accepted simplification, same one the
-// scope panel already uses). Falls back to configRadiusM whenever there's
-// no usable chain/depth pair. Shared by NativeAnchorView's own reposition
-// gate and computeYawAnalysis's guiñada taut-chain filter (audit finding,
-// verified 2026-09-05: guiñada used to filter on configRadiusM alone, the
-// same alarm-safety-margin bias this function exists to correct for).
+// anchor is the hypotenuse (chain length); the vertical leg is depth PLUS
+// rollerHeightM (settings.anchorBowRollerHeightM — the roller sits above
+// the waterline, so the true drop to the seabed is deeper than the
+// depthsounder alone reports), so the horizontal leg is
+// sqrt(chain² − (depth+rollerHeight)²) (still ignores catenary sag — an
+// accepted simplification). rollerHeightM defaults to 0 for callers that
+// don't have it (and to stay source-compatible with existing callers/
+// tests) — the boat's own configured height should be passed wherever
+// it's known. Falls back to configRadiusM whenever there's no usable
+// chain/depth pair. Shared by NativeAnchorView's own reposition gate and
+// computeYawAnalysis's guiñada taut-chain filter (audit finding, verified
+// 2026-09-05: guiñada used to filter on configRadiusM alone, the same
+// alarm-safety-margin bias this function exists to correct for).
 double effectiveWatchRadiusM(
   double configRadiusM,
   double? chainOutM,
-  double? depthM,
-) {
-  if (chainOutM != null &&
-      chainOutM > 0 &&
-      depthM != null &&
-      depthM > 0 &&
-      chainOutM > depthM) {
-    final horizontal = math.sqrt(chainOutM * chainOutM - depthM * depthM);
-    if (horizontal >= 3) return horizontal;
+  double? depthM, {
+  double rollerHeightM = 0,
+}) {
+  if (chainOutM != null && chainOutM > 0 && depthM != null && depthM > 0) {
+    final verticalM = depthM + rollerHeightM;
+    if (chainOutM > verticalM) {
+      final horizontal = math.sqrt(
+        chainOutM * chainOutM - verticalM * verticalM,
+      );
+      if (horizontal >= 3) return horizontal;
+    }
   }
   return configRadiusM;
 }
@@ -1726,10 +1792,8 @@ List<double> _movingAverage(List<double> values, int window) {
           sumCos += math.cos(rad);
         }
         final n = hi - lo + 1;
-        final circularMean =
-            math.atan2(sumSin / n, sumCos / n) * 180 / math.pi;
-        final diff =
-            ((circularMean - values[i] + 180) % 360 + 360) % 360 - 180;
+        final circularMean = math.atan2(sumSin / n, sumCos / n) * 180 / math.pi;
+        final diff = ((circularMean - values[i] + 180) % 360 + 360) % 360 - 180;
         return values[i] + diff;
       }(),
   ];
@@ -1940,11 +2004,9 @@ YawAnalysisResult computeYawAnalysis({
     guinadaSamples: tautPoints.length,
     guinadaSeries: guinadaSeries,
     guinadaAmplitudeDeg: guinadaAmplitudeDeg,
-    guinadaPeriod: _oscillationPeriod(
-      smoothedGuinada,
-      [for (final p in tautPoints) p.t],
-      guinadaAmplitudeDeg,
-    ),
+    guinadaPeriod: _oscillationPeriod(smoothedGuinada, [
+      for (final p in tautPoints) p.t,
+    ], guinadaAmplitudeDeg),
   );
 }
 
@@ -2008,6 +2070,8 @@ class WeatherModel {
   String place = 'Sin posicion';
   DateTime? updated;
   String? error;
+  double? latitude;
+  double? longitude;
   final summary = <ForecastPoint>[];
   final hourly = <ForecastPoint>[];
   final marine = <MarinePoint>[];
@@ -2015,6 +2079,8 @@ class WeatherModel {
   Map<String, dynamic> toJson() => {
     'place': place,
     'updated': updated?.toIso8601String(),
+    'latitude': latitude,
+    'longitude': longitude,
     'summary': [for (final p in summary) p.toJson()],
     'hourly': [for (final p in hourly) p.toJson()],
     'marine': [for (final p in marine) p.toJson()],
@@ -2024,6 +2090,8 @@ class WeatherModel {
     place = j['place'] as String? ?? place;
     final updatedStr = j['updated'] as String?;
     updated = updatedStr == null ? null : DateTime.tryParse(updatedStr);
+    latitude = (j['latitude'] as num?)?.toDouble();
+    longitude = (j['longitude'] as num?)?.toDouble();
     summary
       ..clear()
       ..addAll([
@@ -2247,6 +2315,18 @@ class SettingsModel {
   // alongside the anchor watch data, same paths hoekens used.
   double anchorBowRollerHeightM = 0;
   double anchorTotalChainLengthM = 100;
+  // Distance from the GPS antenna to the bow roller, measured along the
+  // boat's centerline (positive = antenna is AFT of the roller, the
+  // common case — mast-mounted or cockpit-mounted GPS on most boats).
+  // navigation.position is the antenna's position, not the anchor's drop
+  // point — on a boat where the antenna sits several meters aft of the
+  // bow, using it directly as the drop origin (or as "distance from bow")
+  // introduces exactly that many meters of avoidable error. 0 is a
+  // reasonable default for a boat where they're genuinely close (small
+  // boat, bow-mounted GPS) and keeps this fully opt-in. Reported live
+  // 2026-09-06 ("para que el fondeo sea más exacto hay que poder
+  // configurar... ubicación del GPS").
+  double anchorGpsToBowM = 0;
   // Applies to start/bow-thruster's voltage→SOC curve (BatteryCurveDialog)
   // — the house battery has a real current sensor and doesn't need this.
   // Separate per battery, NOT one shared setting — they're not always the

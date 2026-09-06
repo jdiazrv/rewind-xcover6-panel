@@ -24,6 +24,24 @@ void main() {
     expect(effectiveWatchRadiusM(70, 5, 10), 70);
   });
 
+  test('roller height above the waterline deepens the vertical leg', () {
+    // Same 50m chain/10m depth as above, but the roller sits 2m above the
+    // water — the true vertical drop to the seabed is 12m, not 10m, so the
+    // horizontal (watch) radius should shrink accordingly.
+    final withoutRoller = effectiveWatchRadiusM(70, 50, 10);
+    final withRoller = effectiveWatchRadiusM(70, 50, 10, rollerHeightM: 2);
+    expect(withRoller, lessThan(withoutRoller));
+    expect(withRoller, closeTo(math.sqrt(50 * 50 - 12 * 12), 1e-9));
+  });
+
+  test('destinationPoint round-trips with bearingDistanceMeters', () {
+    const lat = 37.0, lon = 23.0;
+    final dest = destinationPoint(lat, lon, 100, 45);
+    final back = bearingDistanceMeters(lat, lon, dest.lat, dest.lon);
+    expect(back.distanceM, closeTo(100, 0.5));
+    expect(back.bearingDeg, closeTo(45, 0.5));
+  });
+
   test('borneo smoothing remains close to north across 360 degrees', () {
     const anchorLat = 37.0;
     const anchorLon = 23.0;

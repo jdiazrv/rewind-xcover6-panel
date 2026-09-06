@@ -55,10 +55,13 @@ class NativeAnchorView extends StatefulWidget {
     required this.onConfigChanged,
     required this.ownLat,
     required this.ownLon,
+    required this.ownPositionUpdatedAt,
     required this.skConnected,
     required this.headingDeg,
     required this.sogKn,
     required this.depthM,
+    this.bowRollerHeightM = 0,
+    this.gpsToBowM = 0,
     required this.awaDeg,
     required this.awsKn,
     required this.gustKn,
@@ -94,6 +97,7 @@ class NativeAnchorView extends StatefulWidget {
   final ValueChanged<AnchorConfig> onConfigChanged;
   final double? ownLat;
   final double? ownLon;
+  final DateTime? ownPositionUpdatedAt;
   // Live, not a stored/cached value — without a real Signal K connection
   // the app genuinely doesn't know the boat's current state, so it must
   // never present "FONDEADO" (or any drag/outside reading) as if it were
@@ -102,6 +106,14 @@ class NativeAnchorView extends StatefulWidget {
   final double? headingDeg;
   final double? sogKn;
   final double? depthM;
+  // Boat-design facts (CFG > Fondeo > "Datos del barco") that make the
+  // drop point/radius geometry more accurate than treating the GPS
+  // antenna's own position as if it WERE the bow roller. Both default to
+  // 0 (antenna at the roller, no correction) so a boat that hasn't
+  // configured them behaves exactly as before. See effectiveWatchRadiusM
+  // and _dropAnchor's own doc comments for how each is actually used.
+  final double bowRollerHeightM;
+  final double gpsToBowM;
   final double? awaDeg;
   final double? awsKn;
   final double? twdDeg;
@@ -149,7 +161,8 @@ class NativeAnchorView extends StatefulWidget {
   // Lets main.dart's "sin posición" alarm know this screen's own
   // device-GPS fallback is quietly covering for a missing Signal K fix,
   // so that alarm doesn't fire on a false positive.
-  final void Function(double? lat, double? lon) onEffectivePositionChanged;
+  final void Function(double? lat, double? lon, DateTime? updatedAt)
+  onEffectivePositionChanged;
   // "Te has llevado el móvil" detectors — configured in CFG > Fondeo, only
   // meaningful (and only actually run) while device GPS is the position
   // source actually in use.
@@ -264,7 +277,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     // device GPS last reported here and kept feeding it to the drag alarm/
     // publish indefinitely, even after Signal K's own position came back.
     // Audit finding, verified 2026-09-05.
-    widget.onEffectivePositionChanged(null, null);
+    widget.onEffectivePositionChanged(null, null, null);
     super.dispose();
   }
 
@@ -345,6 +358,9 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   double? get _effectiveLon => _preferDeviceGps
       ? (_devicePosition?.longitude ?? widget.ownLon)
       : (widget.ownLon ?? _devicePosition?.longitude);
+  DateTime? get _effectivePositionUpdatedAt => _preferDeviceGps
+      ? (_devicePosition?.timestamp ?? widget.ownPositionUpdatedAt)
+      : (widget.ownPositionUpdatedAt ?? _devicePosition?.timestamp);
   bool get _hasSkPosition => widget.ownLat != null && widget.ownLon != null;
 
   ll.LatLng? _globalToLatLng(Offset global) {
@@ -661,8 +677,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   @override
   void initState() {
     super.initState();
-    if (!_hasSkPosition) unawaited(_maybeOfferDeviceGps());
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_hasSkPosition) unawaited(_maybeOfferDeviceGps());
       final lat = _effectiveLat, lon = _effectiveLon;
       if (lat != null && lon != null) {
         _mapController.move(ll.LatLng(lat, lon), 18);
@@ -726,11 +742,20 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     HapticFeedback.mediumImpact();
     final depth = widget.depthM;
     final heading = widget.headingDeg;
-    // Chain scope (5:1) laid out along the boat's heading gives a more
-    // realistic initial drop point than the boat's own position.
-    final ll.LatLng dropPoint = (depth != null && heading != null)
-        ? _destinationPoint(ll.LatLng(lat, lon), depth * 5, heading)
+    // navigation.position is the GPS ANTENNA's fix, not the bow roller
+    // the anchor actually drops from — on a boat where they're several
+    // meters apart (mast/cockpit-mounted GPS, common), using the antenna
+    // fix directly understates the true drop point by exactly that much.
+    // Advance along the boat's heading by gpsToBowM first (0 if not
+    // configured — same fix as before on any boat that hasn't set it).
+    final ll.LatLng bowPoint = (heading != null && widget.gpsToBowM > 0)
+        ? _destinationPoint(ll.LatLng(lat, lon), widget.gpsToBowM, heading)
         : ll.LatLng(lat, lon);
+    // Chain scope (5:1) laid out along the boat's heading from the BOW
+    // gives a more realistic initial drop point than from the antenna.
+    final ll.LatLng dropPoint = (depth != null && heading != null)
+        ? _destinationPoint(bowPoint, depth * 5, heading)
+        : bowPoint;
     _updateConfig((c) {
       c.armed = true;
       c.dropLat = dropPoint.latitude;
@@ -813,8 +838,12 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   double get _effectiveRepositionRadiusM =>
       _repositionRadiusFor(widget.config.chainOutM);
 
-  double _repositionRadiusFor(double? chainOutM) =>
-      effectiveWatchRadiusM(widget.config.radiusM, chainOutM, widget.depthM);
+  double _repositionRadiusFor(double? chainOutM) => effectiveWatchRadiusM(
+    widget.config.radiusM,
+    chainOutM,
+    widget.depthM,
+    rollerHeightM: widget.bowRollerHeightM,
+  );
 
   // "recolocar automaticamente el ancla en el origen del radio de ese
   // sector" (reported live 2026-09-04) — re-derives the anchor's true
@@ -829,12 +858,20 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   ({double lat, double lon})? get _repositionFit {
     final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
     if (dropLat == null || dropLon == null) return null;
-    return fitAnchorCenterKnownRadius(
+    final fit = fitAnchorCenterKnownRadius(
       _trackSinceDrop,
       radiusM: _effectiveRepositionRadiusM,
       refLat: dropLat,
       refLon: dropLon,
     );
+    if (fit == null) return null;
+    // Keep the existing fixed-radius fitter intact, but do not act on an
+    // underdetermined tight cluster: without angular observation there are
+    // many possible centres at the same radius. Fifteen degrees is a modest
+    // floor that still allows a narrow real swing while rejecting a boat
+    // held at essentially one bearing all day.
+    if (_swingArcDeg(fit.lat, fit.lon) < 15) return null;
+    return fit;
   }
 
   // Why the button is greyed out right now — surfaced as its tooltip.
@@ -1197,7 +1234,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   Widget build(BuildContext context) {
     final lat = _effectiveLat, lon = _effectiveLon;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      widget.onEffectivePositionChanged(lat, lon);
+      widget.onEffectivePositionChanged(lat, lon, _effectivePositionUpdatedAt);
     });
     final dropLat = widget.config.dropLat, dropLon = widget.config.dropLon;
     // Bearing FROM the drop point TO the boat — same direction
@@ -1238,7 +1275,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     int? graceSecondsLeft;
     final armedOrMovedAt = widget.config.armedOrMovedAt;
     if (outside && armedOrMovedAt != null) {
-      final elapsed = DateTime.now().difference(armedOrMovedAt);
+      final elapsed = skNow().difference(armedOrMovedAt);
       if (elapsed < const Duration(seconds: 10)) {
         graceSecondsLeft = 10 - elapsed.inSeconds;
       }

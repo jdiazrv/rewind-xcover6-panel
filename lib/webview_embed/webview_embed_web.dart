@@ -46,6 +46,7 @@ class PlatformWebView extends StatefulWidget {
 
 class _PlatformWebViewState extends State<PlatformWebView> {
   late final String _viewType;
+  web.HTMLIFrameElement? _iframe;
 
   @override
   void initState() {
@@ -59,9 +60,19 @@ class _PlatformWebViewState extends State<PlatformWebView> {
         ..style.width = '100%'
         ..style.height = '100%';
       iframe.onLoad.listen((_) => widget.onPageFinished?.call());
+      _iframe = iframe;
       return iframe;
     });
     widget.onPageStarted?.call();
+  }
+
+  @override
+  void didUpdateWidget(PlatformWebView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      widget.onPageStarted?.call();
+      _iframe?.src = widget.url;
+    }
   }
 
   @override

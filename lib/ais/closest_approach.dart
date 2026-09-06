@@ -21,6 +21,7 @@ class _ClosestApproachService {
   closestApproachTarget() {
     final ownLat = _s.signalK.latitude;
     final ownLon = _s.signalK.longitude;
+    final ownPositionFresh = _s._timestampFresh(_s.signalK.positionUpdate);
     final ownHeading = _s._freshHeading;
     final ownCog = _s._freshCog ?? ownHeading;
     final ownSog = _s._freshSog ?? 0;
@@ -54,7 +55,17 @@ class _ClosestApproachService {
       double? distNm;
       String? crossing;
 
-      if (ownLat != null &&
+      const aisFreshness = Duration(minutes: 6);
+      final targetPositionFresh = _s._timestampFresh(
+        target.positionUpdate,
+        aisFreshness,
+      );
+      final targetMotionFresh =
+          _s._timestampFresh(target.cogUpdate, aisFreshness) &&
+          _s._timestampFresh(target.sogUpdate, aisFreshness);
+      if (ownPositionFresh &&
+          targetPositionFresh &&
+          ownLat != null &&
           ownLon != null &&
           target.lat != null &&
           target.lon != null) {
@@ -69,6 +80,7 @@ class _ClosestApproachService {
 
         if ((cpaNm == null || tcpaMin == null) &&
             ownCog != null &&
+            targetMotionFresh &&
             target.cogDeg != null &&
             target.sogKn != null) {
           final brg = rel.bearingDeg * math.pi / 180;

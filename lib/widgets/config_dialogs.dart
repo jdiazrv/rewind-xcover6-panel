@@ -548,6 +548,53 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     return missing;
   }
 
+  List<String> get _duplicateAssignments {
+    final duplicates = <String>[];
+    if (_cfg.batteryHouseId.isNotEmpty &&
+        _cfg.batteryHouseId == _cfg.batteryStartId) {
+      duplicates.add('La misma batería está asignada a servicio y arranque.');
+    }
+    if (_cfg.solarPath != null && _cfg.solarPath == _cfg.solarPath2) {
+      duplicates.add('El mismo path está asignado a Solar 1 y Solar 2.');
+    }
+    if (_cfg.fridge1Path != null && _cfg.fridge1Path == _cfg.fridge2Path) {
+      duplicates.add('El mismo path está asignado a Nevera 1 y Nevera 2.');
+    }
+    final tankKeys = <String>{};
+    for (final tank in _cfg.tanks.where((tank) => tank.enabled)) {
+      if (!tankKeys.add(tank.tankKey)) {
+        duplicates.add('El tanque ${tank.tankKey} está repetido.');
+      }
+      if (tank.capacityL < 0) {
+        duplicates.add(
+          '${tank.groupLabel}: la capacidad no puede ser negativa.',
+        );
+      }
+    }
+    return duplicates;
+  }
+
+  void _saveIfValid() {
+    final errors = _duplicateAssignments;
+    if (errors.isEmpty) {
+      Navigator.of(context).pop(_cfg);
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Revisa las asignaciones'),
+        content: Text(errors.map((error) => '• $error').join('\n')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Corregir'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _pathsPanel() {
     if (_discovery == null) {
       final configured = <String>[
@@ -1126,7 +1173,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                   ),
                   const SizedBox(width: 8),
                   FilledButton(
-                    onPressed: () => Navigator.of(context).pop(_cfg),
+                    onPressed: _saveIfValid,
                     child: const Text('Guardar'),
                   ),
                 ],

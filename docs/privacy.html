@@ -61,7 +61,7 @@
 <body>
 <div class="wrap">
   <h1>Política de privacidad de REWIND Panel</h1>
-  <p class="updated">Última actualización: 2 de septiembre de 2026</p>
+  <p class="updated">Última actualización: 5 de septiembre de 2026</p>
 
   <div class="box">
     Resumen: REWIND Panel no recopila, almacena ni comparte tus datos personales.
@@ -107,7 +107,18 @@
   dispositivo (<code>SharedPreferences</code> de Android, o el almacenamiento
   del navegador si usas la versión webapp). No se sincroniza con ningún
   servidor ni cuenta — si desinstalas la app o borras sus datos, esa
-  configuración desaparece.</p>
+    configuración desaparece. Las credenciales se guardan en el almacenamiento
+    seguro del sistema en Android; en la versión web quedan en el almacenamiento
+    local del perfil del navegador.</p>
+  <p>Cuando hay varios dispositivos conectados al mismo barco, la app publica en
+    tu propio servidor Signal K el estado y la geometría del fondeo para
+    sincronizarlos. También puede compartir por ese servidor la configuración de
+    conexión al histórico que hayas introducido. El plugin de vigilancia de
+    fondeo instalado en Signal K lee ese estado y puede continuar evaluando el
+    garreo aunque ningún panel esté abierto.</p>
+  <p>La previsión meteorológica se conserva temporalmente en el dispositivo,
+    junto con las coordenadas aproximadas para las que fue descargada, para
+    evitar solicitudes repetidas y no reutilizar una previsión de otra zona.</p>
 
   <h2>Cuentas, analítica y publicidad</h2>
   <p>REWIND Panel no requiere crear ninguna cuenta, no incluye publicidad, y

@@ -58,7 +58,8 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   List<AnchorYawPoint>? _fetched1h;
   List<AnchorYawPoint>? _fetched24h;
 
-  List<AnchorYawPoint> get _points => (_last24h ? _fetched24h : _fetched1h) ?? const [];
+  List<AnchorYawPoint> get _points =>
+      (_last24h ? _fetched24h : _fetched1h) ?? const [];
 
   @override
   void initState() {
@@ -113,18 +114,16 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   Duration _skResolution(bool last24h) =>
       last24h ? const Duration(minutes: 2) : const Duration(seconds: 2);
 
-  Future<List<GraphPoint>> _fetchInfluxMetric(
-    MetricDef def,
-    bool last24h,
-  ) => influxQuery(
-    host: widget.influxHost,
-    org: widget.influxOrg,
-    token: widget.influxToken,
-    def: def,
-    fluxRange: _fluxRange(last24h),
-    aggEvery: _aggEvery(last24h),
-    bucket: widget.bucket,
-  );
+  Future<List<GraphPoint>> _fetchInfluxMetric(MetricDef def, bool last24h) =>
+      influxQuery(
+        host: widget.influxHost,
+        org: widget.influxOrg,
+        token: widget.influxToken,
+        def: def,
+        fluxRange: _fluxRange(last24h),
+        aggEvery: _aggEvery(last24h),
+        bucket: widget.bucket,
+      );
 
   Future<List<GraphPoint>> _fetchSkMetric(MetricDef def, bool last24h) =>
       skHistoryQuery(
@@ -144,10 +143,13 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
         return _fetchInfluxMetric(def, last24h);
       default: // 'auto' — same preference order as GraphDialog
         try {
-          return await _fetchInfluxMetric(def, last24h);
+          final points = await _fetchInfluxMetric(def, last24h);
+          if (points.isNotEmpty) return points;
         } catch (_) {
-          return _fetchSkMetric(def, last24h);
+          // Try Signal K below. An unavailable source and an available but
+          // empty source are equivalent in automatic mode.
         }
+        return _fetchSkMetric(def, last24h);
     }
   }
 
@@ -190,13 +192,17 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   ) async {
     final now = DateTime.now().toUtc();
     final from = now.subtract(_skRange(last24h));
-    final uri = Uri.http('${widget.skHost}:${widget.skPort}', '/signalk/v2/api/history/values', {
-      'context': 'vessels.self',
-      'paths': 'navigation.position',
-      'from': from.toIso8601String(),
-      'to': now.toIso8601String(),
-      'resolution': _skResolution(last24h).inSeconds.toString(),
-    });
+    final uri = Uri.http(
+      '${widget.skHost}:${widget.skPort}',
+      '/signalk/v2/api/history/values',
+      {
+        'context': 'vessels.self',
+        'paths': 'navigation.position',
+        'from': from.toIso8601String(),
+        'to': now.toIso8601String(),
+        'resolution': _skResolution(last24h).inSeconds.toString(),
+      },
+    );
     final response = await http
         .get(
           uri,
@@ -241,17 +247,20 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   // is a best-effort fallback, not a primary path, so any failure here
   // should just mean "no better than what we already tried."
   //
-  // The API answers with NO per-point timestamps (a plain GeoJSON
-  // MultiLineString) — reconstructed by counting back from "now" at the
-  // plugin's own default 60s sampling interval, since real installs
-  // essentially never override it. That's approximate, not exact, but
-  // computeYawAnalysis already smooths its inputs and this is strictly
-  // better than having no position history at all.
-  Future<List<({DateTime t, double lat, double lon})>?> _fetchSkTrack() async {
+  // The current tracks API can include exact, positionally-aligned sample
+  // times when `times=true` is requested. Never fabricate timestamps here:
+  // Guiñada joins these samples to heading/COG, so an invented cadence can
+  // create a plausible but false analysis.
+  Future<List<({DateTime t, double lat, double lon})>?> _fetchSkTrack(
+    bool last24h,
+  ) async {
     try {
+      final duration = last24h ? '24h' : '1h';
+      final resolution = last24h ? '2m' : '10s';
       final uri = Uri.http(
         '${widget.skHost}:${widget.skPort}',
-        '/signalk/v1/api/tracks/self',
+        '/signalk/v1/api/self/track',
+        {'duration': duration, 'resolution': resolution, 'times': 'true'},
       );
       final response = await http
           .get(
@@ -263,33 +272,37 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) return null;
       final doc = jsonDecode(response.body);
-      if (doc is! Map || doc.isEmpty) return null;
-      final track = doc.values.first;
-      final coordinates = track is Map ? track['coordinates'] : null;
-      if (coordinates is! List) return null;
-      final flat = <({double lat, double lon})>[];
-      for (final segment in coordinates) {
-        if (segment is! List) continue;
-        for (final pt in segment) {
+      if (doc is! Map) return null;
+      final coordinates = doc['coordinates'];
+      final times = doc['times'];
+      if (coordinates is! List || times is! List) return null;
+      final result = <({DateTime t, double lat, double lon})>[];
+      for (
+        var segmentIndex = 0;
+        segmentIndex < coordinates.length && segmentIndex < times.length;
+        segmentIndex++
+      ) {
+        final segment = coordinates[segmentIndex];
+        final segmentTimes = times[segmentIndex];
+        if (segment is! List || segmentTimes is! List) continue;
+        for (
+          var pointIndex = 0;
+          pointIndex < segment.length && pointIndex < segmentTimes.length;
+          pointIndex++
+        ) {
+          final pt = segment[pointIndex];
           if (pt is! List || pt.length < 2) continue;
           final lon = _num(pt[0]);
           final lat = _num(pt[1]);
-          if (lat == null || lon == null) continue;
-          flat.add((lat: lat, lon: lon));
+          final t = DateTime.tryParse(
+            segmentTimes[pointIndex]?.toString() ?? '',
+          );
+          if (lat == null || lon == null || t == null) continue;
+          result.add((t: t, lat: lat, lon: lon));
         }
       }
-      if (flat.isEmpty) return null;
-      const sampleInterval = Duration(seconds: 60);
-      final now = DateTime.now();
-      final n = flat.length;
-      return [
-        for (var i = 0; i < n; i++)
-          (
-            t: now.subtract(sampleInterval * (n - 1 - i)),
-            lat: flat[i].lat,
-            lon: flat[i].lon,
-          ),
-      ];
+      result.sort((a, b) => a.t.compareTo(b.t));
+      return result.isEmpty ? null : result;
     } catch (_) {
       return null;
     }
@@ -312,7 +325,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
         );
       default:
         try {
-          return await influxPositionQuery(
+          final position = await influxPositionQuery(
             host: widget.influxHost,
             org: widget.influxOrg,
             token: widget.influxToken,
@@ -320,9 +333,13 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
             aggEvery: _aggEvery(last24h),
             bucket: widget.bucket,
           );
+          if (position.lat.isNotEmpty && position.lon.isNotEmpty) {
+            return position;
+          }
         } catch (_) {
-          return _fetchSkPosition(last24h);
+          // Try Signal K below; an empty Influx result is also a fallback.
         }
+        return _fetchSkPosition(last24h);
     }
   }
 
@@ -345,7 +362,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
       // them either, just stay null per point — computeYawAnalysis's
       // headingSamples/guinadaSamples split is what turns that into an
       // honest "Guiñada no disponible aquí" instead of a wrong number.
-      final track = await _fetchSkTrack();
+      final track = await _fetchSkTrack(last24h);
       if (track != null) {
         pos = (
           lat: [for (final p in track) GraphPoint(time: p.t, value: p.lat)],
@@ -357,7 +374,11 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
     // Position is the timeline every other series gets matched onto — a
     // gap in heading/COG at a given instant just means that point's fields
     // stay null (computeYawAnalysis already skips points with no heading).
-    GraphPoint? nearest(List<GraphPoint> series, DateTime t) {
+    GraphPoint? nearest(
+      List<GraphPoint> series,
+      DateTime t, {
+      required Duration tolerance,
+    }) {
       if (series.isEmpty) return null;
       var best = series.first;
       var bestDiff = (best.time.difference(t)).abs();
@@ -368,18 +389,34 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
           bestDiff = diff;
         }
       }
-      return bestDiff <= const Duration(minutes: 3) ? best : null;
+      return bestDiff <= tolerance ? best : null;
     }
 
+    // 1h data is requested at 2-10s resolution; accepting a sample three
+    // minutes away joined unrelated movements. The 24h aggregate is coarser.
+    final joinTolerance = last24h
+        ? const Duration(minutes: 3)
+        : const Duration(seconds: 30);
+    final lonSorted = [...pos.lon]..sort((a, b) => a.time.compareTo(b.time));
     return [
-      for (var i = 0; i < pos.lat.length && i < pos.lon.length; i++)
-        AnchorYawPoint(
-          t: pos.lat[i].time,
-          lat: pos.lat[i].value,
-          lon: pos.lon[i].value,
-          headingDeg: nearest(heading, pos.lat[i].time)?.value,
-          cogDeg: nearest(cog, pos.lat[i].time)?.value,
-        ),
+      for (final latPoint in pos.lat)
+        if (nearest(lonSorted, latPoint.time, tolerance: joinTolerance)
+            case final lonPoint?)
+          AnchorYawPoint(
+            t: latPoint.time,
+            lat: latPoint.value,
+            lon: lonPoint.value,
+            headingDeg: nearest(
+              heading,
+              latPoint.time,
+              tolerance: joinTolerance,
+            )?.value,
+            cogDeg: nearest(
+              cog,
+              latPoint.time,
+              tolerance: joinTolerance,
+            )?.value,
+          ),
     ];
   }
 
@@ -409,9 +446,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
         () {
           final t = now.add(Duration(seconds: s));
           final yaw =
-              amplitudeDeg /
-                  2 *
-                  math.sin(2 * math.pi * s / periodSec) +
+              amplitudeDeg / 2 * math.sin(2 * math.pi * s / periodSec) +
               (rnd.nextDouble() - 0.5) * 4;
           final bearingFromAnchor = yaw * 0.5;
           final rad = bearingFromAnchor * math.pi / 180;
@@ -424,11 +459,11 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
           // comment for why.
           final calmHeading = normalize360(
             bearingDistanceMeters(
-              widget.anchorLat,
-              widget.anchorLon,
-              lat,
-              lon,
-            ).bearingDeg +
+                  widget.anchorLat,
+                  widget.anchorLon,
+                  lat,
+                  lon,
+                ).bearingDeg +
                 180,
           );
           return AnchorYawPoint(
@@ -468,11 +503,11 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
           final lon = widget.anchorLon + dx / (cosLat * 111320);
           final calmHeading = normalize360(
             bearingDistanceMeters(
-              widget.anchorLat,
-              widget.anchorLon,
-              lat,
-              lon,
-            ).bearingDeg +
+                  widget.anchorLat,
+                  widget.anchorLon,
+                  lat,
+                  lon,
+                ).bearingDeg +
                 180,
           );
           return AnchorYawPoint(
@@ -523,7 +558,8 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
                       // transient failure had no way to retry short of
                       // closing and reopening the whole dialog. This
                       // forces a fresh fetch of whichever mode is active.
-                      onPressed: () => _selectMode(_last24h, forceRefetch: true),
+                      onPressed: () =>
+                          _selectMode(_last24h, forceRefetch: true),
                       icon: const Icon(Icons.refresh, color: cMuted),
                       tooltip: 'Volver a consultar',
                     ),
@@ -566,9 +602,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
 
   Widget _buildBody(YawAnalysisResult result) {
     if (_loading) {
-      return const Center(
-        child: CircularProgressIndicator(color: cCyan),
-      );
+      return const Center(child: CircularProgressIndicator(color: cCyan));
     }
     if (_error != null) {
       return Center(
@@ -768,10 +802,7 @@ class _SectionHeader extends StatelessWidget {
         ),
       ),
       const SizedBox(height: 3),
-      Text(
-        subtitle,
-        style: const TextStyle(color: cMuted, fontSize: 11.5),
-      ),
+      Text(subtitle, style: const TextStyle(color: cMuted, fontSize: 11.5)),
     ],
   );
 }
@@ -824,10 +855,7 @@ class _KpiCard extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: const TextStyle(color: cMuted, fontSize: 10.5),
-        ),
+        Text(label, style: const TextStyle(color: cMuted, fontSize: 10.5)),
         const SizedBox(height: 4),
         Text(
           value,

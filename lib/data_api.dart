@@ -21,6 +21,35 @@ List<GraphPoint> _sortAndDedupe(List<GraphPoint> points) {
   return out;
 }
 
+String _fluxString(String value) =>
+    value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
+
+// RFC-4180-enough parser for Influx annotated CSV. Values and tags may
+// contain commas or escaped quotes, so String.split(',') corrupts columns.
+List<String> _parseCsvLine(String line) {
+  final cells = <String>[];
+  final current = StringBuffer();
+  var quoted = false;
+  for (var i = 0; i < line.length; i++) {
+    final ch = line[i];
+    if (ch == '"') {
+      if (quoted && i + 1 < line.length && line[i + 1] == '"') {
+        current.write('"');
+        i++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch == ',' && !quoted) {
+      cells.add(current.toString());
+      current.clear();
+    } else {
+      current.write(ch);
+    }
+  }
+  cells.add(current.toString());
+  return cells;
+}
+
 // ─── InfluxDB ─────────────────────────────────────────────────────────────────
 // Deliberately blank — a real org/token used to ship here as the built-in
 // default, which meant every install (including ones shared with Play
@@ -45,9 +74,9 @@ Future<List<GraphPoint>> influxQuery({
 }) async {
   final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
   final query =
-      'from(bucket:"$bucket")'
+      'from(bucket:"${_fluxString(bucket)}")'
       '|>range(start:$fluxRange,stop:now())'
-      '|>filter(fn:(r)=>r._measurement=="${def.skPath}")'
+      '|>filter(fn:(r)=>r._measurement=="${_fluxString(def.skPath)}")'
       '|>aggregateWindow(every:$aggEvery,fn:mean,createEmpty:true)'
       '|>keep(columns:["_time","_value"])';
   final response = await http
@@ -71,7 +100,7 @@ Future<List<GraphPoint>> influxQuery({
   int timeCol = -1, valueCol = -1;
   for (final line in const LineSplitter().convert(response.body)) {
     if (line.isEmpty || line.startsWith('#')) continue;
-    final cells = line.split(',');
+    final cells = _parseCsvLine(line);
     if (timeCol < 0) {
       final t = cells.indexOf('_time');
       if (t >= 0) {
@@ -108,7 +137,7 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
 }) async {
   final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
   final query =
-      'from(bucket:"$bucket")'
+      'from(bucket:"${_fluxString(bucket)}")'
       '|>range(start:$fluxRange,stop:now())'
       '|>filter(fn:(r)=>r._measurement=="navigation.position" and (r._field=="lat" or r._field=="lon"))'
       '|>aggregateWindow(every:$aggEvery,fn:mean,createEmpty:false)'
@@ -135,7 +164,7 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
   int timeCol = -1, valueCol = -1, fieldCol = -1;
   for (final line in const LineSplitter().convert(response.body)) {
     if (line.isEmpty || line.startsWith('#')) continue;
-    final cells = line.split(',');
+    final cells = _parseCsvLine(line);
     if (timeCol < 0) {
       final t = cells.indexOf('_time');
       if (t >= 0) {

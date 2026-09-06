@@ -210,6 +210,7 @@ class _DashboardState extends State<Dashboard> {
   WebSocketChannel? channel;
   int _connectGeneration = 0;
   Timer? reconnectTimer;
+  int _reconnectAttempt = 0;
   // Which host:port _connectSignalK() last targeted — null until the first
   // attempt this session. Used to tell "switching to a different server"
   // (needs a hard data reset) apart from "reconnecting to the SAME one
@@ -241,6 +242,7 @@ class _DashboardState extends State<Dashboard> {
   PhoneHeelTracker? _phoneHeelTracker;
 
   int page = 0;
+  String _selectedPageId = 'NAV';
 
   // The Premium NAV screens (Vela/Motor/Fondeado) were tuned against the
   // tablet's landscape height (~700dp+); a phone in the same forced-
@@ -377,6 +379,7 @@ class _DashboardState extends State<Dashboard> {
   // just because Signal K's own position is briefly missing while the
   // device fallback is quietly covering for it.
   double? _anchorEffectiveLat, _anchorEffectiveLon;
+  DateTime? _anchorEffectivePositionUpdatedAt;
   // Fed by NativeAnchorView's onDragStatusChanged — lets the ntfy push
   // (built here, not in that widget) report the same outside/garreando/
   // speed numbers the screen itself shows.
@@ -388,6 +391,32 @@ class _DashboardState extends State<Dashboard> {
   // the topic only ever refreshed on the next reconnect, so the backup
   // watchdog could keep pushing to a topic the user had already changed.
   Timer? _ntfyTopicSyncDebounce;
+  final List<String> _eventLog = [];
+
+  Future<void> _recordEvent(String code, [String detail = '']) async {
+    final safeDetail = detail
+        .replaceAll(
+          RegExp(
+            r'(token|password|authorization)\s*[:=]\s*\S+',
+            caseSensitive: false,
+          ),
+          r'$1=[oculto]',
+        )
+        .replaceAll(
+          RegExp(r'basic\s+[a-z0-9+/=]+', caseSensitive: false),
+          'Basic [oculto]',
+        );
+    final line =
+        '${DateTime.now().toUtc().toIso8601String()} $code'
+        '${safeDetail.isEmpty ? '' : ' — $safeDetail'}';
+    _eventLog.add(line);
+    if (_eventLog.length > 100) {
+      _eventLog.removeRange(0, _eventLog.length - 100);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('eventLog', _eventLog);
+  }
+
   // Last notification actually sent — the notification itself is only
   // re-published when this changes, not every 5s tick like the live
   // telemetry values. Publishing an identical "Watching" notification with
@@ -499,6 +528,10 @@ class _DashboardState extends State<Dashboard> {
         'path': 'design.totalAnchorChainLength',
         'value': settings.anchorTotalChainLengthM,
       },
+      {
+        'path': 'design.gpsToBowDistance',
+        'value': settings.anchorGpsToBowM,
+      },
       // InfluxDB connection — shared across every device once entered on
       // ONE of them, instead of retyping a token on each phone/tablet
       // ("pero el token tengo que ponerlo en cada dispositivo?", reported
@@ -597,19 +630,49 @@ class _DashboardState extends State<Dashboard> {
         'dropDepthM': cfg.dropDepthM,
         'initialRadiusM': cfg.initialRadiusM,
       };
-      final lat = _anchorEffectiveLat ?? signalK.latitude;
-      final lon = _anchorEffectiveLon ?? signalK.longitude;
+      var lat = _anchorEffectiveLat ?? signalK.latitude;
+      var lon = _anchorEffectiveLon ?? signalK.longitude;
+      final heading = _freshHeading;
+      // navigation.position is the GPS antenna's fix — this path is
+      // literally named distanceFromBow, so on a boat where the antenna
+      // sits meaningfully aft of the bow (settings.anchorGpsToBowM),
+      // advance to the bow first, same correction _dropAnchor's own drop
+      // point already applies. Needs a real heading to know which
+      // direction "forward" is; without one this silently stays exactly
+      // as before (antenna position, uncorrected).
+      if (lat != null &&
+          lon != null &&
+          heading != null &&
+          settings.anchorGpsToBowM > 0) {
+        final bow = destinationPoint(lat, lon, settings.anchorGpsToBowM, heading);
+        lat = bow.lat;
+        lon = bow.lon;
+      }
       if (lat != null && lon != null) {
         final r = bearingDistanceMeters(lat, lon, cfg.dropLat!, cfg.dropLon!);
         distanceFromBow = r.distanceM;
         bearingTrueRad = r.bearingDeg * math.pi / 180; // SK angles = radians
-        final heading = _freshHeading;
         if (heading != null) {
           final rel = ((r.bearingDeg - heading + 540) % 360) - 180;
           apparentBearingRad = rel * math.pi / 180;
         }
       }
     }
+    // Canonical, atomic REWIND state. The legacy individual paths below are
+    // retained for Signal K interoperability, but REWIND peers and the
+    // server watchdog can apply this object as one revision and never mix
+    // state/position/zone from different devices or replay batches.
+    values.insert(0, {
+      'path': 'navigation.anchor.rewindState',
+      'value': {
+        'schemaVersion': 1,
+        'revision': cfg.armedOrMovedAt?.millisecondsSinceEpoch ?? 0,
+        'deviceId': settings.anchorDeviceId,
+        'armed': cfg.armed,
+        'position': position,
+        'watchZone': watchZone,
+      },
+    });
     values.addAll([
       {'path': 'navigation.anchor.position', 'value': position},
       {'path': 'navigation.anchor.watchZone', 'value': watchZone},
@@ -659,8 +722,8 @@ class _DashboardState extends State<Dashboard> {
       if (_anchorIsDragging && _anchorDragSpeedMPerMin != null) {
         parts.add('${_anchorDragSpeedMPerMin!.toStringAsFixed(1)} m/min');
       }
-      final aws = _freshWind(_dAws);
-      final awa = _freshWind(_dAwa);
+      final aws = _freshWind(_dAws, signalK.awsUpdate);
+      final awa = _freshWind(_dAwa, signalK.awaUpdate);
       if (aws != null) {
         parts.add(
           'AWS ${aws.toStringAsFixed(0)}kt'
@@ -831,6 +894,95 @@ class _DashboardState extends State<Dashboard> {
     final cfg = settings.anchorConfig;
     var changed = false;
     switch (path) {
+      case 'navigation.anchor.rewindState':
+        if (value is! Map || value['schemaVersion'] != 1) break;
+        final revision = (value['revision'] as num?)?.toInt();
+        if (revision == null || _isStaleAnchorEdit(cfg, revision)) break;
+        final armed = value['armed'] == true;
+        final position = value['position'];
+        final watchZone = value['watchZone'];
+        final lat = position is Map ? _num(position['latitude']) : null;
+        final lon = position is Map ? _num(position['longitude']) : null;
+        final shape = watchZone is Map ? watchZone['type'] as String? : null;
+        final radius = watchZone is Map ? _num(watchZone['radius']) : null;
+        // An armed snapshot must be complete. Rejecting it atomically is
+        // safer than accepting only the state and leaving stale geometry.
+        if (armed &&
+            (lat == null ||
+                lon == null ||
+                lat < -90 ||
+                lat > 90 ||
+                lon < -180 ||
+                lon > 180 ||
+                shape == null ||
+                !const {'circle', 'sector'}.contains(shape) ||
+                radius == null ||
+                radius <= 0)) {
+          break;
+        }
+        if (cfg.armed != armed) {
+          cfg.armed = armed;
+          changed = true;
+        }
+        if (lat != null && lon != null) {
+          if (cfg.dropLat != lat || cfg.dropLon != lon) {
+            cfg.dropLat = lat;
+            cfg.dropLon = lon;
+            changed = true;
+          }
+        }
+        if (watchZone is Map) {
+          if (shape != null && cfg.shape != shape) {
+            cfg.shape = shape;
+            changed = true;
+          }
+          if (radius != null && radius > 0 && cfg.radiusM != radius) {
+            cfg.radiusM = radius;
+            changed = true;
+          }
+          final start = _num(watchZone['startDeg']);
+          final end = _num(watchZone['endDeg']);
+          if (cfg.sectorStartDeg != start || cfg.sectorEndDeg != end) {
+            cfg.sectorStartDeg = start;
+            cfg.sectorEndDeg = end;
+            changed = true;
+          }
+          if (watchZone.containsKey('droppedAt')) {
+            final ms = (watchZone['droppedAt'] as num?)?.toInt();
+            final next = ms == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(ms);
+            if (cfg.droppedAt != next) {
+              cfg.droppedAt = next;
+              changed = true;
+            }
+          }
+          for (final field in const [
+            'chainOutM',
+            'dropDepthM',
+            'initialRadiusM',
+          ]) {
+            final next = _num(watchZone[field]);
+            switch (field) {
+              case 'chainOutM':
+                if (cfg.chainOutM != next) {
+                  cfg.chainOutM = next;
+                  changed = true;
+                }
+              case 'dropDepthM':
+                if (cfg.dropDepthM != next) {
+                  cfg.dropDepthM = next;
+                  changed = true;
+                }
+              case 'initialRadiusM':
+                if (cfg.initialRadiusM != next) {
+                  cfg.initialRadiusM = next;
+                  changed = true;
+                }
+            }
+          }
+        }
+        _adoptAnchorEditTime(cfg, revision);
       case 'navigation.anchor.state':
         // batchMovedAtMs comes from this SAME delta's own
         // 'navigation.anchor.stateChangedAt' entry (scanned by the caller
@@ -1121,10 +1273,18 @@ class _DashboardState extends State<Dashboard> {
     // position but ANC was still tracking fine via the phone's GPS, the
     // screen could show GARREANDO while the alarm engine (sound/ntfy/
     // push) never fired at all.
-    final skLat = signalK.connected ? signalK.latitude : null;
-    final skLon = signalK.connected ? signalK.longitude : null;
-    final lat = skLat ?? _anchorEffectiveLat;
-    final lon = skLon ?? _anchorEffectiveLon;
+    final skPositionFresh = _timestampFresh(signalK.positionUpdate);
+    final fallbackPositionFresh = _timestampFresh(
+      _anchorEffectivePositionUpdatedAt,
+    );
+    final skLat = signalK.connected && skPositionFresh
+        ? signalK.latitude
+        : null;
+    final skLon = signalK.connected && skPositionFresh
+        ? signalK.longitude
+        : null;
+    final lat = skLat ?? (fallbackPositionFresh ? _anchorEffectiveLat : null);
+    final lon = skLon ?? (fallbackPositionFresh ? _anchorEffectiveLon : null);
     if (lat == null || lon == null) return false;
     // _activeAlarms (this function's only caller) is a plain getter read
     // many times per real position update — UI build, ntfy, sound sync,
@@ -1282,7 +1442,7 @@ class _DashboardState extends State<Dashboard> {
     }
     final anchorGraceOk =
         settings.anchorConfig.armedOrMovedAt == null ||
-        DateTime.now().difference(settings.anchorConfig.armedOrMovedAt!) >
+        skNow().difference(settings.anchorConfig.armedOrMovedAt!) >
             const Duration(seconds: 10);
     if (settings.anchorConfig.armed &&
         anchorGraceOk &&
@@ -1325,7 +1485,7 @@ class _DashboardState extends State<Dashboard> {
           muted: _mutedAlarms.contains(key),
         ));
       }
-      final aws = _freshWind(_dAws);
+      final aws = _freshWind(_dAws, signalK.awsUpdate);
       if (settings.alarmAnchorWindEnabled &&
           aws != null &&
           aws > settings.alarmAnchorWindKn) {
@@ -1346,9 +1506,12 @@ class _DashboardState extends State<Dashboard> {
       // isn't watching anything right now.
       final hasPositionNow =
           (signalK.connected &&
+              _timestampFresh(signalK.positionUpdate) &&
               signalK.latitude != null &&
               signalK.longitude != null) ||
-          (_anchorEffectiveLat != null && _anchorEffectiveLon != null);
+          (_timestampFresh(_anchorEffectivePositionUpdatedAt) &&
+              _anchorEffectiveLat != null &&
+              _anchorEffectiveLon != null);
       if (hasPositionNow) {
         _everHadAnchorPosition = true;
       } else if (settings.alarmAnchorNoPositionEnabled &&
@@ -1366,9 +1529,7 @@ class _DashboardState extends State<Dashboard> {
           // fire. Reported live 2026-09-04.
           (_everHadAnchorPosition ||
               (settings.anchorConfig.armedOrMovedAt != null &&
-                  DateTime.now().difference(
-                        settings.anchorConfig.armedOrMovedAt!,
-                      ) >
+                  skNow().difference(settings.anchorConfig.armedOrMovedAt!) >
                       const Duration(seconds: 30)))) {
         const key = 'anchorNoPosition';
         out.add((
@@ -1513,10 +1674,10 @@ class _DashboardState extends State<Dashboard> {
   bool _customAlarmTriggered(CustomAlarmRule rule) {
     switch (rule.type) {
       case 'depthBelow':
-        final d = signalK.depthM;
+        final d = _freshEngine(signalK.depthM, signalK.depthMUpdate);
         return d != null && d < rule.threshold;
       case 'windAbove':
-        final w = signalK.awsKn;
+        final w = _freshWind(signalK.awsKn, signalK.awsUpdate);
         return w != null && w > rule.threshold;
       case 'batteryVoltageBelow':
         final v = signalK.houseV;
@@ -2234,6 +2395,9 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    _eventLog
+      ..clear()
+      ..addAll(prefs.getStringList('eventLog') ?? const []);
     settings.anchorDeviceId = prefs.getString('anchorDeviceId') ?? '';
     if (settings.anchorDeviceId.isEmpty) {
       // NOT `1 << 32` — on Flutter web, dart2js compiles `<<` straight to
@@ -2488,6 +2652,8 @@ class _DashboardState extends State<Dashboard> {
     settings.anchorTotalChainLengthM =
         prefs.getDouble('anchorTotalChainLengthM') ??
         settings.anchorTotalChainLengthM;
+    settings.anchorGpsToBowM =
+        prefs.getDouble('anchorGpsToBowM') ?? settings.anchorGpsToBowM;
     settings.batteryChemistryStart =
         prefs.getString('batteryChemistryStart') ??
         settings.batteryChemistryStart;
@@ -2638,11 +2804,48 @@ class _DashboardState extends State<Dashboard> {
         }
       }
     }
+    await _migrateAndValidateSettings(prefs);
     _repairCorruptedAnchorDroppedAt();
     _migrateLegacyTempAlarmTargets();
     _applyWakelock();
     _applyPhoneHeelSetting();
     unawaited(_refreshPressureTrendFromInflux());
+  }
+
+  static const _settingsSchemaVersion = 1;
+
+  Future<void> _migrateAndValidateSettings(SharedPreferences prefs) async {
+    final previousVersion = prefs.getInt('settingsSchemaVersion') ?? 0;
+    settings.port = settings.port.clamp(1, 65535);
+    if (!const {'auto', 'influx', 'sk'}.contains(settings.historySource)) {
+      settings.historySource = 'auto';
+    }
+    if (!const {'dia', 'noche', 'auto'}.contains(settings.brightnessMode)) {
+      settings.brightnessMode = 'dia';
+    }
+    settings.aisCpaMaxNm = settings.aisCpaMaxNm.clamp(0.1, 100).toDouble();
+    settings.aisTcpaMaxMin = settings.aisTcpaMaxMin.clamp(1, 240).toDouble();
+    settings.alarmAisCpaNm = settings.alarmAisCpaNm.clamp(0.05, 50).toDouble();
+    settings.alarmAisTcpaMin = settings.alarmAisTcpaMin
+        .clamp(1, 120)
+        .toDouble();
+    settings.alarmAnchorDepthMarginM = settings.alarmAnchorDepthMarginM
+        .clamp(0.1, 100)
+        .toDouble();
+    settings.alarmAnchorWindKn = settings.alarmAnchorWindKn
+        .clamp(1, 150)
+        .toDouble();
+    settings.alarmAnchorGlitchJumpM = settings.alarmAnchorGlitchJumpM
+        .clamp(5, 1000)
+        .toDouble();
+    settings.anchorConfig.radiusM = settings.anchorConfig.radiusM
+        .clamp(3, 2000)
+        .toDouble();
+    settings.ntfyMinIntervalSec = settings.ntfyMinIntervalSec.clamp(10, 86400);
+    if (previousVersion < _settingsSchemaVersion) {
+      await prefs.setInt('settingsSchemaVersion', _settingsSchemaVersion);
+      await _saveSettings();
+    }
   }
 
   // One-time repair for damage done by a real bug shipped in 1.4.152 and
@@ -2700,6 +2903,7 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('settingsSchemaVersion', _settingsSchemaVersion);
     await prefs.setString('host', settings.host);
     await prefs.setInt('port', settings.port);
     await _writeCredential(
@@ -2842,6 +3046,7 @@ class _DashboardState extends State<Dashboard> {
       'anchorTotalChainLengthM',
       settings.anchorTotalChainLengthM,
     );
+    await prefs.setDouble('anchorGpsToBowM', settings.anchorGpsToBowM);
     await prefs.setString(
       'batteryChemistryStart',
       settings.batteryChemistryStart,
@@ -3247,6 +3452,28 @@ class _DashboardState extends State<Dashboard> {
           : null;
       if (mmsiStr != null && mmsiStr.isNotEmpty) {
         _selfMmsi = mmsiStr;
+        final canonicalKey = 'vessel:$mmsiStr';
+        final previousKey = _serverConfigKey;
+        if (previousKey != canonicalKey) {
+          // Persist what was associated with the access address/name before
+          // moving to the vessel identity. Local mDNS, LAN IP and Tailscale
+          // can now all resolve to the same per-boat configuration.
+          settings.sensorConfigJsonByHost[previousKey] = settings.sensorConfig
+              .toJson();
+          settings.anchorConfigJsonByHost[previousKey] = settings.anchorConfig
+              .toJson();
+          final canonicalSensor = settings.sensorConfigJsonByHost[canonicalKey];
+          final canonicalAnchor = settings.anchorConfigJsonByHost[canonicalKey];
+          _currentServerConfigKey = canonicalKey;
+          if (canonicalSensor != null) {
+            settings.sensorConfig = SensorConfig.fromJson(canonicalSensor);
+          }
+          if (canonicalAnchor != null) {
+            settings.anchorConfig = AnchorConfig.fromJson(canonicalAnchor);
+          }
+          await _saveSettings();
+          if (mounted) setState(() {});
+        }
         // In case the race already inserted a ghost entry for our own
         // ship into _aisTargets before this resolved.
         _aisTargets.removeWhere((k, t) => _isOwnShipTarget(k, t));
@@ -3412,11 +3639,13 @@ class _DashboardState extends State<Dashboard> {
       // server still retained this device's valid armed state. Leave enough
       // time for a retained replay (which Signal K may split by path) to
       // repair local state before publishing anything back over it.
-      unawaited(Future.delayed(const Duration(seconds: 5), () {
-        if (myGeneration == _connectGeneration) {
-          unawaited(_publishAnchorDelta());
-        }
-      }));
+      unawaited(
+        Future.delayed(const Duration(seconds: 5), () {
+          if (myGeneration == _connectGeneration) {
+            unawaited(_publishAnchorDelta());
+          }
+        }),
+      );
       unawaited(_syncOwnAnchorPluginConfig());
       _syncAnchorPublishTimer();
       // A fresh connection always starts unsubscribed from AIS — re-derive
@@ -3461,6 +3690,7 @@ class _DashboardState extends State<Dashboard> {
       'navigation.speedThroughWater',
       'navigation.headingTrue',
       'navigation.headingMagnetic',
+      'navigation.magneticVariation',
       'navigation.courseOverGroundTrue',
       'navigation.attitude',
       'navigation.attitude.roll',
@@ -3493,6 +3723,7 @@ class _DashboardState extends State<Dashboard> {
       'electrical.batteries.bowthruster.temperature',
       'electrical.venus.dcPower',
       'navigation.anchor.state',
+      'navigation.anchor.rewindState',
       'navigation.anchor.stateChangedAt',
       'navigation.anchor.position',
       'navigation.anchor.watchZone',
@@ -3644,7 +3875,7 @@ class _DashboardState extends State<Dashboard> {
         if (isSelf) {
           changed = _routeValue(path, item['value'], dataTime) || changed;
         } else if (_aisSubscribed) {
-          _routeAisValue(context, path, item['value']);
+          _routeAisValue(context, path, item['value'], dataTime);
           aisChanged = true;
         }
       }
@@ -3657,6 +3888,8 @@ class _DashboardState extends State<Dashboard> {
       }
       setState(() {
         if (changed) {
+          if (!signalK.connected) unawaited(_recordEvent('SK_CONNECTED'));
+          _reconnectAttempt = 0;
           signalK.connected = true;
           signalK.status = 'Signal K';
           signalK.lastUpdate = DateTime.now();
@@ -3666,21 +3899,30 @@ class _DashboardState extends State<Dashboard> {
     if (changed) unawaited(_syncAlarmSound());
   }
 
-  void _routeAisValue(String context, String path, dynamic value) {
+  void _routeAisValue(
+    String context,
+    String path,
+    dynamic value,
+    DateTime? dataTime,
+  ) {
     final t = _aisTargets.putIfAbsent(context, () => AisTarget(context));
-    t.lastUpdate = DateTime.now();
+    final ts = dataTime ?? DateTime.now();
+    t.lastUpdate = ts;
     final n = _num(value);
     switch (path) {
       case 'navigation.position':
         if (value is Map) {
           t.lat = _num(value['latitude']);
           t.lon = _num(value['longitude']);
+          t.positionUpdate = ts;
           t.recordTrackPoint();
         }
       case 'navigation.courseOverGroundTrue':
         t.cogDeg = n == null ? null : n * 57.2957795;
+        t.cogUpdate = ts;
       case 'navigation.speedOverGround':
         t.sogKn = n == null ? null : n * 1.94384;
+        t.sogUpdate = ts;
       case 'mmsi':
         t.mmsi = value?.toString();
         // Learning this target's mmsi is what can reveal — after the
@@ -3695,13 +3937,26 @@ class _DashboardState extends State<Dashboard> {
       // when installed — see [[project_rewind_android]] for the on-boat plugin discovery notes.
       case 'navigation.closestApproach.distance':
         t.pluginCpaNm = n == null ? null : n / 1852.0;
-        t.pluginCpaUpdate = DateTime.now();
+        t.pluginCpaDistanceUpdate = ts;
       case 'navigation.closestApproach.timeTo':
         t.pluginTcpaMin = n == null ? null : n / 60.0;
-        t.pluginCpaUpdate = DateTime.now();
+        t.pluginTcpaUpdate = ts;
       case 'navigation.closestApproach.bearing':
         t.pluginCpaBearingDeg = n == null ? null : n * 57.2957795;
-        t.pluginCpaUpdate = DateTime.now();
+        t.pluginCpaBearingUpdate = ts;
+    }
+    final pluginTimes = [
+      t.pluginCpaDistanceUpdate,
+      t.pluginTcpaUpdate,
+      t.pluginCpaBearingUpdate,
+    ].whereType<DateTime>().toList();
+    if (pluginTimes.length == 3) {
+      pluginTimes.sort();
+      t.pluginCpaUpdate =
+          pluginTimes.last.difference(pluginTimes.first) <=
+              const Duration(seconds: 10)
+          ? pluginTimes.last
+          : null;
     }
   }
 
@@ -3808,6 +4063,7 @@ class _DashboardState extends State<Dashboard> {
           final newLon = _num(value['longitude']);
           signalK.latitude = newLat;
           signalK.longitude = newLon;
+          signalK.positionUpdate = ts;
           _ownTrack.add(newLat, newLon);
           if (hadNoPos &&
               newLat != null &&
@@ -3836,6 +4092,9 @@ class _DashboardState extends State<Dashboard> {
         // same pragmatic approach as the existing COG fallback elsewhere.
         signalK.headingMagneticDeg = n == null ? null : n * 57.2957795;
         signalK.headingMagneticDegUpdate = ts;
+      case 'navigation.magneticVariation':
+        signalK.magneticVariationDeg = n == null ? null : n * 57.2957795;
+        signalK.magneticVariationUpdate = ts;
       case 'navigation.courseOverGroundTrue':
         signalK.cogTrueDeg = n == null ? null : n * 57.2957795;
         signalK.cogTrueDegUpdate = ts;
@@ -3880,13 +4139,27 @@ class _DashboardState extends State<Dashboard> {
         signalK.awsKn = n == null ? null : n * 1.94384;
         _dAws = _awsDamp.linear(signalK.awsKn);
         _awsHistory.add(signalK.awsKn);
+        signalK.awsUpdate = ts;
       case 'environment.wind.angleApparent':
         signalK.awaDeg = n == null ? null : n * 57.2957795;
         _dAwa = _awaDamp.angle(signalK.awaDeg);
+        signalK.awaUpdate = ts;
       case 'environment.wind.angleTrueWater':
-      case 'environment.wind.angleTrueGround':
-        signalK.twaDeg = n == null ? null : n * 57.2957795;
+        signalK.twaWaterDeg = n == null ? null : n * 57.2957795;
+        signalK.twaDeg = signalK.twaWaterDeg;
         _dTwa = _twaDamp.angle(signalK.twaDeg);
+        signalK.twaWaterUpdate = ts;
+        signalK.twaUpdate = ts;
+      case 'environment.wind.angleTrueGround':
+        signalK.twaGroundDeg = n == null ? null : n * 57.2957795;
+        signalK.twaGroundUpdate = ts;
+        // True-water is the sailing/instrument convention. Ground is an
+        // explicit fallback only when water-referenced TWA is unavailable.
+        if (!_timestampFresh(signalK.twaWaterUpdate)) {
+          signalK.twaDeg = signalK.twaGroundDeg;
+          _dTwa = _twaDamp.angle(signalK.twaDeg);
+          signalK.twaUpdate = ts;
+        }
       case 'environment.wind.directionTrue':
         // Spec is 0..2π, but some sources (plugins deriving TWD from
         // heading+TWA) emit a signed radian in -π..π instead — normalize so
@@ -3902,10 +4175,12 @@ class _DashboardState extends State<Dashboard> {
         final dampedTwd = _twdDamp.angle(signalK.twdDeg);
         _dTwd = dampedTwd == null ? null : normalize360(dampedTwd);
         _twdShiftHistory.add(_dTwd);
+        signalK.twdUpdate = ts;
       case 'environment.wind.speedTrue':
         signalK.twsKn = n == null ? null : n * 1.94384;
         _dTws = _twsDamp.linear(signalK.twsKn);
         _twsHistory.add(signalK.twsKn);
+        signalK.twsUpdate = ts;
       case 'environment.water.temperature':
         signalK.waterTempK = n;
       case 'environment.outside.temperature':
@@ -3913,7 +4188,8 @@ class _DashboardState extends State<Dashboard> {
       case 'environment.outside.humidity':
         signalK.outsideHumidity = n == null ? null : n * 100;
       case 'environment.outside.pressure':
-        signalK.outsidePressureHpa = n;
+        // Signal K uses Pa; every pressure label/trend in this app uses hPa.
+        signalK.outsidePressureHpa = n == null ? null : n / 100;
         _pressureHistory.add(signalK.outsidePressureHpa);
       case 'environment.interior.temperature':
         signalK.indoorTempK = n;
@@ -3987,6 +4263,7 @@ class _DashboardState extends State<Dashboard> {
     // started must not touch state belonging to that newer connection —
     // see the comment where this listener is wired up in _connectSignalK.
     if (!mounted || generation != _connectGeneration) return;
+    unawaited(_recordEvent('SK_ERROR', error.runtimeType.toString()));
     _scheduleReconnect();
     _debounceDisconnected('SK espera');
   }
@@ -3999,6 +4276,7 @@ class _DashboardState extends State<Dashboard> {
     // Same stale-generation guard as _onSignalKError — closing the OLD
     // channel's sink in _connectSignalK triggers exactly this callback.
     if (!mounted || generation != _connectGeneration) return;
+    unawaited(_recordEvent('SK_DISCONNECTED'));
     _scheduleReconnect();
     _debounceDisconnected('SK desconectado');
   }
@@ -4020,7 +4298,16 @@ class _DashboardState extends State<Dashboard> {
 
   void _scheduleReconnect() {
     reconnectTimer?.cancel();
-    reconnectTimer = Timer(const Duration(seconds: 5), _connectSignalK);
+    final exponent = math.min(_reconnectAttempt, 5);
+    final baseSeconds = math.min(60, 2 * (1 << exponent));
+    _reconnectAttempt++;
+    // Small jitter prevents several panels on the same boat reconnecting in
+    // lockstep after the server or access point restarts.
+    final jitterMs = math.Random().nextInt(1000);
+    reconnectTimer = Timer(
+      Duration(seconds: baseSeconds, milliseconds: jitterMs),
+      _connectSignalK,
+    );
   }
 
   // ─── DEMO mode: synthetic data with plausible oscillation, no server needed ──
@@ -4087,6 +4374,12 @@ class _DashboardState extends State<Dashboard> {
       signalK.lastUpdate = DateTime.now();
       signalK.navUpdate = DateTime.now();
       signalK.windUpdate = DateTime.now();
+      signalK.positionUpdate = signalK.navUpdate;
+      signalK.awsUpdate = signalK.windUpdate;
+      signalK.awaUpdate = signalK.windUpdate;
+      signalK.twaUpdate = signalK.windUpdate;
+      signalK.twsUpdate = signalK.windUpdate;
+      signalK.twdUpdate = signalK.windUpdate;
 
       final hadNoPos = signalK.latitude == null;
       // "en las pruebas no esta guiñando porque no cambias rumbo" (reported
@@ -4596,20 +4889,24 @@ class _DashboardState extends State<Dashboard> {
 
   Future<void> _loadWeather({bool force = false}) async {
     if (loadingWeather) return;
-    // Reuse the last successful fetch (possibly restored from disk on a fresh
-    // app launch) if it's under 30 min old — avoids re-hitting Open-Meteo's
-    // rate limit every time the app restarts.
-    if (!force && weather.updated != null && weather.error == null) {
-      final cacheFresh =
-          DateTime.now().difference(weather.updated!).inMinutes < 30;
-      final marineRangeOk = weather.marine.length >= _marineMaxHour.round();
-      if (cacheFresh && marineRangeOk) return;
-    }
     final lat = _weatherLat ?? (kIsWeb ? kDefaultWeatherLat : null);
     final lon = _weatherLon ?? (kIsWeb ? kDefaultWeatherLon : null);
     if (lat == null || lon == null) {
       if (mounted) setState(() => weather.error = 'Sin posición GPS');
       return;
+    }
+    // A fresh cache from a previous anchorage must not be reused after the
+    // boat has moved. Roughly 0.01° is about one kilometre at mid latitudes.
+    if (!force && weather.updated != null && weather.error == null) {
+      final cacheFresh =
+          DateTime.now().difference(weather.updated!).inMinutes < 30;
+      final marineRangeOk = weather.marine.length >= _marineMaxHour.round();
+      final sameArea =
+          weather.latitude != null &&
+          weather.longitude != null &&
+          (weather.latitude! - lat).abs() < 0.01 &&
+          (weather.longitude! - lon).abs() < 0.01;
+      if (cacheFresh && marineRangeOk && sameArea) return;
     }
     loadingWeather = true;
     try {
@@ -4632,13 +4929,20 @@ class _DashboardState extends State<Dashboard> {
         'timeformat': 'unixtime',
         'forecast_hours': '72',
       });
-      final forecastResponse = await http
-          .get(forecastUri)
-          .timeout(const Duration(seconds: 10));
-      final marineResponse = await http
-          .get(marineUri)
-          .timeout(const Duration(seconds: 10));
-      final place = await _reverseGeocode(lat, lon);
+      final results = await Future.wait<Object>([
+        http.get(forecastUri).timeout(const Duration(seconds: 10)),
+        http.get(marineUri).timeout(const Duration(seconds: 10)),
+        _reverseGeocode(lat, lon),
+      ]);
+      final forecastResponse = results[0] as http.Response;
+      final marineResponse = results[1] as http.Response;
+      final place = results[2] as String;
+      if (forecastResponse.statusCode != 200) {
+        throw Exception('Previsión HTTP ${forecastResponse.statusCode}');
+      }
+      if (marineResponse.statusCode != 200) {
+        throw Exception('Mar HTTP ${marineResponse.statusCode}');
+      }
       final forecastDoc =
           jsonDecode(forecastResponse.body) as Map<String, dynamic>;
       final marineDoc = jsonDecode(marineResponse.body) as Map<String, dynamic>;
@@ -4650,6 +4954,8 @@ class _DashboardState extends State<Dashboard> {
       if (!mounted) return;
       setState(() {
         weather.error = null;
+        weather.latitude = lat;
+        weather.longitude = lon;
         weather.place = place;
         weather.summary
           ..clear()
@@ -4978,6 +5284,11 @@ class _DashboardState extends State<Dashboard> {
     return u != null && DateTime.now().difference(u) < _navWindStaleAfter;
   }
 
+  bool _timestampFresh(
+    DateTime? updatedAt, [
+    Duration staleAfter = _navWindStaleAfter,
+  ]) => updatedAt != null && DateTime.now().difference(updatedAt) < staleAfter;
+
   // Signal K simply stops emitting navigation.course.calcValues.velocityMadeGood
   // when there's no active route — staleness here means "no waypoint", not
   // "sensor died", but the same freshness check works for both.
@@ -4987,7 +5298,9 @@ class _DashboardState extends State<Dashboard> {
   }
 
   double? _fresh(double? v) => _navFresh ? v : null;
-  double? _freshWind(double? v) => _windFresh ? v : null;
+  double? _freshWind(double? v, [DateTime? updatedAt]) => updatedAt == null
+      ? (_windFresh ? v : null)
+      : (_timestampFresh(updatedAt) ? v : null);
 
   // SOG/STW/heading/COG each need their OWN freshness, not the shared
   // navUpdate _fresh() above uses — that timestamp is bumped by *any*
@@ -4998,10 +5311,35 @@ class _DashboardState extends State<Dashboard> {
   // per-field-timestamp pattern.
   double? get _freshHeading =>
       _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate) ??
-      _freshEngine(
-        signalK.headingMagneticDeg,
-        signalK.headingMagneticDegUpdate,
-      );
+      (() {
+        final magnetic = _freshEngine(
+          signalK.headingMagneticDeg,
+          signalK.headingMagneticDegUpdate,
+        );
+        if (magnetic == null) return null;
+        final variation = _freshEngine(
+          signalK.magneticVariationDeg,
+          signalK.magneticVariationUpdate,
+        );
+        return normalize360(magnetic + (variation ?? 0));
+      })();
+
+  String get _headingSourceLabel =>
+      _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate) != null
+      ? 'Verdadero'
+      : (_freshEngine(
+                  signalK.headingMagneticDeg,
+                  signalK.headingMagneticDegUpdate,
+                ) !=
+                null
+            ? (_freshEngine(
+                        signalK.magneticVariationDeg,
+                        signalK.magneticVariationUpdate,
+                      ) !=
+                      null
+                  ? 'Magnético + variación'
+                  : 'Magnético (sin variación)')
+            : 'Sin rumbo');
   double? get _freshCog =>
       _freshEngine(signalK.cogTrueDeg, signalK.cogTrueDegUpdate);
   double? get _freshSog => _freshEngine(signalK.sogKn, signalK.sogKnUpdate);
@@ -5028,16 +5366,32 @@ class _DashboardState extends State<Dashboard> {
   void _goToTab(String id) {
     final i = _pageIds.indexOf(id);
     if (i < 0) return;
+    _selectPage(i);
+  }
+
+  void _selectPage(int i) {
+    final previous = page;
     _onPageChange(i);
-    _pageController.animateToPage(
-      i,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-    );
+    if ((i - previous).abs() <= 1) {
+      _pageController.animateToPage(
+        i,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    } else {
+      // A long animation constructs every intermediate page, including
+      // maps/WebViews the user never selected. Jumping distant tabs is both
+      // faster and avoids unnecessary native resources.
+      _pageController.jumpToPage(i);
+    }
   }
 
   void _onPageChange(int i) {
-    setState(() => page = i);
+    final ids = _pageIds;
+    setState(() {
+      page = i;
+      if (i >= 0 && i < ids.length) _selectedPageId = ids[i];
+    });
     _syncAisSubscription();
     _navHideTimer?.cancel();
     if (_autoHidesHeader) {
@@ -5077,6 +5431,16 @@ class _DashboardState extends State<Dashboard> {
       ('AIS', Icons.radar, _aisPage()),
       ('CFG', Icons.tune, _settingsPage()),
     ];
+    final stableIndex = pages.indexWhere(
+      (entry) => entry.$1 == _selectedPageId,
+    );
+    final desiredPage = stableIndex < 0 ? 0 : stableIndex;
+    if (page != desiredPage) {
+      page = desiredPage;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_pageController.hasClients) _pageController.jumpToPage(desiredPage);
+      });
+    }
 
     final sysDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
     final useNight =
@@ -5125,14 +5489,7 @@ class _DashboardState extends State<Dashboard> {
                                 alarmPageIds: _alarmPageIds,
                                 alarmCount: _activeAlarms.length,
                                 onBellTap: () => _showAlarmsList(context),
-                                onSelect: (i) {
-                                  _onPageChange(i);
-                                  _pageController.animateToPage(
-                                    i,
-                                    duration: const Duration(milliseconds: 300),
-                                    curve: Curves.easeInOut,
-                                  );
-                                },
+                                onSelect: _selectPage,
                               ),
                             ),
                     ),
@@ -5250,7 +5607,7 @@ class _DashboardState extends State<Dashboard> {
     // TWD is a true compass bearing, never negative — normalize360
     // defensively in case the upstream value ever arrives as a small
     // signed delta instead of a proper 0-360 heading.
-    final twdForDial = switch (_freshWind(_dTwd)) {
+    final twdForDial = switch (_freshWind(_dTwd, signalK.twdUpdate)) {
       null => null,
       final v => normalize360(v),
     };
@@ -5258,12 +5615,13 @@ class _DashboardState extends State<Dashboard> {
     final pages = <Widget>[
       _windClassicGrid(),
       PremiumWindPanel(
-        awaDeg: _freshWind(_dAwa),
+        awaDeg: _freshWind(_dAwa, signalK.awaUpdate),
         twaDeg: _freshWind(
           _dTwa ?? relativeWindAngle(_dTwd, _freshHeading ?? _freshCog),
+          _dTwa != null ? signalK.twaUpdate : signalK.twdUpdate,
         ),
-        awsKn: _freshWind(_dAws),
-        twsKn: _freshWind(_dTws),
+        awsKn: _freshWind(_dAws, signalK.awsUpdate),
+        twsKn: _freshWind(_dTws, signalK.twsUpdate),
         awsGustKn: _awsHistory.statisticalGustWithAge()?.value,
         twsGustKn: _twsHistory.statisticalGustWithAge()?.value,
         twdDeg: twdForDial,
@@ -5822,6 +6180,7 @@ class _DashboardState extends State<Dashboard> {
           title: 'Rumbo',
           value: directionDeg(heading),
           unit: '°',
+          subtitle: _headingSourceLabel,
           color: cText,
           graphMetrics: const [mHeading],
         );
@@ -5924,7 +6283,7 @@ class _DashboardState extends State<Dashboard> {
           color: cText,
         );
       case 'vmgWind':
-        final twaForVmg = _freshWind(_dTwa);
+        final twaForVmg = _freshWind(_dTwa, signalK.twaUpdate);
         final speedForVmg = stw ?? sog;
         final vmgWind = (twaForVmg != null && speedForVmg != null)
             ? speedForVmg * math.cos(twaForVmg * math.pi / 180)
@@ -5932,7 +6291,7 @@ class _DashboardState extends State<Dashboard> {
         // Point of sail is named off AWA, not TWA — falls back to TWA only
         // if AWA specifically isn't available, so the label doesn't just
         // vanish when VMG itself (computed from TWA) is still showing.
-        final awaForVmg = _freshWind(_dAwa) ?? twaForVmg;
+        final awaForVmg = _freshWind(_dAwa, signalK.awaUpdate) ?? twaForVmg;
         return NavCardData(
           id: id,
           title: 'VMG viento',
@@ -5952,8 +6311,8 @@ class _DashboardState extends State<Dashboard> {
           color: vmgRoute == null ? cMuted : cGreen,
         );
       case 'appWind':
-        final aws = _freshWind(_dAws);
-        final awa = _freshWind(_dAwa);
+        final aws = _freshWind(_dAws, signalK.awsUpdate);
+        final awa = _freshWind(_dAwa, signalK.awaUpdate);
         return NavCardData(
           id: id,
           title: 'Viento aparente',
@@ -6924,23 +7283,23 @@ class _DashboardState extends State<Dashboard> {
   // instead, and the label shrinks + the label-value gap grows so it
   // doesn't read as glued together. Tablet keeps the original sizing.
   Widget _premiumAisNumber(String label, String value, Color color) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 10),
+    padding: EdgeInsets.symmetric(horizontal: _isCompactPremium ? 6 : 10),
     child: Column(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
+      mainAxisSize: _isCompactPremium ? MainAxisSize.max : MainAxisSize.min,
       children: [
         Text(
           label,
           style: TextStyle(
             color: color,
-            fontSize: _isCompactPremium ? 16 : 24,
+            fontSize: _isCompactPremium ? 13 : 24,
             fontWeight: FontWeight.w900,
           ),
         ),
-        SizedBox(height: _isCompactPremium ? 10 : 4),
+        SizedBox(height: _isCompactPremium ? 2 : 4),
         if (_isCompactPremium)
-          Flexible(
+          Expanded(
             child: FittedBox(
               fit: BoxFit.scaleDown,
               alignment: Alignment.centerLeft,
@@ -7177,8 +7536,8 @@ class _DashboardState extends State<Dashboard> {
   // meaningful apparent-wind angle relative to travel, so the dial is
   // dead space; only the AWS/AWA numbers are useful there.
   Widget _premiumWindCard(NavCardData data, {bool showGauge = true}) {
-    final aws = _freshWind(_dAws);
-    final awa = _freshWind(_dAwa);
+    final aws = _freshWind(_dAws, signalK.awsUpdate);
+    final awa = _freshWind(_dAwa, signalK.awaUpdate);
     // Absolute value + side arrow (see _premiumWindNumber) instead of a
     // signed angle — matches the VNT screen's AWA card. "°" goes through
     // the same unit slot as AWS's "kt" now (was embedded in the value
@@ -7651,12 +8010,13 @@ class _DashboardState extends State<Dashboard> {
   Widget _windClassicGrid() {
     final computedTwa = _freshWind(
       _dTwa ?? relativeWindAngle(_dTwd, _freshHeading ?? _freshCog),
+      _dTwa != null ? signalK.twaUpdate : signalK.twdUpdate,
     );
-    final aws = _freshWind(_dAws),
-        awa = _freshWind(_dAwa),
+    final aws = _freshWind(_dAws, signalK.awsUpdate),
+        awa = _freshWind(_dAwa, signalK.awaUpdate),
         sog = _freshSog,
-        tws = _freshWind(_dTws),
-        twd = _freshWind(_dTwd);
+        tws = _freshWind(_dTws, signalK.twsUpdate),
+        twd = _freshWind(_dTwd, signalK.twdUpdate);
     final h = settings.effectiveInfluxHost;
     final b = settings.influxBucket;
     final ab = settings.influxArchiveBucket;
@@ -8284,7 +8644,7 @@ class _DashboardState extends State<Dashboard> {
                       Expanded(
                         child: ModelWindCompassCard(
                           forecast: forecast,
-                          tws: _freshWind(_dTws),
+                          tws: _freshWind(_dTws, signalK.twsUpdate),
                           zoom: _showZoom,
                         ),
                       ),
@@ -8767,6 +9127,9 @@ class _DashboardState extends State<Dashboard> {
       config: settings.anchorConfig,
       onConfigChanged: (cfg) {
         setState(() => settings.anchorConfig = cfg);
+        unawaited(
+          _recordEvent('ANCHOR_STATE_SAVED', cfg.armed ? 'armed' : 'off'),
+        );
         unawaited(_saveSettings());
         unawaited(_publishAnchorDelta());
         _syncAnchorPublishTimer();
@@ -8780,8 +9143,13 @@ class _DashboardState extends State<Dashboard> {
       // reflecting that the position was no longer live. Reported live
       // 2026-09-04. Mirrors the exact same guard _isOutsideAnchorZone
       // already uses for the alarm engine itself.
-      ownLat: signalK.connected ? signalK.latitude : null,
-      ownLon: signalK.connected ? signalK.longitude : null,
+      ownLat: signalK.connected && _timestampFresh(signalK.positionUpdate)
+          ? signalK.latitude
+          : null,
+      ownLon: signalK.connected && _timestampFresh(signalK.positionUpdate)
+          ? signalK.longitude
+          : null,
+      ownPositionUpdatedAt: signalK.positionUpdate,
       skConnected: signalK.connected,
       // Deliberately just heading, not the usual `?? _freshCog` fallback used
       // elsewhere — the anchor screen's own fallback (bow pointing at the
@@ -8797,9 +9165,11 @@ class _DashboardState extends State<Dashboard> {
       headingDeg: _freshHeading ?? signalK.headingTrueDeg,
       sogKn: _freshSog,
       depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
-      awaDeg: _freshWind(_dAwa),
-      awsKn: _freshWind(_dAws),
-      twdDeg: _freshWind(_dTwd),
+      bowRollerHeightM: settings.anchorBowRollerHeightM,
+      gpsToBowM: settings.anchorGpsToBowM,
+      awaDeg: _freshWind(_dAwa, signalK.awaUpdate),
+      awsKn: _freshWind(_dAws, signalK.awsUpdate),
+      twdDeg: _freshWind(_dTwd, signalK.twdUpdate),
       windMeanKn: windDebug.meanKn,
       windStddevKn: windDebug.stddevKn,
       windPeak3sKn: windDebug.peak3sKn,
@@ -8825,9 +9195,10 @@ class _DashboardState extends State<Dashboard> {
         setState(() => settings.gpsFallbackConsent = allow);
         unawaited(_saveSettings());
       },
-      onEffectivePositionChanged: (lat, lon) {
+      onEffectivePositionChanged: (lat, lon, updatedAt) {
         _anchorEffectiveLat = lat;
         _anchorEffectiveLon = lon;
+        _anchorEffectivePositionUpdatedAt = updatedAt;
         // "cuando pierde la posicion y la coge del movil. si recupera la
         // posicion de signalk no deberia perderse la traza del fondeo"
         // (reported live 2026-09-05) — _ownTrack (the swing-track buffer
@@ -8873,6 +9244,7 @@ class _DashboardState extends State<Dashboard> {
       cfg.radiusM,
       cfg.chainOutM,
       _freshEngine(signalK.depthM, signalK.depthMUpdate),
+      rollerHeightM: settings.anchorBowRollerHeightM,
     );
     showDialog<void>(
       context: context,
@@ -8933,8 +9305,8 @@ class _DashboardState extends State<Dashboard> {
     ownHeadingDeg: _freshHeading,
     ownCogDeg: _freshCog,
     ownSogKn: _freshSog,
-    ownLat: signalK.latitude,
-    ownLon: signalK.longitude,
+    ownLat: _timestampFresh(signalK.positionUpdate) ? signalK.latitude : null,
+    ownLon: _timestampFresh(signalK.positionUpdate) ? signalK.longitude : null,
     shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
   );
 
@@ -9074,6 +9446,8 @@ class _DashboardState extends State<Dashboard> {
         );
       }
       settings.authBase64 = authController.text.trim();
+      settings.skUsername = skUsernameController.text.trim();
+      settings.skPassword = skPasswordController.text;
       settings.influxHost = influxHostController.text.trim();
       settings.influxOrg = influxOrgController.text.trim().isEmpty
           ? influxOrgDefault
@@ -9095,6 +9469,140 @@ class _DashboardState extends State<Dashboard> {
           const SnackBar(content: Text('Configuración guardada.')),
         );
       }
+    }
+
+    Future<void> testConnection() async {
+      final host = hostController.text.trim();
+      final port = int.tryParse(portController.text.trim());
+      if (host.isEmpty || port == null || port < 1 || port > 65535) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Host o puerto no válidos.')),
+        );
+        return;
+      }
+      final results = <String>[];
+      try {
+        final root = await http
+            .get(Uri.http('$host:$port', '/signalk'))
+            .timeout(const Duration(seconds: 6));
+        results.add(
+          root.statusCode < 400
+              ? '✓ Servidor accesible'
+              : '✗ Servidor: HTTP ${root.statusCode}',
+        );
+      } catch (e) {
+        results.add('✗ Servidor: ${friendlyApiError(e)}');
+      }
+      final user = skUsernameController.text.trim();
+      final password = skPasswordController.text;
+      if (user.isEmpty || password.isEmpty) {
+        results.add('— Escritura: sin usuario/contraseña');
+      } else {
+        try {
+          final auth = await http
+              .post(
+                Uri.http('$host:$port', '/signalk/v1/auth/login'),
+                headers: const {'Content-Type': 'application/json'},
+                body: jsonEncode({'username': user, 'password': password}),
+              )
+              .timeout(const Duration(seconds: 6));
+          results.add(
+            auth.statusCode == 200
+                ? '✓ Sesión de escritura válida'
+                : '✗ Escritura: HTTP ${auth.statusCode}',
+          );
+        } catch (e) {
+          results.add('✗ Escritura: ${friendlyApiError(e)}');
+        }
+      }
+      try {
+        final history = await http
+            .get(Uri.http('$host:$port', '/signalk/v2/api/history/_providers'))
+            .timeout(const Duration(seconds: 6));
+        results.add(
+          history.statusCode < 400
+              ? '✓ API de histórico disponible'
+              : '— Histórico no disponible (HTTP ${history.statusCode})',
+        );
+      } catch (_) {
+        results.add('— Histórico no comprobable');
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Prueba de conexión'),
+          content: Text(results.join('\n')),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Future<void> testHistory() async {
+      List<GraphPoint> points = const [];
+      String source = settings.historySource;
+      String? failure;
+      Future<List<GraphPoint>> influx() => influxQuery(
+        host: influxHostController.text.trim().isEmpty
+            ? hostController.text.trim()
+            : influxHostController.text.trim(),
+        org: influxOrgController.text.trim(),
+        token: influxTokenController.text.trim(),
+        def: mSog,
+        fluxRange: '-1h',
+        aggEvery: '1m',
+        bucket: bucketController.text.trim(),
+      );
+      Future<List<GraphPoint>> sk() => skHistoryQuery(
+        host: hostController.text.trim(),
+        port: int.tryParse(portController.text.trim()) ?? settings.port,
+        authBase64: authController.text.trim(),
+        def: mSog,
+        range: const Duration(hours: 1),
+        resolution: const Duration(minutes: 1),
+      );
+      try {
+        if (source == 'influx') {
+          points = await influx();
+        } else if (source == 'sk') {
+          points = await sk();
+        } else {
+          source = 'InfluxDB';
+          try {
+            points = await influx();
+          } catch (_) {
+            source = 'Signal K History';
+            points = await sk();
+          }
+        }
+      } catch (e) {
+        failure = friendlyApiError(e);
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Prueba del histórico'),
+          content: Text(
+            failure != null
+                ? 'No disponible: $failure'
+                : points.isEmpty
+                ? '$source respondió correctamente, pero no hay muestras de SOG en la última hora.'
+                : '$source: ${points.length} muestras de SOG recibidas.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        ),
+      );
     }
 
     return DefaultTabController(
@@ -9193,8 +9701,7 @@ class _DashboardState extends State<Dashboard> {
                                     labelText: 'Host (o IP)',
                                     isDense: true,
                                   ),
-                                  onChanged: (v) =>
-                                      setSt(() => settings.host = v.trim()),
+                                  onChanged: (_) => setSt(() {}),
                                 ),
                                 gap,
                                 TextField(
@@ -9212,6 +9719,15 @@ class _DashboardState extends State<Dashboard> {
                                       icon: const Icon(Icons.save, size: 18),
                                       label: const Text('Guardar y reconectar'),
                                       onPressed: () => doSave(),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    OutlinedButton.icon(
+                                      icon: const Icon(
+                                        Icons.fact_check_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Probar'),
+                                      onPressed: testConnection,
                                     ),
                                     const SizedBox(width: 8),
                                     if (settings.host != Uri.base.host ||
@@ -9293,8 +9809,7 @@ class _DashboardState extends State<Dashboard> {
                                         'Host (o escribe una IP manualmente)',
                                     isDense: true,
                                   ),
-                                  onChanged: (v) =>
-                                      setSt(() => settings.host = v.trim()),
+                                  onChanged: (_) => setSt(() {}),
                                 ),
                                 gap,
                                 OutlinedButton.icon(
@@ -9426,6 +9941,15 @@ class _DashboardState extends State<Dashboard> {
                                   icon: const Icon(Icons.save, size: 18),
                                   label: const Text('Guardar y reconectar'),
                                   onPressed: () => doSave(),
+                                ),
+                                const SizedBox(width: 8),
+                                OutlinedButton.icon(
+                                  icon: const Icon(
+                                    Icons.fact_check_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Probar'),
+                                  onPressed: testConnection,
                                 ),
                                 const SizedBox(height: 16),
                                 const Text(
@@ -9735,8 +10259,7 @@ class _DashboardState extends State<Dashboard> {
                                       'Host (vacío = el mismo que Signal K)',
                                   isDense: true,
                                 ),
-                                onChanged: (v) =>
-                                    setSt(() => settings.influxHost = v.trim()),
+                                onChanged: (_) => setSt(() {}),
                               ),
                               gap,
                               TextField(
@@ -9745,8 +10268,7 @@ class _DashboardState extends State<Dashboard> {
                                   labelText: 'Org',
                                   isDense: true,
                                 ),
-                                onChanged: (v) =>
-                                    setSt(() => settings.influxOrg = v.trim()),
+                                onChanged: (_) => setSt(() {}),
                               ),
                               gap,
                               TextField(
@@ -9760,9 +10282,7 @@ class _DashboardState extends State<Dashboard> {
                                   isDense: true,
                                 ),
                                 obscureText: true,
-                                onChanged: (v) => setSt(
-                                  () => settings.influxToken = v.trim(),
-                                ),
+                                onChanged: (_) => setSt(() {}),
                               ),
                               gap,
                               TextField(
@@ -9772,9 +10292,7 @@ class _DashboardState extends State<Dashboard> {
                                   hintText: 'enjoy_raw',
                                   isDense: true,
                                 ),
-                                onChanged: (v) => setSt(
-                                  () => settings.influxBucket = v.trim(),
-                                ),
+                                onChanged: (_) => setSt(() {}),
                               ),
                               gap,
                               TextField(
@@ -9786,16 +10304,25 @@ class _DashboardState extends State<Dashboard> {
                                   helperMaxLines: 2,
                                   isDense: true,
                                 ),
-                                onChanged: (v) => setSt(
-                                  () => settings.influxArchiveBucket = v.trim(),
-                                ),
+                                onChanged: (_) => setSt(() {}),
                               ),
                             ],
                             const SizedBox(height: 12),
-                            FilledButton.icon(
-                              icon: const Icon(Icons.save, size: 18),
-                              label: const Text('Guardar configuración'),
-                              onPressed: () => doSave(),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                FilledButton.icon(
+                                  icon: const Icon(Icons.save, size: 18),
+                                  label: const Text('Guardar configuración'),
+                                  onPressed: () => doSave(),
+                                ),
+                                OutlinedButton.icon(
+                                  icon: const Icon(Icons.query_stats, size: 18),
+                                  label: const Text('Probar fuente'),
+                                  onPressed: testHistory,
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -9883,7 +10410,7 @@ class _DashboardState extends State<Dashboard> {
                                   horizontal: -2,
                                   vertical: -2,
                                 ),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.padded,
                               ),
                             ),
                             const SizedBox(height: 10),
@@ -9925,7 +10452,7 @@ class _DashboardState extends State<Dashboard> {
                                   horizontal: -2,
                                   vertical: -2,
                                 ),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.padded,
                               ),
                             ),
                             const SizedBox(height: 10),
@@ -9981,7 +10508,7 @@ class _DashboardState extends State<Dashboard> {
                                   horizontal: -2,
                                   vertical: -2,
                                 ),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.padded,
                               ),
                             ),
                             const SizedBox(height: 10),
@@ -10018,7 +10545,7 @@ class _DashboardState extends State<Dashboard> {
                                   horizontal: -2,
                                   vertical: -2,
                                 ),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                tapTargetSize: MaterialTapTargetSize.padded,
                               ),
                             ),
                             const SizedBox(height: 16),
@@ -10945,6 +11472,30 @@ class _DashboardState extends State<Dashboard> {
                                   unawaited(_saveSettings());
                                 },
                               ),
+                              _ThresholdRow(
+                                label: 'Distancia GPS a proa (roldana)',
+                                unit: 'm',
+                                value: settings.anchorGpsToBowM,
+                                min: 0,
+                                max: 25,
+                                divisions: 250,
+                                onChanged: (v) {
+                                  setSt(() => settings.anchorGpsToBowM = v);
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                'La posición GPS del barco suele ser la de la '
+                                'antena, no la de la roldana de proa — indica '
+                                'cuánto más adelante está la proa (a lo largo '
+                                'del eje del barco) para que el punto de '
+                                'fondeo y el radio de vigilancia sean más '
+                                'exactos. 0 si la antena está prácticamente '
+                                'en la proa.',
+                                style: TextStyle(fontSize: 11, color: cMuted),
+                              ),
                             ],
                           ),
                           SettingsGroup(
@@ -11109,6 +11660,8 @@ class _DashboardState extends State<Dashboard> {
                                               : 'sin comprobar'}',
                                           if (lastCrashInfo != null)
                                             'Último error:\n$lastCrashInfo',
+                                          if (_eventLog.isNotEmpty)
+                                            'Eventos recientes:\n${_eventLog.reversed.take(25).join('\n')}',
                                         ].join('\n');
                                         await Clipboard.setData(
                                           ClipboardData(text: report),
@@ -11197,6 +11750,23 @@ class _DashboardState extends State<Dashboard> {
                                 ),
                               ),
                             ],
+                            if (_eventLog.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              SettingsGroup(
+                                title: 'EVENTOS RECIENTES',
+                                icon: Icons.receipt_long_outlined,
+                                children: [
+                                  SelectableText(
+                                    _eventLog.reversed.take(12).join('\n'),
+                                    style: const TextStyle(
+                                      color: cMuted,
+                                      fontSize: 10,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
                             const SizedBox(height: 12),
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -11226,6 +11796,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         _dTws != null ? cCyan : cMuted,
                                         path: 'environment.wind.speedTrue',
+                                        updatedAt: signalK.twsUpdate,
                                       ),
                                       _diagRow(
                                         'TWA',
@@ -11234,6 +11805,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         _dTwa != null ? cCyan : cMuted,
                                         path: 'environment.wind.angleTrueWater',
+                                        updatedAt: signalK.twaUpdate,
                                       ),
                                       _diagRow(
                                         'AWS',
@@ -11242,6 +11814,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         _dAws != null ? cGreen : cMuted,
                                         path: 'environment.wind.speedApparent',
+                                        updatedAt: signalK.awsUpdate,
                                       ),
                                       _diagRow(
                                         'AWA',
@@ -11250,6 +11823,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         _dAwa != null ? cGreen : cMuted,
                                         path: 'environment.wind.angleApparent',
+                                        updatedAt: signalK.awaUpdate,
                                       ),
                                       _diagRow(
                                         'SOG',
@@ -11258,6 +11832,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         signalK.sogKn != null ? cGreen : cMuted,
                                         path: 'navigation.speedOverGround',
+                                        updatedAt: signalK.sogKnUpdate,
                                       ),
                                       _diagRow(
                                         'STW',
@@ -11266,6 +11841,7 @@ class _DashboardState extends State<Dashboard> {
                                             : '--',
                                         signalK.stwKn != null ? cGreen : cMuted,
                                         path: 'navigation.speedThroughWater',
+                                        updatedAt: signalK.stwKnUpdate,
                                       ),
                                       _diagRow(
                                         'Rumbo',
@@ -11276,6 +11852,9 @@ class _DashboardState extends State<Dashboard> {
                                             ? cText
                                             : cMuted,
                                         path: 'navigation.headingTrue',
+                                        updatedAt:
+                                            signalK.headingTrueDegUpdate ??
+                                            signalK.headingMagneticDegUpdate,
                                       ),
                                       _diagRow(
                                         'Profundidad',
@@ -11328,7 +11907,10 @@ class _DashboardState extends State<Dashboard> {
                                       _diagRow(
                                         'VMG viento',
                                         () {
-                                          final twaForVmg = _freshWind(_dTwa);
+                                          final twaForVmg = _freshWind(
+                                            _dTwa,
+                                            signalK.twaUpdate,
+                                          );
                                           final speedForVmg =
                                               _freshStw ?? _freshSog;
                                           final v =
@@ -11725,6 +12307,7 @@ class _DashboardState extends State<Dashboard> {
     String value,
     Color color, {
     String? path,
+    DateTime? updatedAt,
   }) {
     // A row whose path is a real, in-use one (not the "(sin configurar)"
     // placeholder some rows fall back to) but whose value still reads "--"
@@ -11763,7 +12346,9 @@ class _DashboardState extends State<Dashboard> {
                 message: path,
                 triggerMode: TooltipTriggerMode.tap,
                 child: Text(
-                  path,
+                  updatedAt == null
+                      ? path
+                      : '$path · ${_lastUpdateText(updatedAt)}',
                   style: const TextStyle(color: cMuted, fontSize: 12),
                   overflow: TextOverflow.ellipsis,
                 ),

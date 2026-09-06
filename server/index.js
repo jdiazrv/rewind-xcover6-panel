@@ -28,6 +28,7 @@ const https = require('https');
 const EARTH_RADIUS_M = 6371000;
 const OWN_SOURCE_PREFIX = 'rewind-panel-anchor';
 const ANCHOR_PATHS = [
+  'navigation.anchor.rewindState',
   'navigation.anchor.state',
   'navigation.anchor.position',
   'navigation.anchor.watchZone',
@@ -81,6 +82,10 @@ function isOutsideZone(dropLat, dropLon, lat, lon, zone) {
   const span = ((end - start) % 360 + 360) % 360;
   const rel = ((bearingDeg - start) % 360 + 360) % 360;
   return rel > span;
+}
+
+function acceptsRevision(currentRevision, incomingRevision) {
+  return Number.isFinite(incomingRevision) && incomingRevision >= currentRevision;
 }
 
 function sendNtfy(app, topic, title, body) {
@@ -184,6 +189,7 @@ module.exports = function (app) {
   let armedAtMs = null;
   let dropPosition = null; // {latitude, longitude}
   let zone = null; // {type, radius, startDeg?, endDeg?}
+  let latestOwnRevision = -1;
   // Every DISTINCT foreign source currently reporting itself armed — a
   // Set, not a single flag, so if two different third-party anchor
   // plugins both happen to be armed and one of them disarms, we correctly
@@ -204,6 +210,7 @@ module.exports = function (app) {
   const FOREIGN_SILENCE_TIMEOUT_MS = 5 * 60 * 1000;
   let lastNotifKey = null; // `${state}|${message}` — dedup only, not a lock
   let lastPushAt = 0;
+  let pushInFlight = false;
   // GPS glitch filter — mirrors lib/main.dart's own alarmAnchorFilterGlitches
   // (same GLITCH_JUMP_M default as its alarmAnchorGlitchJumpM). A single
   // implausible jump gets ignored rather than trusted as "the boat is now
@@ -271,9 +278,47 @@ module.exports = function (app) {
       const label = sourceLabelOf(update);
       const isOwn = label.startsWith(OWN_SOURCE_PREFIX);
       const isForeign = !isOwn && label !== '';
+      let appliedAtomicState = false;
       for (const { path, value } of update.values) {
         if (isOwn) {
-          if (path === 'navigation.anchor.state') {
+          if (path === 'navigation.anchor.rewindState') {
+            const revision = Number(value && value.revision);
+            const nextArmed = value && value.armed === true;
+            const nextPosition = value && value.position;
+            const nextZone = value && value.watchZone;
+            const complete =
+              !nextArmed ||
+              (nextPosition &&
+                Number.isFinite(Number(nextPosition.latitude)) &&
+                Number.isFinite(Number(nextPosition.longitude)) &&
+                nextZone &&
+                Number.isFinite(Number(nextZone.radius)) &&
+                Number(nextZone.radius) > 0);
+            if (
+              value &&
+              value.schemaVersion === 1 &&
+              acceptsRevision(latestOwnRevision, revision) &&
+              complete
+            ) {
+              const isNewRevision = revision > latestOwnRevision;
+              latestOwnRevision = revision;
+              appliedAtomicState = true;
+              const stateChanged = armed !== nextArmed;
+              armed = nextArmed;
+              dropPosition = nextArmed ? nextPosition : null;
+              zone = nextArmed ? nextZone : null;
+              if (stateChanged || isNewRevision) {
+                armedAtMs = Date.now();
+                lastGoodPosition = null;
+                pendingGlitch = null;
+              }
+              if (!nextArmed) clearAlarmIfAny('disarmed');
+            }
+          } else if (appliedAtomicState) {
+            // Legacy companions in this same update carry no independent
+            // revision; the atomic object above is authoritative.
+            continue;
+          } else if (path === 'navigation.anchor.state') {
             const nowArmed = value === 'on';
             if (nowArmed !== armed) {
               armed = nowArmed;
@@ -343,7 +388,15 @@ module.exports = function (app) {
         app.setPluginStatus('Watching for the REWIND app\'s anchor state');
       }
     }
-    if (!armed || foreignArmedSources.size > 0 || !dropPosition || !zone) {
+    if (!armed || foreignArmedSources.size > 0) {
+      return;
+    }
+    if (!dropPosition || !zone) {
+      app.setPluginError('Anchor watch armed but its position/watch zone is incomplete');
+      setNotification(
+        'alert',
+        'Vigilante de fondeo: configuración incompleta (sin ancla o zona)',
+      );
       return;
     }
     // 10s grace after arming/re-dropping — mirrors lib/main.dart's own
@@ -445,7 +498,7 @@ module.exports = function (app) {
     // loop. Verified real via external audit, fixed 2026-09-04.
     const minIntervalMs = 1000 * Math.max(10, Number(cfg.pushMinIntervalSec) || 60);
     const now = Date.now();
-    if (now - lastPushAt >= minIntervalMs) {
+    if (!pushInFlight && now - lastPushAt >= minIntervalMs) {
       // Fixed, plain-ASCII title — NOT interpolating the vessel name (or
       // the em dash) in here, since ntfy.sh's Title goes out as a raw HTTP
       // header and Node's http client rejects non-ASCII header content
@@ -464,13 +517,18 @@ module.exports = function (app) {
       // burned the same pushMinIntervalSec window as a real push, delaying
       // the next retry while the boat kept dragging. Audit finding,
       // verified 2026-09-05.
-      const delivered = await sendNtfy(
-        app,
-        cfg.ntfyTopic,
-        'REWIND Panel - Garreando',
-        `${vesselName}: ${message}\n(aviso del vigilante de respaldo, sin ningún dispositivo conectado)`,
-      );
-      if (delivered) lastPushAt = now;
+      pushInFlight = true;
+      try {
+        const delivered = await sendNtfy(
+          app,
+          cfg.ntfyTopic,
+          'REWIND Panel - Garreando',
+          `${vesselName}: ${message}\n(aviso del vigilante de respaldo, sin ningún dispositivo conectado)`,
+        );
+        if (delivered) lastPushAt = now;
+      } finally {
+        pushInFlight = false;
+      }
     }
   }
 
@@ -480,10 +538,12 @@ module.exports = function (app) {
     armedAtMs = null;
     dropPosition = null;
     zone = null;
+    latestOwnRevision = -1;
     foreignArmedSources.clear();
     foreignLastSeenMs.clear();
     lastNotifKey = null;
     lastPushAt = 0;
+    pushInFlight = false;
     lastGoodPosition = null;
     pendingGlitch = null;
 
@@ -520,3 +580,5 @@ module.exports = function (app) {
 
   return plugin;
 };
+
+module.exports._test = { bearingDistance, isOutsideZone, acceptsRevision };

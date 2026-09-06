@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,7 +13,9 @@ void main() {
     expect(find.text('Signal K'), findsNothing);
   });
 
-  testWidgets('PRON layout fits landscape phone size', (WidgetTester tester) async {
+  testWidgets('PRON layout fits landscape phone size', (
+    WidgetTester tester,
+  ) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -41,7 +45,9 @@ void main() {
     expect(find.byIcon(Icons.close), findsOneWidget);
   });
 
-  testWidgets('TNK overview and aggregate detail fit', (WidgetTester tester) async {
+  testWidgets('TNK overview and aggregate detail fit', (
+    WidgetTester tester,
+  ) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -77,5 +83,42 @@ void main() {
     expect(find.text('TWS'), findsOneWidget);
     expect(find.text('TWD'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  for (final size in const [
+    Size(640, 360),
+    Size(800, 360),
+    Size(915, 412),
+    Size(1280, 720),
+  ]) {
+    testWidgets('main navigation fits ${size.width}x${size.height}', (
+      WidgetTester tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(const RewindApp());
+      await tester.tap(find.text('VNT'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      await tester.drag(find.text('VNT'), const Offset(-900, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('CFG'));
+      await tester.pumpAndSettle();
+      expect(find.text('CONEXIÓN'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('main tabs expose labels and tap semantics', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const RewindApp());
+    final nav = tester.getSemantics(find.text('NAV'));
+    expect(nav.label, contains('NAV'));
+    expect(nav.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
   });
 }

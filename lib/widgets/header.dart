@@ -103,7 +103,7 @@ class _CollapsedHeaderBar extends StatelessWidget {
 }
 
 // ─── Header ───────────────────────────────────────────────────────────────────
-class _Header extends StatelessWidget {
+class _Header extends StatefulWidget {
   const _Header({
     required this.pages,
     required this.selected,
@@ -123,38 +123,91 @@ class _Header extends StatelessWidget {
   final int alarmCount;
   final VoidCallback? onBellTap;
 
+  @override
+  State<_Header> createState() => _HeaderState();
+}
+
+class _HeaderState extends State<_Header> {
+  final ScrollController _tabsController = ScrollController();
+  final Map<int, GlobalKey> _tabKeys = {};
+
+  void _revealSelected() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final context = _tabKeys[widget.selected]?.currentContext;
+      if (context != null) {
+        Scrollable.ensureVisible(
+          context,
+          duration: const Duration(milliseconds: 220),
+          alignment: 0.5,
+        );
+      }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _revealSelected();
+  }
+
+  @override
+  void didUpdateWidget(_Header oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selected != widget.selected ||
+        oldWidget.pages.length != widget.pages.length) {
+      _revealSelected();
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabsController.dispose();
+    super.dispose();
+  }
+
   Widget _tab(int i) {
-    final active = selected == i;
-    final alarming = alarmPageIds.contains(pages[i].$1);
+    final active = widget.selected == i;
+    final alarming = widget.alarmPageIds.contains(widget.pages[i].$1);
     final color = alarming ? cRed : (active ? cCyan : cMuted);
-    return GestureDetector(
-      onTap: () => onSelect(i),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: active
-            ? BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(color: alarming ? cRed : cCyan, width: 3),
+    return Semantics(
+      key: _tabKeys.putIfAbsent(i, GlobalKey.new),
+      button: true,
+      selected: active,
+      label: 'Pantalla ${widget.pages[i].$1}',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => widget.onSelect(i),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: active
+              ? BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: alarming ? cRed : cCyan,
+                      width: 3,
+                    ),
+                  ),
+                )
+              : null,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(widget.pages[i].$2, size: 18, color: color),
+              const SizedBox(height: 2),
+              Text(
+                widget.pages[i].$1,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: active || alarming
+                      ? FontWeight.w800
+                      : FontWeight.w500,
+                  letterSpacing: 0.5,
                 ),
-              )
-            : null,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(pages[i].$2, size: 18, color: color),
-            const SizedBox(height: 2),
-            Text(
-              pages[i].$1,
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: active || alarming
-                    ? FontWeight.w800
-                    : FontWeight.w500,
-                letterSpacing: 0.5,
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -169,8 +222,9 @@ class _Header extends StatelessWidget {
         children: [
           Expanded(
             child: ListView(
+              controller: _tabsController,
               scrollDirection: Axis.horizontal,
-              children: [for (var i = 0; i < pages.length; i++) _tab(i)],
+              children: [for (var i = 0; i < widget.pages.length; i++) _tab(i)],
             ),
           ),
           if (kIsWeb) const _FullscreenButton(),
@@ -179,62 +233,75 @@ class _Header extends StatelessWidget {
           // otherwise there's no way to get to the alarm list (to check
           // what's muted, silence something in advance, etc.) except by
           // waiting for an alarm to fire first.
-          GestureDetector(
-            onTap: onBellTap,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Icon(
-                    alarmCount > 0
-                        ? Icons.notifications_active
-                        : Icons.notifications_none,
-                    color: alarmCount > 0 ? cRed : cMuted,
-                  ),
-                  if (alarmCount > 0)
-                    Positioned(
-                      right: -4,
-                      top: -4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: const BoxDecoration(
-                          color: cRed,
-                          shape: BoxShape.circle,
-                        ),
-                        constraints: const BoxConstraints(
-                          minWidth: 16,
-                          minHeight: 16,
-                        ),
-                        child: Text(
-                          '$alarmCount',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
+          Semantics(
+            button: true,
+            label: widget.alarmCount == 0
+                ? 'Alarmas, ninguna activa'
+                : 'Alarmas, ${widget.alarmCount} activas',
+            child: GestureDetector(
+              onTap: widget.onBellTap,
+              child: SizedBox(
+                width: 48,
+                height: 48,
+                child: Center(
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(
+                        widget.alarmCount > 0
+                            ? Icons.notifications_active
+                            : Icons.notifications_none,
+                        color: widget.alarmCount > 0 ? cRed : cMuted,
+                      ),
+                      if (widget.alarmCount > 0)
+                        Positioned(
+                          right: -4,
+                          top: -4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            decoration: const BoxDecoration(
+                              color: cRed,
+                              shape: BoxShape.circle,
+                            ),
+                            constraints: const BoxConstraints(
+                              minWidth: 16,
+                              minHeight: 16,
+                            ),
+                            child: Text(
+                              '${widget.alarmCount}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
-                ],
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
           const SizedBox(width: 4),
           Tooltip(
-            message: status,
+            message: widget.status,
             child: Icon(
-              ok ? Icons.link : Icons.link_off,
-              color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),
+              widget.ok ? Icons.link : Icons.link_off,
+              color: widget.status == 'DEMO'
+                  ? cOrange
+                  : (widget.ok ? cGreen : cOrange),
             ),
           ),
           if (MediaQuery.sizeOf(context).width >= 900) ...[
             const SizedBox(width: 8),
             Text(
-              status,
+              widget.status,
               style: TextStyle(
-                color: status == 'DEMO' ? cOrange : (ok ? cGreen : cOrange),
+                color: widget.status == 'DEMO'
+                    ? cOrange
+                    : (widget.ok ? cGreen : cOrange),
                 fontWeight: FontWeight.w700,
               ),
             ),

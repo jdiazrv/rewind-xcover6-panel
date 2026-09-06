@@ -1,6 +1,6 @@
 {
   "name": "rewind-xcover6-panel",
-  "version": "1.4.156",
+  "version": "1.4.157",
   "description": "REWIND instrument panel for sailing yachts — navigation, wind, power, tanks, weather, forecast, AIS radar and history charts, served straight from your Signal K server.",
   "keywords": [
     "signalk-webapp",
@@ -13,6 +13,9 @@
   "author": "Juan Diaz",
   "license": "UNLICENSED",
   "private": true,
+  "scripts": {
+    "test": "node --test server/index.test.js"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jdiazrv/rewind-xcover6-panel.git"

@@ -16,6 +16,7 @@ class _NtfyPushService {
   // all of them, keyed per alarm so one alarm's pushes don't suppress a
   // different one's.
   final Map<String, DateTime> _lastNtfyPushAt = {};
+  final Set<String> _ntfyPushInFlight = {};
 
   // Builds the actual numbers behind each alarm into the push body, not
   // just its generic label — e.g. "GARREANDO" alone says nothing about how
@@ -34,21 +35,14 @@ class _NtfyPushService {
             lon != null &&
             cfg.dropLat != null &&
             cfg.dropLon != null) {
-          final r = bearingDistanceMeters(
-            cfg.dropLat!,
-            cfg.dropLon!,
-            lat,
-            lon,
-          );
+          final r = bearingDistanceMeters(cfg.dropLat!, cfg.dropLon!, lat, lon);
           parts.add(
             '${r.distanceM.round()} m / ${cfg.radiusM.round()} m radio',
           );
           final heading = _s._freshHeading;
           if (heading != null) {
             final rel = ((r.bearingDeg - heading + 540) % 360) - 180;
-            parts.add(
-              '${rel.abs().round()}° ${rel >= 0 ? 'Er' : 'Br'}',
-            );
+            parts.add('${rel.abs().round()}° ${rel >= 0 ? 'Er' : 'Br'}');
           }
         }
         if (_s._anchorIsDragging && _s._anchorDragSpeedMPerMin != null) {
@@ -99,12 +93,12 @@ class _NtfyPushService {
           parts.add('${dropDepth.toStringAsFixed(1)} m al fondear');
           if (depth != null) {
             final delta = depth - dropDepth;
-            parts.add(
-              '${delta > 0 ? '+' : ''}${delta.toStringAsFixed(1)} m',
-            );
+            parts.add('${delta > 0 ? '+' : ''}${delta.toStringAsFixed(1)} m');
           }
         }
-        parts.add('margen ${_s.settings.alarmAnchorDepthMarginM.toStringAsFixed(1)} m');
+        parts.add(
+          'margen ${_s.settings.alarmAnchorDepthMarginM.toStringAsFixed(1)} m',
+        );
         return parts.join(' · ');
       case 'corredera':
         final sog = _s._freshSog;
@@ -122,10 +116,13 @@ class _NtfyPushService {
   Future<void> _maybeSendNtfyForAlarm(String key, String label) async {
     final topic = _s.settings.ntfyTopic.trim();
     if (topic.isEmpty || !_s.settings.ntfyAlarmKeys.contains(key)) return;
+    if (!_ntfyPushInFlight.add(key)) return;
     final now = DateTime.now();
     final last = _lastNtfyPushAt[key];
     if (last != null &&
-        now.difference(last) < Duration(seconds: _s.settings.ntfyMinIntervalSec)) {
+        now.difference(last) <
+            Duration(seconds: _s.settings.ntfyMinIntervalSec)) {
+      _ntfyPushInFlight.remove(key);
       return;
     }
     final vessel = _s.signalK.vesselName ?? 'REWIND';
@@ -168,6 +165,7 @@ class _NtfyPushService {
     if (key == 'anchorDrag' && delivered) {
       await _sendNtfyMapSnapshot(topic);
     }
+    _ntfyPushInFlight.remove(key);
   }
 
   Future<void> _sendNtfyMapSnapshot(String topic) async {
@@ -234,7 +232,8 @@ class _NtfyPushService {
         ? bearingDistanceMeters(dropLat, dropLon, lat, lon)
         : null;
     final radiusM = cfg.radiusM;
-    final maxSpanM = math.max(radiusM * 1.35, (rel?.distanceM ?? 0) * 1.25)
+    final maxSpanM = math
+        .max(radiusM * 1.35, (rel?.distanceM ?? 0) * 1.25)
         .clamp(15, 100000)
         .toDouble();
     final pxPerM = 130 / maxSpanM;
@@ -247,8 +246,7 @@ class _NtfyPushService {
         cfg.sectorStartDeg != null &&
         cfg.sectorEndDeg != null) {
       final startDeg = cfg.sectorStartDeg! - 90;
-      final sweep =
-          ((cfg.sectorEndDeg! - cfg.sectorStartDeg!) + 360) % 360;
+      final sweep = ((cfg.sectorEndDeg! - cfg.sectorStartDeg!) + 360) % 360;
       canvas.drawArc(
         Rect.fromCircle(center: center, radius: radiusM * pxPerM),
         startDeg * math.pi / 180,
@@ -316,7 +314,9 @@ class _NtfyPushService {
       );
     }
     if (_s.settings.anchorTotalChainLengthM > 0) {
-      lines.add('Cadena disponible: ${_s.settings.anchorTotalChainLengthM.round()} m');
+      lines.add(
+        'Cadena disponible: ${_s.settings.anchorTotalChainLengthM.round()} m',
+      );
     }
 
     var ty = mapH + 16;
@@ -352,7 +352,8 @@ class _NtfyPushService {
     // push a real ntfy alert built entirely from fabricated demo numbers.
     // Reported live 2026-09-04.
     if (_s.settings.demoMode) return;
-    if (_s.settings.ntfyTopic.trim().isEmpty || _s.settings.ntfyAlarmKeys.isEmpty) {
+    if (_s.settings.ntfyTopic.trim().isEmpty ||
+        _s.settings.ntfyAlarmKeys.isEmpty) {
       return;
     }
     for (final a in _s._activeAlarms) {
@@ -376,7 +377,10 @@ class _NtfyPushService {
       final resp = await http
           .post(
             Uri.parse('https://ntfy.sh/${Uri.encodeComponent(topic)}'),
-            headers: const {'Title': 'REWIND Panel - Prueba', 'Tags': 'test_tube'},
+            headers: const {
+              'Title': 'REWIND Panel - Prueba',
+              'Tags': 'test_tube',
+            },
             body:
                 'Prueba desde ${_s.signalK.vesselName ?? "REWIND"}. Si ves esto, ntfy funciona.',
           )
