@@ -918,12 +918,20 @@ class _WindCompassPainter extends CustomPainter {
 
     // AWA: full needle from the hub.
     if (angle1 != null) {
-      // Clamped to the full ±180 a real AWA/TWA can reach (dead astern) —
-      // NOT the ±150 tick range above, which is just where the printed
-      // scale marks stop; the needle must still be able to swing into
-      // that unmarked gap when the wind genuinely is back there.
-      // Reported live 2026-09-03 ("solo llega 150, debe llegar a 180").
-      final a = _screenRad(angle1!.clamp(-180.0, 180.0));
+      // NOT clamped to ±180 — _NeedleAnim.retarget deliberately lets the
+      // animated value overshoot that range (e.g. sweeping 170°→190°
+      // instead of 170°→-170°) so a needle crossing the wrap point sweeps
+      // smoothly through it the short way instead of jumping the long
+      // way around. _screenRad's rotation is periodic (feeds straight
+      // into sin/cos), so it already handles any range correctly —
+      // clamping here only reintroduced the exact jump/stick the
+      // animation exists to avoid, freezing the needle at 180° for the
+      // back half of any such sweep. A prior fix (2026-09-03, "solo llega
+      // 150, debe llegar a 180") added this clamp to fix a DIFFERENT,
+      // now-unrelated bug; it should never have constrained the range
+      // here at all. Reported live 2026-09-06 ("con 160 la aguja se va a
+      // 180").
+      final a = _screenRad(angle1!);
       _paintNeedle(canvas, center, r, s, a, tickInner * 0.92, color1);
     }
 
@@ -932,7 +940,7 @@ class _WindCompassPainter extends CustomPainter {
     // reads as a distinct marker rather than a second clock hand sharing
     // the same pivot.
     if (angle2 != null) {
-      final a = _screenRad(angle2!.clamp(-180.0, 180.0));
+      final a = _screenRad(angle2!);
       final dir = Offset(math.cos(a), math.sin(a));
       final perp = Offset(-math.sin(a), math.cos(a));
       final outR = tickInner * 0.95;
