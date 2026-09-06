@@ -728,6 +728,68 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     return ok;
   }
 
+  ({AnchorHistoryEntry entry, List<AnchorTrackPoint> points, double distanceM})?
+  _reusablePreviousTrack(ll.LatLng newDropPoint) {
+    // Search newest first. A session only qualifies when actual recorded
+    // points still exist in the rolling 24 h buffer and its anchor position
+    // is close enough to be the same anchorage, not merely the previous stop.
+    for (final entry in widget.config.history.reversed) {
+      final points = widget.ownTrack
+          .where(
+            (p) =>
+                !p.t.isBefore(entry.droppedAt) && !p.t.isAfter(entry.raisedAt),
+          )
+          .toList();
+      if (points.length < 2) continue;
+      final distanceM = bearingDistanceMeters(
+        entry.lat,
+        entry.lon,
+        newDropPoint.latitude,
+        newDropPoint.longitude,
+      ).distanceM;
+      final sameAnchorageLimitM = math.max(
+        50.0,
+        math.min(250.0, entry.radiusM * 2),
+      );
+      if (distanceM <= sameAnchorageLimitM) {
+        return (entry: entry, points: points, distanceM: distanceM);
+      }
+    }
+    return null;
+  }
+
+  Future<bool> _askReusePreviousTrack({
+    required int pointCount,
+    required double distanceM,
+  }) async {
+    if (!mounted) return false;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cPanel,
+        title: const Text('¿Reutilizar la traza anterior?'),
+        content: Text(
+          'Hay $pointCount puntos del fondeo que acabas de terminar, '
+          'a ${distanceM.toStringAsFixed(0)} m del nuevo punto.\n\n'
+          'Puedes aprovecharlos para Recolocar y Guiñada, o empezar una '
+          'captura nueva desde cero. La hora y las alarmas del nuevo fondeo '
+          'seguirán empezando ahora.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Empezar de cero'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Usar $pointCount puntos'),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
   Future<void> _dropAnchor() async {
     if (!await _ensureLoggedIn()) return;
     final lat = _effectiveLat, lon = _effectiveLon;
@@ -756,6 +818,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     final ll.LatLng dropPoint = (depth != null && heading != null)
         ? _destinationPoint(bowPoint, depth * 5, heading)
         : bowPoint;
+    final reusable = _reusablePreviousTrack(dropPoint);
+    final reusePrevious =
+        reusable != null &&
+        await _askReusePreviousTrack(
+          pointCount: reusable.points.length,
+          distanceM: reusable.distanceM,
+        );
+    if (!mounted) return;
     _updateConfig((c) {
       c.armed = true;
       c.dropLat = dropPoint.latitude;
@@ -766,6 +836,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       // point on a device whose clock differs from the server, leaving both
       // Recolocar and Guiñada permanently without a usable current session.
       c.droppedAt = skNow().toLocal();
+      c.reusedTrackFrom = reusePrevious ? reusable.entry.droppedAt : null;
+      c.reusedTrackUntil = reusePrevious ? reusable.entry.raisedAt : null;
       c.chainOutM = null;
       // 7:1 swing radius is the initial watch-circle size on drop.
       c.radiusM = depth != null ? (depth * 7).clamp(15, 150) : 30;
@@ -815,7 +887,12 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   List<AnchorTrackPoint> get _trackSinceDrop {
     final since = widget.config.droppedAt;
     if (since == null) return const [];
-    return widget.ownTrack.where((p) => !p.t.isBefore(since)).toList();
+    return anchorTrackForSession(
+      points: widget.ownTrack,
+      currentFrom: since,
+      reusedFrom: widget.config.reusedTrackFrom,
+      reusedUntil: widget.config.reusedTrackUntil,
+    );
   }
 
   // config.radiusM is the watch's own ALARM radius, usually set with a

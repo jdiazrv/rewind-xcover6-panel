@@ -629,6 +629,8 @@ class _DashboardState extends State<Dashboard> {
         'chainOutM': cfg.chainOutM,
         'dropDepthM': cfg.dropDepthM,
         'initialRadiusM': cfg.initialRadiusM,
+        'reusedTrackFrom': cfg.reusedTrackFrom?.millisecondsSinceEpoch,
+        'reusedTrackUntil': cfg.reusedTrackUntil?.millisecondsSinceEpoch,
       };
       var lat = _anchorEffectiveLat ?? signalK.latitude;
       var lon = _anchorEffectiveLon ?? signalK.longitude;
@@ -981,6 +983,21 @@ class _DashboardState extends State<Dashboard> {
                 }
             }
           }
+          for (final field in const ['reusedTrackFrom', 'reusedTrackUntil']) {
+            if (!watchZone.containsKey(field)) continue;
+            final ms = (watchZone[field] as num?)?.toInt();
+            final next = ms == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(ms);
+            if (field == 'reusedTrackFrom' && cfg.reusedTrackFrom != next) {
+              cfg.reusedTrackFrom = next;
+              changed = true;
+            } else if (field == 'reusedTrackUntil' &&
+                cfg.reusedTrackUntil != next) {
+              cfg.reusedTrackUntil = next;
+              changed = true;
+            }
+          }
         }
         _adoptAnchorEditTime(cfg, revision);
       case 'navigation.anchor.state':
@@ -1106,6 +1123,21 @@ class _DashboardState extends State<Dashboard> {
             final initialRadiusM = _num(value['initialRadiusM']);
             if (cfg.initialRadiusM != initialRadiusM) {
               cfg.initialRadiusM = initialRadiusM;
+              changed = true;
+            }
+          }
+          for (final field in const ['reusedTrackFrom', 'reusedTrackUntil']) {
+            if (!value.containsKey(field)) continue;
+            final ms = (value[field] as num?)?.toInt();
+            final next = ms == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(ms);
+            if (field == 'reusedTrackFrom' && cfg.reusedTrackFrom != next) {
+              cfg.reusedTrackFrom = next;
+              changed = true;
+            } else if (field == 'reusedTrackUntil' &&
+                cfg.reusedTrackUntil != next) {
+              cfg.reusedTrackUntil = next;
               changed = true;
             }
           }
@@ -9252,6 +9284,9 @@ class _DashboardState extends State<Dashboard> {
         anchorLat: cfg.dropLat!,
         anchorLon: cfg.dropLon!,
         radiusM: effectiveRadiusM,
+        sessionStartedAt: cfg.droppedAt ?? skNow(),
+        reusedTrackFrom: cfg.reusedTrackFrom,
+        reusedTrackUntil: cfg.reusedTrackUntil,
         demo: settings.demoMode,
         historySource: settings.historySource,
         skHost: settings.host,

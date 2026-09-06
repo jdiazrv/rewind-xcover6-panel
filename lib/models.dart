@@ -936,6 +936,12 @@ class AnchorConfig {
   double? dropLat;
   double? dropLon;
   DateTime? droppedAt;
+  // Optional window from a recently completed anchorage that the user
+  // explicitly chose to reuse after lifting and dropping again in the same
+  // place. The new droppedAt remains untouched so alarm grace periods and
+  // elapsed-time checks still describe the current anchorage honestly.
+  DateTime? reusedTrackFrom;
+  DateTime? reusedTrackUntil;
   // Depth at the moment of dropping — the reference point for the depth
   // "swing" alarm (settings.alarmAnchorDepthEnabled), not an absolute
   // threshold.
@@ -988,6 +994,8 @@ class AnchorConfig {
     'dropLon': dropLon,
     'dropDepthM': dropDepthM,
     'droppedAt': droppedAt?.toIso8601String(),
+    'reusedTrackFrom': reusedTrackFrom?.toIso8601String(),
+    'reusedTrackUntil': reusedTrackUntil?.toIso8601String(),
     'radiusM': radiusM,
     'chainOutM': chainOutM,
     'initialRadiusM': initialRadiusM,
@@ -1014,6 +1022,14 @@ class AnchorConfig {
     c.dropDepthM = (j['dropDepthM'] as num?)?.toDouble();
     final droppedAtStr = j['droppedAt'] as String?;
     c.droppedAt = droppedAtStr == null ? null : DateTime.tryParse(droppedAtStr);
+    final reusedTrackFromStr = j['reusedTrackFrom'] as String?;
+    final reusedTrackUntilStr = j['reusedTrackUntil'] as String?;
+    c.reusedTrackFrom = reusedTrackFromStr == null
+        ? null
+        : DateTime.tryParse(reusedTrackFromStr);
+    c.reusedTrackUntil = reusedTrackUntilStr == null
+        ? null
+        : DateTime.tryParse(reusedTrackUntilStr);
     c.radiusM = (j['radiusM'] as num?)?.toDouble() ?? c.radiusM;
     c.chainOutM = (j['chainOutM'] as num?)?.toDouble();
     c.initialRadiusM = (j['initialRadiusM'] as num?)?.toDouble();
@@ -1363,6 +1379,24 @@ class OwnTrackHistory {
     points.insertAll(0, backfill);
   }
 }
+
+/// Selects the current anchorage's points plus, when explicitly accepted,
+/// the bounded trace of one previous anchorage. The gap while the anchor was
+/// raised is deliberately excluded.
+List<AnchorTrackPoint> anchorTrackForSession({
+  required Iterable<AnchorTrackPoint> points,
+  required DateTime currentFrom,
+  DateTime? reusedFrom,
+  DateTime? reusedUntil,
+}) => [
+  for (final p in points)
+    if (!p.t.isBefore(currentFrom) ||
+        (reusedFrom != null &&
+            reusedUntil != null &&
+            !p.t.isBefore(reusedFrom) &&
+            !p.t.isAfter(reusedUntil)))
+      p,
+];
 
 // configRadiusM is the watch's own ALARM radius, usually set with a safety
 // margin above the true taut-chain swing (see _dropAnchor's 7:1 scope rule)

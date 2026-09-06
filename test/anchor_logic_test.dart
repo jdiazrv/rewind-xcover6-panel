@@ -42,6 +42,43 @@ void main() {
     expect(back.bearingDeg, closeTo(45, 0.5));
   });
 
+  test('reused anchor trace includes only accepted and current windows', () {
+    final base = DateTime.utc(2026, 9, 6, 8);
+    final points = [
+      AnchorTrackPoint(base, 37, 23),
+      AnchorTrackPoint(base.add(const Duration(minutes: 10)), 37.1, 23.1),
+      AnchorTrackPoint(base.add(const Duration(minutes: 20)), 37.2, 23.2),
+      AnchorTrackPoint(base.add(const Duration(minutes: 30)), 37.3, 23.3),
+    ];
+    final selected = anchorTrackForSession(
+      points: points,
+      currentFrom: base.add(const Duration(minutes: 25)),
+      reusedFrom: base.add(const Duration(minutes: 5)),
+      reusedUntil: base.add(const Duration(minutes: 15)),
+    );
+
+    expect(selected, [points[1], points[3]]);
+    expect(
+      anchorTrackForSession(
+        points: points,
+        currentFrom: base.add(const Duration(minutes: 25)),
+      ),
+      [points[3]],
+    );
+  });
+
+  test('reused trace window survives anchor configuration persistence', () {
+    final from = DateTime.utc(2026, 9, 6, 8);
+    final until = from.add(const Duration(hours: 1));
+    final original = AnchorConfig()
+      ..reusedTrackFrom = from
+      ..reusedTrackUntil = until;
+
+    final restored = AnchorConfig.fromJson(original.toJson());
+    expect(restored.reusedTrackFrom, from);
+    expect(restored.reusedTrackUntil, until);
+  });
+
   test('borneo smoothing remains close to north across 360 degrees', () {
     const anchorLat = 37.0;
     const anchorLon = 23.0;

@@ -21,6 +21,9 @@ class YawAnalysisDialog extends StatefulWidget {
     required this.anchorLat,
     required this.anchorLon,
     required this.radiusM,
+    required this.sessionStartedAt,
+    this.reusedTrackFrom,
+    this.reusedTrackUntil,
     required this.demo,
     required this.historySource,
     required this.skHost,
@@ -36,6 +39,9 @@ class YawAnalysisDialog extends StatefulWidget {
   final double anchorLat;
   final double anchorLon;
   final double radiusM;
+  final DateTime sessionStartedAt;
+  final DateTime? reusedTrackFrom;
+  final DateTime? reusedTrackUntil;
   final bool demo;
   final String historySource; // 'auto' | 'influx' | 'sk'
   final String skHost;
@@ -60,6 +66,13 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
 
   List<AnchorYawPoint> get _points =>
       (_last24h ? _fetched24h : _fetched1h) ?? const [];
+
+  bool _belongsToSelectedSession(DateTime t) =>
+      !t.isBefore(widget.sessionStartedAt) ||
+      (widget.reusedTrackFrom != null &&
+          widget.reusedTrackUntil != null &&
+          !t.isBefore(widget.reusedTrackFrom!) &&
+          !t.isAfter(widget.reusedTrackUntil!));
 
   @override
   void initState() {
@@ -398,7 +411,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
         ? const Duration(minutes: 3)
         : const Duration(seconds: 30);
     final lonSorted = [...pos.lon]..sort((a, b) => a.time.compareTo(b.time));
-    return [
+    final joined = [
       for (final latPoint in pos.lat)
         if (nearest(lonSorted, latPoint.time, tolerance: joinTolerance)
             case final lonPoint?)
@@ -418,6 +431,10 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
             )?.value,
           ),
     ];
+    // Do not silently mix manoeuvring while the anchor was raised into the
+    // analysis. A previous interval is included only after the user chose
+    // "Usar traza" on the new drop.
+    return joined.where((p) => _belongsToSelectedSession(p.t)).toList();
   }
 
   // A plausible-looking oscillation for DEMO mode — NOT influxQuery's own
