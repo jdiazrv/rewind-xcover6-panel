@@ -291,7 +291,12 @@ class _DashboardState extends State<Dashboard> {
   // exactly the case this would otherwise get fooled by.
   bool get _engineRunning {
     final freshRpm = _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate);
-    return (freshRpm != null && freshRpm > 200) ||
+    final starting = _freshEngineFlag(
+      signalK.engineStarting,
+      signalK.engineDiagnosticUpdate,
+    );
+    return starting == true ||
+        (freshRpm != null && freshRpm > 200) ||
         (_engineRunningUntil != null &&
             DateTime.now().isBefore(_engineRunningUntil!));
   }
@@ -318,7 +323,19 @@ class _DashboardState extends State<Dashboard> {
             signalK.engineAlternatorV,
             signalK.engineAlternatorVUpdate,
           ) !=
-          null;
+          null ||
+      _freshEngine(signalK.engineSupplyV, signalK.engineSupplyVUpdate) !=
+          null ||
+      _freshEngineFlag(
+            signalK.engineStarting,
+            signalK.engineDiagnosticUpdate,
+          ) ==
+          true ||
+      _freshEngineFlag(
+            signalK.enginePreheatActive,
+            signalK.enginePreheatActiveUpdate,
+          ) ==
+          true;
 
   // TEMPORARY: forces the Premium Motor screen into the carousel even with
   // no engine running, so the simulated panel (SIMUL switch, no real PGNs
@@ -1218,6 +1235,7 @@ class _DashboardState extends State<Dashboard> {
     'engineTemp',
     'engineVolt',
     'engineGlowPlug',
+    'engineCheck',
   };
   final _mutedAlarms =
       <String>{}; // acknowledged-until-it-clears, no auto-unmute
@@ -1616,7 +1634,7 @@ class _DashboardState extends State<Dashboard> {
       signalK.engineLowOilAlarmUpdate,
     );
     final oilAlarm =
-        freshLowOilAlarm ??
+        freshLowOilAlarm == true ||
         (_engineRunning &&
             oilBar != null &&
             oilBar < settings.alarmEngineOilMinBar);
@@ -1641,7 +1659,7 @@ class _DashboardState extends State<Dashboard> {
       signalK.engineOverTempAlarmUpdate,
     );
     final tempAlarm =
-        freshOverTempAlarm ??
+        freshOverTempAlarm == true ||
         (_engineRunning &&
             tempC != null &&
             tempC > settings.alarmEngineTempMaxC);
@@ -1656,16 +1674,18 @@ class _DashboardState extends State<Dashboard> {
         muted: _mutedAlarms.contains(key),
       ));
     }
-    final voltV = _freshEngine(
-      signalK.engineAlternatorV,
-      signalK.engineAlternatorVUpdate,
-    );
+    final voltV =
+        _freshEngine(
+          signalK.engineAlternatorV,
+          signalK.engineAlternatorVUpdate,
+        ) ??
+        _freshEngine(signalK.engineSupplyV, signalK.engineSupplyVUpdate);
     final freshLowVoltAlarm = _freshEngineFlag(
       signalK.engineLowVoltAlarm,
       signalK.engineLowVoltAlarmUpdate,
     );
     final voltAlarm =
-        freshLowVoltAlarm ??
+        freshLowVoltAlarm == true ||
         (_engineRunning &&
             voltV != null &&
             voltV < settings.alarmEngineVoltMinV);
@@ -1696,6 +1716,33 @@ class _DashboardState extends State<Dashboard> {
       out.add((
         key: key,
         label: 'Motor: fallo de precalentamiento',
+        sound: settings.alarmEngineGlowPlugSound,
+        muted: _mutedAlarms.contains(key),
+      ));
+    }
+    final freshEngineCheck = _freshEngineFlag(
+      signalK.engineCheckAlarm,
+      signalK.engineDiagnosticUpdate,
+    );
+    final freshSystemFault = _freshEngineFlag(
+      signalK.engineSystemFault,
+      signalK.engineDiagnosticUpdate,
+    );
+    final freshAuxiliaryFault = _freshEngineFlag(
+      signalK.engineAuxiliaryFault,
+      signalK.engineDiagnosticUpdate,
+    );
+    if (freshEngineCheck == true ||
+        freshSystemFault == true ||
+        freshAuxiliaryFault == true) {
+      const key = 'engineCheck';
+      final spn = signalK.engineFirstDtcSpn?.round();
+      final fmi = signalK.engineFirstDtcFmi?.round();
+      out.add((
+        key: key,
+        label: spn == null || spn == 0
+            ? 'Motor: revisar diagnóstico'
+            : 'Motor: diagnóstico activo — SPN $spn / FMI ${fmi ?? "–"}',
         sound: settings.alarmEngineGlowPlugSound,
         muted: _mutedAlarms.contains(key),
       ));
@@ -1898,7 +1945,8 @@ class _DashboardState extends State<Dashboard> {
     if (key == 'engineOil' ||
         key == 'engineTemp' ||
         key == 'engineVolt' ||
-        key == 'engineGlowPlug') {
+        key == 'engineGlowPlug' ||
+        key == 'engineCheck') {
       return 'NAV';
     }
     if (key.startsWith('custom:')) {
@@ -2708,6 +2756,9 @@ class _DashboardState extends State<Dashboard> {
         settings.anchorDetectPhoneLeftByWifi;
     settings.anchorBoatWifiSsid =
         prefs.getString('anchorBoatWifiSsid') ?? settings.anchorBoatWifiSsid;
+    settings.anchorShowElectrical =
+        prefs.getBool('anchorShowElectrical') ??
+        settings.anchorShowElectrical;
     settings.alarmEngineOilSound =
         prefs.getBool('alarmEngineOilSound') ?? settings.alarmEngineOilSound;
     settings.alarmEngineOilMinBar =
@@ -3100,6 +3151,10 @@ class _DashboardState extends State<Dashboard> {
       settings.anchorDetectPhoneLeftByWifi,
     );
     await prefs.setString('anchorBoatWifiSsid', settings.anchorBoatWifiSsid);
+    await prefs.setBool(
+      'anchorShowElectrical',
+      settings.anchorShowElectrical,
+    );
     await prefs.setBool('alarmEngineOilSound', settings.alarmEngineOilSound);
     await prefs.setDouble(
       'alarmEngineOilMinBar',
@@ -3262,9 +3317,20 @@ class _DashboardState extends State<Dashboard> {
         signalK.engineRpm = n == null ? null : n * 60;
         signalK.engineRpmUpdate = DateTime.now();
       };
+      // Signal K standard engineTorque is a ratio; retain the old
+      // torquePercent path as a compatibility input for older bridges.
+      h['$base.engineTorque'] = (v) {
+        final ratio = _num(v);
+        signalK.engineTorquePercent = ratio == null ? null : ratio * 100;
+        signalK.engineRpmUpdate = DateTime.now();
+      };
       h['$base.torquePercent'] = (v) {
         signalK.engineTorquePercent = _num(v);
         signalK.engineRpmUpdate = DateTime.now();
+      };
+      h['$base.coolantTemperature'] = (v) {
+        signalK.engineCoolantTempK = _num(v);
+        signalK.engineCoolantTempUpdate = DateTime.now();
       };
       h['$base.temperature'] = (v) {
         signalK.engineCoolantTempK = _num(v);
@@ -3278,13 +3344,17 @@ class _DashboardState extends State<Dashboard> {
         signalK.engineAlternatorV = _num(v);
         signalK.engineAlternatorVUpdate = DateTime.now();
       };
+      h['$base.volvoMdi.supplyVoltage'] = (v) {
+        signalK.engineSupplyV = _num(v);
+        signalK.engineSupplyVUpdate = DateTime.now();
+      };
       // Discrete DM1 fault bits (J1939 PGN 65226), if the bridge firmware
       // ever decodes them: SPN 110/FMI 0 (coolant above normal range), SPN
       // 100/FMI 1 (oil pressure low), SPN 167/FMI 1 (alternator not
-      // charging). These are the real fault flags, not a guessed number —
-      // when present they override the threshold comparison in
-      // _activeAlarms/_isLampOnReal; the threshold stays only as a fallback
-      // for as long as the bridge leaves DM1 undecoded.
+      // charging). These are the real fault flags, not a guessed number.
+      // _activeAlarms/_isLampOnReal combine them with the numeric threshold:
+      // either source can raise an alarm, so a fresh `false` from DM1 cannot
+      // hide a genuinely dangerous measured value.
       h['$base.overTemperatureAlarm'] = (v) {
         signalK.engineOverTempAlarm = v is bool ? v : null;
         signalK.engineOverTempAlarmUpdate = DateTime.now();
@@ -3304,10 +3374,62 @@ class _DashboardState extends State<Dashboard> {
         signalK.engineGlowPlugFaultAlarm = v is bool ? v : null;
         signalK.engineGlowPlugFaultAlarmUpdate = DateTime.now();
       };
-      // Preheat-in-progress status (PGN 65264 — SPN 1494), a normal
-      // operating state, not a fault.
-      h['$base.preheatActive'] = (v) =>
-          signalK.enginePreheatActive = v is bool ? v : null;
+      // Preheat-in-progress is a Volvo MDI status discovered in proprietary
+      // PGN 65417. It is a normal operating state, not a fault, and LIVE only
+      // publishes it as authoritative after that installation's bit map has
+      // been verified from a real capture.
+      h['$base.preheatActive'] = (v) {
+        signalK.enginePreheatActive = v is bool ? v : null;
+        signalK.enginePreheatActiveUpdate = DateTime.now();
+      };
+      void diagnosticBool(String path, void Function(bool?) assign) {
+        h['$base.$path'] = (v) {
+          assign(v is bool ? v : null);
+          signalK.engineDiagnosticUpdate = DateTime.now();
+        };
+      }
+
+      diagnosticBool('engineCheckAlarm', (v) => signalK.engineCheckAlarm = v);
+      diagnosticBool('volvoMdi.detected', (v) => signalK.engineMdiDetected = v);
+      diagnosticBool(
+        'volvoMdi.mappingVerified',
+        (v) => signalK.engineMdiMappingVerified = v,
+      );
+      diagnosticBool(
+        'volvoMdi.dm1Available',
+        (v) => signalK.engineDm1Available = v,
+      );
+      diagnosticBool('volvoMdi.starting', (v) => signalK.engineStarting = v);
+      diagnosticBool('volvoMdi.stopping', (v) => signalK.engineStopping = v);
+      diagnosticBool(
+        'volvoMdi.systemFault',
+        (v) => signalK.engineSystemFault = v,
+      );
+      diagnosticBool(
+        'volvoMdi.auxiliaryFault',
+        (v) => signalK.engineAuxiliaryFault = v,
+      );
+      h['$base.volvoMdi.sourceAddress'] = (v) =>
+          signalK.engineSourceAddress = _num(v);
+      h['$base.volvoMdi.activeDtcCount'] = (v) =>
+          signalK.engineActiveDtcCount = _num(v);
+      h['$base.volvoMdi.firstDtcSpn'] = (v) =>
+          signalK.engineFirstDtcSpn = _num(v);
+      h['$base.volvoMdi.firstDtcFmi'] = (v) =>
+          signalK.engineFirstDtcFmi = _num(v);
+      h['$base.volvoMdi.can.rxMissed'] = (v) =>
+          signalK.engineCanRxMissed = _num(v);
+      h['$base.volvoMdi.can.rxOverrun'] = (v) =>
+          signalK.engineCanRxOverrun = _num(v);
+      h['$base.volvoMdi.can.busErrors'] = (v) =>
+          signalK.engineCanBusErrors = _num(v);
+      h['$base.volvoMdi.can.bitrateKbps'] = (v) =>
+          signalK.engineCanBitrateKbps = _num(v);
+      for (var i = 0; i < 8; i++) {
+        final byteIndex = i;
+        h['$base.volvoMdi.raw.byte$i'] = (v) =>
+            signalK.engineMdiRawBytes[byteIndex] = _num(v);
+      }
       // Bridge diagnostics — frames it sees on the bus but doesn't decode
       // yet (e.g. DM1 itself, before a firmware update adds it). Purely
       // informational, shown in the "Completo" Motor panel.
@@ -3782,6 +3904,20 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
+  // Paths _applyRemoteAnchorState actually has a case for — everything
+  // else under navigation.anchor.* (currentRadius, maxRadius,
+  // apparentBearing, distanceFromBow, bearingTrue, meta) is a computed
+  // display value with no sync/conflict semantics at all and must always
+  // reach _routeValue instead, even from this device's own echo. See
+  // _onSignalKMessage's own doc comment at the call site.
+  static const _anchorSyncPaths = {
+    'navigation.anchor.state',
+    'navigation.anchor.stateChangedAt',
+    'navigation.anchor.position',
+    'navigation.anchor.watchZone',
+    'navigation.anchor.rewindState',
+  };
+
   void _onSignalKMessage(dynamic raw) {
     final doc = jsonDecode(raw as String) as Map<String, dynamic>;
     final selfHello = doc['self'];
@@ -3885,7 +4021,19 @@ class _DashboardState extends State<Dashboard> {
         if (item is! Map) continue;
         final path = item['path'] as String? ?? '';
         if (path.startsWith('navigation.anchor.')) {
-          if (isRewindAppDevice) {
+          // Only the conflict-prone sync fields go through
+          // _applyRemoteAnchorState — currentRadius/maxRadius/
+          // apparentBearing/distanceFromBow/bearingTrue/meta are just
+          // computed display numbers with no case in that switch at all,
+          // so routing them there silently swallowed them (no-op, since
+          // the switch has no matching case) instead of ever reaching
+          // _routeValue, which is the only place that actually sets
+          // signalK.anchorCurrentRadiusM/etc — even for OUR OWN echo,
+          // since isRewindAppDevice is true for that too. Regression: the
+          // NAV anchor card's distance/ring went permanently blank the
+          // moment this device's own currentRadius/maxRadius publish
+          // started being intercepted here. Reported live 2026-09-06.
+          if (isRewindAppDevice && _anchorSyncPaths.contains(path)) {
             if (path == 'navigation.anchor.state' &&
                 anchorBatchMovedAtMs == null) {
               _pendingAnchorStateBySource[sourceLabel] = item['value'];
@@ -3902,7 +4050,8 @@ class _DashboardState extends State<Dashboard> {
           }
           // else: falls through to _routeValue below, same as any other
           // path — a genuinely foreign source (hoekens) updates
-          // signalK.anchorState there (see CFG > Diagnóstico).
+          // signalK.anchorState there (see CFG > Diagnóstico), and this
+          // device's own computed display metrics (see above) always do.
         }
         if (isSelf) {
           changed = _routeValue(path, item['value'], dataTime) || changed;
@@ -6729,6 +6878,10 @@ class _DashboardState extends State<Dashboard> {
       signalK.engineAlternatorV,
       signalK.engineAlternatorVUpdate,
     ),
+    engineSupplyV: _freshEngine(
+      signalK.engineSupplyV,
+      signalK.engineSupplyVUpdate,
+    ),
     // Freshness-gated the same way _activeAlarms is — a lamp lit from a
     // stale DM1 bit (bridge stopped publishing, but the last thing it
     // said was "fault") would otherwise disagree with the alarm banner,
@@ -6749,7 +6902,41 @@ class _DashboardState extends State<Dashboard> {
       signalK.engineGlowPlugFaultAlarm,
       signalK.engineGlowPlugFaultAlarmUpdate,
     ),
-    enginePreheatActive: signalK.enginePreheatActive,
+    enginePreheatActive: _freshEngineFlag(
+      signalK.enginePreheatActive,
+      signalK.enginePreheatActiveUpdate,
+    ),
+    engineMdiDetected: signalK.engineMdiDetected,
+    engineMdiMappingVerified: signalK.engineMdiMappingVerified,
+    engineCheckAlarm: _freshEngineFlag(
+      signalK.engineCheckAlarm,
+      signalK.engineDiagnosticUpdate,
+    ),
+    engineStarting: _freshEngineFlag(
+      signalK.engineStarting,
+      signalK.engineDiagnosticUpdate,
+    ),
+    engineStopping: _freshEngineFlag(
+      signalK.engineStopping,
+      signalK.engineDiagnosticUpdate,
+    ),
+    engineSystemFault: _freshEngineFlag(
+      signalK.engineSystemFault,
+      signalK.engineDiagnosticUpdate,
+    ),
+    engineAuxiliaryFault: _freshEngineFlag(
+      signalK.engineAuxiliaryFault,
+      signalK.engineDiagnosticUpdate,
+    ),
+    engineSourceAddress: signalK.engineSourceAddress,
+    engineActiveDtcCount: signalK.engineActiveDtcCount,
+    engineFirstDtcSpn: signalK.engineFirstDtcSpn,
+    engineFirstDtcFmi: signalK.engineFirstDtcFmi,
+    engineCanRxMissed: signalK.engineCanRxMissed,
+    engineCanRxOverrun: signalK.engineCanRxOverrun,
+    engineCanBusErrors: signalK.engineCanBusErrors,
+    engineCanBitrateKbps: signalK.engineCanBitrateKbps,
+    engineMdiRawBytes: List<double?>.of(signalK.engineMdiRawBytes),
     engineUnknownPgn: signalK.engineUnknownPgn,
     engineUnknownFrameCount: signalK.engineUnknownFrameCount,
     alarmOilMinBar: settings.alarmEngineOilMinBar,
@@ -8578,7 +8765,11 @@ class _DashboardState extends State<Dashboard> {
               : null;
           return '${s.groupLabel} ${liters == null ? '--' : '$liters/${s.capacityL}L'}';
         })
-        .join(' · ');
+        // One tank per line, not all joined with " · " onto a single line —
+        // that packed every tank's level/capacity into one cramped,
+        // tiny-font line that regularly had to ellipsize. Reported live
+        // 2026-09-06.
+        .join('\n');
   }
 
   Widget _tankPage() {
@@ -9250,6 +9441,10 @@ class _DashboardState extends State<Dashboard> {
       detectPhoneLeftBySteps: settings.anchorDetectPhoneLeftBySteps,
       detectPhoneLeftByWifi: settings.anchorDetectPhoneLeftByWifi,
       boatWifiSsid: settings.anchorBoatWifiSsid,
+      showElectrical: settings.anchorShowElectrical,
+      houseVoltage: signalK.houseV,
+      houseSoc: signalK.houseSoc,
+      houseCurrentA: signalK.houseA,
       shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
       alarmsMuted: _anchorAlarmsMuted,
       onToggleAlarmsMuted: _toggleAnchorAlarmsMuted,
@@ -11429,6 +11624,24 @@ class _DashboardState extends State<Dashboard> {
                                   },
                                 ),
                               ],
+                            ],
+                          ),
+                          SettingsGroup(
+                            title: 'PANTALLA DE ANC',
+                            icon: Icons.bolt,
+                            children: [
+                              SettingsSwitchRow(
+                                value: settings.anchorShowElectrical,
+                                onChanged: (v) {
+                                  setSt(
+                                    () => settings.anchorShowElectrical = v,
+                                  );
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                                title: 'Mostrar datos eléctricos',
+                                subtitle: 'Voltaje, SOC y corriente de la batería de servicio, junto a viento/profundidad',
+                              ),
                             ],
                           ),
                           SettingsGroup(

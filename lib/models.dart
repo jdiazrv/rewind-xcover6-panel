@@ -629,13 +629,14 @@ class SignalKModel {
   // once the user picks the engine's runTime path in CFG > Sensores, no
   // separate configuration needed for each.
   double? engineRpm; // revolutions (Hz) × 60
-  // Percent load, same PGN 61444 (EEC1) frame as RPM — SPN 512. Purely
+  // Actual percent torque, same PGN 61444 (EEC1) frame as RPM — SPN 513.
   // informational (no alarm derived from it), shown only in the
   // "Completo" Motor panel.
   double? engineTorquePercent;
   double? engineCoolantTempK;
   double? engineOilPressurePa;
   double? engineAlternatorV;
+  double? engineSupplyV;
   // Per-metric "last delta received" timestamps — each gauge goes stale
   // (needle to zero, "--" on its readout) independently 5s after its own
   // last update, same principle as navUpdate/windUpdate above: one sensor
@@ -645,6 +646,7 @@ class SignalKModel {
   DateTime? engineCoolantTempUpdate;
   DateTime? engineOilPressureUpdate;
   DateTime? engineAlternatorVUpdate;
+  DateTime? engineSupplyVUpdate;
   // Discrete DM1 fault bits (J1939 PGN 65226 — SPN 110/FMI 0, 100/FMI 1,
   // 167/FMI 1), if the bridge firmware ever decodes them; null while
   // unpublished, in which case the threshold comparison is used instead.
@@ -669,6 +671,27 @@ class SignalKModel {
   // Status). Not an alarm, just the normal "still warming the glow plugs"
   // state — drives the 'precal' lamp in real (non-SIMUL) mode.
   bool? enginePreheatActive;
+  DateTime? enginePreheatActiveUpdate;
+  // Volvo MDI / J1939 diagnostic state. PGN 65417 is proprietary, so its
+  // decoded switches are authoritative only when mappingVerified is true.
+  bool? engineMdiDetected;
+  bool? engineMdiMappingVerified;
+  bool? engineDm1Available;
+  bool? engineCheckAlarm;
+  bool? engineStarting;
+  bool? engineStopping;
+  bool? engineSystemFault;
+  bool? engineAuxiliaryFault;
+  DateTime? engineDiagnosticUpdate;
+  double? engineSourceAddress;
+  double? engineActiveDtcCount;
+  double? engineFirstDtcSpn;
+  double? engineFirstDtcFmi;
+  double? engineCanRxMissed;
+  double? engineCanRxOverrun;
+  double? engineCanBusErrors;
+  double? engineCanBitrateKbps;
+  final engineMdiRawBytes = List<double?>.filled(8, null);
   // Bridge diagnostics (propulsion.<id>.volvoMdi.*) — PGN frames seen on
   // the bus but not decoded, shown in the "Completo" Motor panel.
   double? engineUnknownPgn;
@@ -768,10 +791,12 @@ class SignalKModel {
     engineCoolantTempK = null;
     engineOilPressurePa = null;
     engineAlternatorV = null;
+    engineSupplyV = null;
     engineRpmUpdate = null;
     engineCoolantTempUpdate = null;
     engineOilPressureUpdate = null;
     engineAlternatorVUpdate = null;
+    engineSupplyVUpdate = null;
     engineOverTempAlarm = null;
     engineLowOilAlarm = null;
     engineLowVoltAlarm = null;
@@ -781,6 +806,27 @@ class SignalKModel {
     engineGlowPlugFaultAlarm = null;
     engineGlowPlugFaultAlarmUpdate = null;
     enginePreheatActive = null;
+    enginePreheatActiveUpdate = null;
+    engineMdiDetected = null;
+    engineMdiMappingVerified = null;
+    engineDm1Available = null;
+    engineCheckAlarm = null;
+    engineStarting = null;
+    engineStopping = null;
+    engineSystemFault = null;
+    engineAuxiliaryFault = null;
+    engineDiagnosticUpdate = null;
+    engineSourceAddress = null;
+    engineActiveDtcCount = null;
+    engineFirstDtcSpn = null;
+    engineFirstDtcFmi = null;
+    engineCanRxMissed = null;
+    engineCanRxOverrun = null;
+    engineCanBusErrors = null;
+    engineCanBitrateKbps = null;
+    for (var i = 0; i < engineMdiRawBytes.length; i++) {
+      engineMdiRawBytes[i] = null;
+    }
     engineUnknownPgn = null;
     engineUnknownFrameCount = null;
     bowthrusterTempK = null;
@@ -2390,6 +2436,10 @@ class SettingsModel {
   bool anchorDetectPhoneLeftBySteps = false;
   bool anchorDetectPhoneLeftByWifi = false;
   String anchorBoatWifiSsid = '';
+  // ANC's own HUD (voltage/SOC/corriente of the house/service battery) —
+  // off by default since not everyone fondeando wants a battery readout
+  // competing for space with viento/profundidad. Reported live 2026-09-06.
+  bool anchorShowElectrical = false;
   bool demoMode = false;
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted

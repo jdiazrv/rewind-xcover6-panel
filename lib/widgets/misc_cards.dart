@@ -1987,11 +1987,19 @@ class TankCard extends StatelessWidget {
                               if (breakdown != null)
                                 Text(
                                   breakdown!,
-                                  maxLines: 1,
+                                  // One tank per line (see the join('\n')
+                                  // that builds this string) instead of
+                                  // cramming every tank onto one line at a
+                                  // tiny font — 2 lines covers the common
+                                  // case (a card aggregating exactly 2
+                                  // tanks); a 3rd+ tank still ellipsizes
+                                  // rather than overflowing the card.
+                                  maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     color: cMuted,
-                                    fontSize: large ? 11 : 10,
+                                    fontSize: large ? 12 : 11,
+                                    height: 1.25,
                                   ),
                                 ),
                             ],

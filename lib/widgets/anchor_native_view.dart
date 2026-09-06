@@ -80,6 +80,10 @@ class NativeAnchorView extends StatefulWidget {
     required this.detectPhoneLeftBySteps,
     required this.detectPhoneLeftByWifi,
     required this.boatWifiSsid,
+    this.showElectrical = false,
+    this.houseVoltage,
+    this.houseSoc,
+    this.houseCurrentA,
     this.shipIconAsset = 'assets/img/own_ship.png',
     this.alarmsMuted = false,
     this.onToggleAlarmsMuted,
@@ -170,6 +174,12 @@ class NativeAnchorView extends StatefulWidget {
   final bool detectPhoneLeftBySteps;
   final bool detectPhoneLeftByWifi;
   final String boatWifiSsid;
+  // CFG > Fondeo > "Mostrar datos eléctricos" — house/service battery HUD
+  // alongside viento/profundidad. Reported live 2026-09-06.
+  final bool showElectrical;
+  final double? houseVoltage;
+  final double? houseSoc;
+  final double? houseCurrentA;
   final String shipIconAsset;
   final bool alarmsMuted;
   final VoidCallback? onToggleAlarmsMuted;
@@ -1551,6 +1561,10 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                   const SizedBox(height: 8),
                   _scopePanel(),
                 ],
+                if (widget.showElectrical) ...[
+                  const SizedBox(height: 8),
+                  _electricalPanel(),
+                ],
               ],
             ),
           ),
@@ -2598,6 +2612,86 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       ],
     ),
   );
+
+  // Same threshold bands as main.dart's own socColor/currentColor
+  // (lib/utils/format_helpers.dart) — duplicated rather than shared since
+  // that file is `part of main.dart` and this widget is a standalone
+  // library that only imports models.dart/theme.dart.
+  Color _socColor(double? pct) {
+    if (pct == null) return cMuted;
+    if (pct >= 80) return cGreen;
+    if (pct >= 50) return cYellow;
+    if (pct >= 20) return cOrange;
+    return cRed;
+  }
+
+  Color _currentColor(double? amps) {
+    if (amps == null) return cMuted;
+    return amps >= 0 ? cGreen : cOrange;
+  }
+
+  Widget _electricalPanel() {
+    final v = widget.houseVoltage;
+    final soc = widget.houseSoc;
+    final a = widget.houseCurrentA;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cPanel.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'BATERÍA SERVICIO',
+            style: TextStyle(
+              color: cMuted,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                v != null ? '${v.toStringAsFixed(2)} V' : '--',
+                style: const TextStyle(
+                  color: cText,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                ),
+              ),
+              if (soc != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  '${soc.round()}%',
+                  style: TextStyle(
+                    color: _socColor(soc),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+              if (a != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  '${a >= 0 ? '+' : ''}${a.toStringAsFixed(1)} A',
+                  style: TextStyle(
+                    color: _currentColor(a),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _hudPanel(String label, String value, Color color) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

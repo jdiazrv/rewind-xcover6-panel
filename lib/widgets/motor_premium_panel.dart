@@ -96,11 +96,28 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.engineOilPressurePa,
     this.engineCoolantTempK,
     this.engineAlternatorV,
+    this.engineSupplyV,
     this.engineOverTempAlarm,
     this.engineLowOilAlarm,
     this.engineLowVoltAlarm,
     this.engineGlowPlugFaultAlarm,
     this.enginePreheatActive,
+    this.engineMdiDetected,
+    this.engineMdiMappingVerified,
+    this.engineCheckAlarm,
+    this.engineStarting,
+    this.engineStopping,
+    this.engineSystemFault,
+    this.engineAuxiliaryFault,
+    this.engineSourceAddress,
+    this.engineActiveDtcCount,
+    this.engineFirstDtcSpn,
+    this.engineFirstDtcFmi,
+    this.engineCanRxMissed,
+    this.engineCanRxOverrun,
+    this.engineCanBusErrors,
+    this.engineCanBitrateKbps,
+    this.engineMdiRawBytes = const [],
     this.engineUnknownPgn,
     this.engineUnknownFrameCount,
     this.alarmOilMinBar = 1.0,
@@ -132,6 +149,7 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   final double? engineOilPressurePa;
   final double? engineCoolantTempK;
   final double? engineAlternatorV;
+  final double? engineSupplyV;
   // Discrete DM1 fault bits (PGN 65226), when the bridge decodes them —
   // take precedence over the threshold comparison below (see
   // _isLampOnReal). Null while unpublished.
@@ -144,6 +162,22 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   // Preheat-in-progress status (PGN 65264, SPN 1494) — not a fault, drives
   // the 'precal' lamp in real mode the way the sim state machine does.
   final bool? enginePreheatActive;
+  final bool? engineMdiDetected;
+  final bool? engineMdiMappingVerified;
+  final bool? engineCheckAlarm;
+  final bool? engineStarting;
+  final bool? engineStopping;
+  final bool? engineSystemFault;
+  final bool? engineAuxiliaryFault;
+  final double? engineSourceAddress;
+  final double? engineActiveDtcCount;
+  final double? engineFirstDtcSpn;
+  final double? engineFirstDtcFmi;
+  final double? engineCanRxMissed;
+  final double? engineCanRxOverrun;
+  final double? engineCanBusErrors;
+  final double? engineCanBitrateKbps;
+  final List<double?> engineMdiRawBytes;
   // Bridge diagnostics — undecoded PGN frames, shown only in detailed mode.
   final double? engineUnknownPgn;
   final double? engineUnknownFrameCount;
@@ -403,6 +437,14 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // actually running.
   String get _statusText {
     if (!_simulEnabled) {
+      if (widget.engineSystemFault == true ||
+          widget.engineAuxiliaryFault == true ||
+          widget.engineCheckAlarm == true) {
+        return 'REVISAR MOTOR';
+      }
+      if (widget.engineStarting == true) return 'ARRANCANDO…';
+      if (widget.engineStopping == true) return 'PARANDO…';
+      if (widget.enginePreheatActive == true) return 'PRECALENTANDO…';
       return widget.engineRunning ? 'MOTOR EN MARCHA' : 'MOTOR PARADO';
     }
     switch (_engineState) {
@@ -421,6 +463,16 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
 
   Color get _statusColor {
     if (!_simulEnabled) {
+      if (widget.engineSystemFault == true ||
+          widget.engineAuxiliaryFault == true ||
+          widget.engineCheckAlarm == true) {
+        return cRed;
+      }
+      if (widget.engineStarting == true ||
+          widget.engineStopping == true ||
+          widget.enginePreheatActive == true) {
+        return cYellow;
+      }
       return widget.engineRunning ? cGreen : cMuted;
     }
     switch (_engineState) {
@@ -472,7 +524,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   }
 
   double? get _displayAlternatorV {
-    if (!_simulEnabled) return widget.engineAlternatorV;
+    if (!_simulEnabled) return widget.engineAlternatorV ?? widget.engineSupplyV;
     if (_simOff) return null;
     return _simRunning ? 14.2 : 12.6; // charging vs. resting battery
   }
@@ -599,6 +651,54 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     final pa = _displayOilPressurePa;
     final value = pa == null ? null : pa / 100000.0;
     final alarm = _lampOn('aceite');
+    // D1/D2 MDI normally exposes an oil-pressure switch, not an analogue
+    // sender. Do not draw a fictitious needle when the only real datum is
+    // that discrete switch; show its verified state instead.
+    if (!_simulEnabled && widget.engineMdiDetected == true && value == null) {
+      final verified = widget.engineMdiMappingVerified == true;
+      final known = verified && widget.engineLowOilAlarm != null;
+      final color = !known ? cYellow : (alarm ? cRed : cGreen);
+      final text = !verified
+          ? 'MAPA MDI PENDIENTE'
+          : !known
+          ? 'SIN DATO'
+          : alarm
+          ? 'PRESIÓN BAJA'
+          : 'PRESIÓN CORRECTA';
+      return _panelShell(
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text(
+                'PRESIÓN ACEITE',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: cMuted,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Icon(Icons.oil_barrel, color: color, size: 25),
+              const SizedBox(height: 4),
+              Text(
+                text,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return _panelShell(
       child: _AnalogGauge(
         label: 'PRESIÓN ACEITE',
@@ -620,9 +720,13 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   Widget _voltGaugeTile() {
     final value = _displayAlternatorV;
     final alarm = _lampOn('carga');
+    final isSupplyOnly =
+        !_simulEnabled &&
+        widget.engineAlternatorV == null &&
+        widget.engineSupplyV != null;
     return _panelShell(
       child: _AnalogGauge(
-        label: 'ALTERNADOR',
+        label: isSupplyOnly ? 'ALIMENTACIÓN MDI' : 'ALTERNADOR',
         value: value,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)} V',
         min: 10,
@@ -646,15 +750,39 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // would sit inset in a dark instrument bezel.
   Widget _diagnosticsFooter() {
     final count = widget.engineUnknownFrameCount;
-    if (count == null || count <= 0) return const SizedBox.shrink();
     final pgn = widget.engineUnknownPgn;
+    final dtcCount = widget.engineActiveDtcCount?.round() ?? 0;
+    final canIssues =
+        (widget.engineCanRxMissed ?? 0) +
+        (widget.engineCanRxOverrun ?? 0) +
+        (widget.engineCanBusErrors ?? 0);
+    if (widget.engineMdiDetected != true &&
+        dtcCount <= 0 &&
+        canIssues <= 0 &&
+        (count == null || count <= 0)) {
+      return const SizedBox.shrink();
+    }
+    final details = <String>[
+      if (widget.engineMdiDetected == true)
+        'MDI SA ${widget.engineSourceAddress?.round() ?? "–"} · ${widget.engineCanBitrateKbps?.round() ?? "–"} kbit/s · ${widget.engineMdiMappingVerified == true ? "mapa verificado" : "PGN privado sin mapa"}',
+      if (dtcCount > 0)
+        'DTC $dtcCount · SPN ${widget.engineFirstDtcSpn?.round() ?? "–"} / FMI ${widget.engineFirstDtcFmi?.round() ?? "–"}',
+      if (canIssues > 0) 'CAN: ${canIssues.round()} incidencias',
+      if (count != null && count > 0)
+        pgn == null
+            ? '${count.round()} PGN sin decodificar'
+            : '${count.round()} sin decodificar · último ${pgn.round()}',
+      if (widget.engineMdiDetected == true &&
+          widget.engineMdiRawBytes.any((value) => value != null))
+        'RAW ${widget.engineMdiRawBytes.map((value) => value == null ? "--" : value.round().toRadixString(16).padLeft(2, "0").toUpperCase()).join(" ")}',
+    ];
     return _eInkBox(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         child: Row(
           children: [
             const Text(
-              'PGN SIN DECODIFICAR',
+              'DIAGNÓSTICO',
               style: TextStyle(
                 color: _kEInkText,
                 fontSize: 9,
@@ -663,17 +791,17 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
               ),
             ),
             const Spacer(),
-            Text(
-              pgn == null
-                  ? count.round().toString()
-                  : '${count.round()} · último ${pgn.round()}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: _kEInkText,
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-                fontFeatures: [FontFeature.tabularFigures()],
+            Flexible(
+              child: Text(
+                details.join('  ·  '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _kEInkText,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
               ),
             ),
           ],
@@ -1152,19 +1280,19 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         // See _DashboardState._engineContactOn.
         return widget.engineContactOn;
       case 'carga':
-        final v = widget.engineAlternatorV;
+        final v = widget.engineAlternatorV ?? widget.engineSupplyV;
         final threshold = v != null && v < widget.alarmVoltMinV;
-        return widget.engineLowVoltAlarm ?? threshold;
+        return widget.engineLowVoltAlarm == true || threshold;
       case 'aceite':
         final pa = widget.engineOilPressurePa;
         final bar = pa == null ? null : pa / 100000.0;
         final threshold = bar != null && bar < widget.alarmOilMinBar;
-        return widget.engineLowOilAlarm ?? threshold;
+        return widget.engineLowOilAlarm == true || threshold;
       case 'temp':
         final k = widget.engineCoolantTempK;
         final c = k == null ? null : k - 273.15;
         final threshold = c != null && c > widget.alarmTempMaxC;
-        return widget.engineOverTempAlarm ?? threshold;
+        return widget.engineOverTempAlarm == true || threshold;
       case 'precal':
         return (widget.enginePreheatActive ?? false) ||
             (widget.engineGlowPlugFaultAlarm ?? false);
