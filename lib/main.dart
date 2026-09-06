@@ -3884,6 +3884,8 @@ class _DashboardState extends State<Dashboard> {
       'navigation.anchor.currentRadius',
       'navigation.anchor.maxRadius',
       'navigation.anchor.apparentBearing',
+      'navigation.anchor.distanceFromBow',
+      'navigation.anchor.bearingTrue',
       'design.influxHost',
       'design.influxOrg',
       'design.influxToken',
@@ -4316,6 +4318,10 @@ class _DashboardState extends State<Dashboard> {
         signalK.anchorMaxRadiusM = n;
       case 'navigation.anchor.apparentBearing':
         signalK.anchorApparentBearingDeg = n == null ? null : n * 57.2957795;
+      case 'navigation.anchor.distanceFromBow':
+        signalK.anchorDistanceFromBowM = n;
+      case 'navigation.anchor.bearingTrue':
+        signalK.anchorBearingTrueDeg = n == null ? null : n * 57.2957795;
       case 'environment.wind.speedApparent':
         signalK.awsKn = n == null ? null : n * 1.94384;
         _dAws = _awsDamp.linear(signalK.awsKn);
@@ -8042,16 +8048,37 @@ class _DashboardState extends State<Dashboard> {
   // live distance/bearing from the bow within it — reads at a glance
   // whether it's centered or nearing the edge, instead of two bare numbers.
   Widget _premiumAnchorCard() {
-    final current = signalK.anchorCurrentRadiusM;
-    final maxR = signalK.anchorMaxRadiusM;
+    // NOT anchorCurrentRadiusM/anchorMaxRadiusM — despite their names,
+    // those are the CONFIGURED watch radius and its initial value (near-
+    // constant, barely ever changes while armed), not a live reading.
+    // Binding "DISTANCIA" and the ring's fraction to them showed a
+    // frozen-looking number and a ring that never reflected where the
+    // boat actually was within its circle. distanceFromBow is the real,
+    // continuously-updating distance; anchorCurrentRadiusM (used here as
+    // the ring's outer bound) is at least the ACTIVE alarm radius, not
+    // the stale initial one. Reported live 2026-09-06 ("has cogido como
+    // distancia el radio no la distancia al ancla").
+    final current = signalK.anchorDistanceFromBowM;
+    final maxR = signalK.anchorCurrentRadiusM;
     // "Apparent" bearing is relative to the bow by definition, so it's only
     // meaningful with a real, fresh heading behind it — apparentBearing
     // itself has no timestamp of its own, so a boat that loses its heading
     // source could otherwise keep showing the last bearing it ever
     // computed, frozen, instead of falling back to the painter's "point
     // the bow at the anchor" case below.
-    final bearing = _freshHeading != null
-        ? signalK.anchorApparentBearingDeg
+    // Recomputed live from the TRUE bearing + this device's current
+    // heading — NOT anchorApparentBearingDeg, which is already relative-
+    // ized against whatever heading was fresh at PUBLISH time (every 5s,
+    // see _publishAnchorDelta) and just passed through as-is. ANC's own
+    // status panel (_demoraLabel) recomputes this same way on every
+    // frame, so a heading change between publishes made the two screens
+    // visibly disagree until the next republish caught up. Same formula
+    // as _demoraLabel, verified live 2026-09-06 ("pintas mal el bearing
+    // to anchor, no está igual que en la pantalla anchor").
+    final trueBearing = signalK.anchorBearingTrueDeg;
+    final heading = _freshHeading;
+    final bearing = (trueBearing != null && heading != null)
+        ? ((trueBearing - heading + 540) % 360) - 180
         : null;
     final frac = (current != null && maxR != null && maxR > 0)
         ? (current / maxR).clamp(0.0, 1.3)

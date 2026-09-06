@@ -704,9 +704,20 @@ class SignalKModel {
   // geometry for the native Premium "Fondeado" anchor card, as opposed to
   // embedding the plugin's own webapp.
   String? anchorState; // navigation.anchor.state: "on" | "off"
+  // Despite the name, these are the CONFIGURED watch radius (cfg.radiusM)
+  // and its initial value — not a live distance. Kept only for the ring's
+  // own fraction-of-radius fill; the card's actual "DISTANCIA" number
+  // must read anchorDistanceFromBowM below instead. Mixing the two up
+  // here — showing the (mostly constant) radius where the live distance
+  // belonged — was a real bug, reported live 2026-09-06.
   double? anchorCurrentRadiusM;
   double? anchorMaxRadiusM;
   double? anchorApparentBearingDeg; // relative to the bow, not true north
+  // The actual live distance/true bearing to the anchor — navigation.
+  // anchor.distanceFromBow/bearingTrue were being PUBLISHED all along but
+  // never subscribed to or read back anywhere on the client side.
+  double? anchorDistanceFromBowM;
+  double? anchorBearingTrueDeg;
   bool get anchorArmed => anchorState == 'on';
 
   // Wipes every live-data field back to "unknown" — called at the start of
@@ -835,6 +846,8 @@ class SignalKModel {
     anchorCurrentRadiusM = null;
     anchorMaxRadiusM = null;
     anchorApparentBearingDeg = null;
+    anchorDistanceFromBowM = null;
+    anchorBearingTrueDeg = null;
   }
 }
 
