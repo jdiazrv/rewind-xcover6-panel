@@ -327,12 +327,32 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
     return (n < 0 ? n + 360 : n).toString();
   }
 
-  static String _degRelative(double? v) {
-    if (v == null) return '--';
+  static int? _relDeg(double? v) {
+    if (v == null) return null;
     var n = v.round() % 360;
     if (n > 180) n -= 360;
     if (n < -180) n += 360;
-    return n.toString();
+    return n;
+  }
+
+  // AWA/TWA as a magnitude plus the side it's on — NOT a signed number.
+  // "-150" reads as a negative quantity; what it actually means is 150° on
+  // the port bow, and every other screen in the app already says it that
+  // way (the VNT grid's absolute number + coloured arrow, the anchor
+  // screen's "40° Br"). Reported live 2026-09-07 ("awa en la pantalla
+  // crucero de vnt sigue saliendo negativo cuando es babor").
+  static String _degSideValue(double? v) {
+    final n = _relDeg(v);
+    return n == null ? '--' : n.abs().toString();
+  }
+
+  // Negative = port (Br), positive = starboard (Er) — same convention as
+  // sideColor() and the anchor screen's _demoraLabel. Dead ahead/astern
+  // have no side, so they stay a bare degree symbol.
+  static String _degSideUnit(double? v) {
+    final n = _relDeg(v);
+    if (n == null || n == 0 || n.abs() == 180) return '°';
+    return n < 0 ? '° Br' : '° Er';
   }
   static String _kt(double? v) => v == null ? '--' : v.toStringAsFixed(1);
 
@@ -400,7 +420,11 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
                         _legendDot(PremiumWindPanel._trueColor, 'TWA'),
                       ],
                       readouts: [
-                        _readout(label: 'AWA', value: _degRelative(awaDeg), unit: '°'),
+                        _readout(
+                          label: 'AWA',
+                          value: _degSideValue(awaDeg),
+                          unit: _degSideUnit(awaDeg),
+                        ),
                         _readout(
                           label: 'AWS',
                           value: _kt(widget.awsKn),
@@ -418,7 +442,11 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
                               ? null
                               : _kt(widget.twsGustKn),
                         ),
-                        _readout(label: 'TWA', value: _degRelative(twaDeg), unit: '°'),
+                        _readout(
+                          label: 'TWA',
+                          value: _degSideValue(twaDeg),
+                          unit: _degSideUnit(twaDeg),
+                        ),
                       ],
                       painter: _WindCompassPainter(
                         angle1: awaDeg,

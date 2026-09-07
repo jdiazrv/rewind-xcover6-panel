@@ -2027,7 +2027,7 @@ class TankCard extends StatelessWidget {
                       const SizedBox(width: 9),
                       Expanded(
                         child: Text(
-                          name.toUpperCase(),
+                          name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -2215,9 +2215,7 @@ class SegmentedTankGauge extends StatelessWidget {
                         child: TweenAnimationBuilder<double>(
                           tween: Tween(
                             begin: 0,
-                            end: hasData
-                                ? (percent / 100).clamp(0.0, 1.0)
-                                : 0,
+                            end: hasData ? (percent / 100).clamp(0.0, 1.0) : 0,
                           ),
                           duration: const Duration(milliseconds: 450),
                           curve: Curves.easeOutCubic,

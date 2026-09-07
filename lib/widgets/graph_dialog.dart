@@ -62,6 +62,9 @@ class _GraphDialogState extends State<GraphDialog> {
   // Default range stays 24h (now index 3, after the new 1h/6h/12h buttons).
   int _rIdx = 3;
   bool _histogramMode = false;
+  // Defaults ON for the wind series it applies to: the raw trace is the
+  // state the user called useless, so it shouldn't be what they land on.
+  bool _smoothMode = true;
   List<GraphPoint> _points = [];
   List<GraphPoint> _windCompanion = [];
   bool _loading = false;
@@ -77,6 +80,28 @@ class _GraphDialogState extends State<GraphDialog> {
   MetricDef get _def => widget.metrics[_mIdx];
   bool get _isTrueWindMetric =>
       _def.skPath == mTws.skPath || _def.skPath == mTwd.skPath;
+
+  // Wind is the one family where the raw trace is genuinely unreadable —
+  // it oscillates point to point far faster than anything you'd act on
+  // ("la grafica de viento... es poco util con tanta oscilacion", reported
+  // live 2026-09-07). Other series (temperature, tank level, voltage)
+  // change slowly enough that the raw line is already the useful one, so
+  // they don't get the toggle at all rather than adding a control that
+  // does nothing visible.
+  static final _smoothablePaths = {
+    mAws.skPath,
+    mTws.skPath,
+    mAwa.skPath,
+    mTwa.skPath,
+    mTwd.skPath,
+  };
+  bool get _canSmooth => _smoothablePaths.contains(_def.skPath);
+  // Angles need circular statistics — see smoothSeriesWithBand's own doc
+  // comment for why an arithmetic mean is wrong across the wrap seam.
+  bool get _isAngleMetric =>
+      _def.skPath == mAwa.skPath ||
+      _def.skPath == mTwa.skPath ||
+      _def.skPath == mTwd.skPath;
 
   @override
   void initState() {
@@ -246,6 +271,17 @@ class _GraphDialogState extends State<GraphDialog> {
                 : 'Ver distribución',
             onPressed: () => setState(() => _histogramMode = !_histogramMode),
           ),
+          if (_canSmooth && !_histogramMode)
+            IconButton(
+              icon: Icon(
+                _smoothMode ? Icons.waves : Icons.blur_on,
+                color: _smoothMode ? _def.color : cMuted,
+              ),
+              tooltip: _smoothMode
+                  ? 'Ver serie cruda'
+                  : 'Ver media móvil y variación',
+              onPressed: () => setState(() => _smoothMode = !_smoothMode),
+            ),
           // Range buttons — greyed out and untappable once we know (from a
           // Signal K/KIP probe) that range has no data at all for this
           // series. Horizontally scrollable so adding more ranges never
@@ -446,10 +482,28 @@ class _GraphDialogState extends State<GraphDialog> {
         ),
       );
     }
+    final range = parseFluxRange(appRanges[_rIdx].flux);
+    final step = parseAggEvery(
+      _usedSk
+          ? (_skAgg[appRanges[_rIdx].label] ?? appRanges[_rIdx].agg)
+          : appRanges[_rIdx].agg,
+    );
+    final smoothed = (_canSmooth && _smoothMode)
+        ? smoothSeriesWithBand(
+            _points,
+            smoothingWindowFor(range, step),
+            circular: _isAngleMetric,
+          )
+        : null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 4, 16, 4),
       child: LineGraph(
-        points: _points,
+        points: smoothed?.mean ?? _points,
+        bandLow: smoothed?.low ?? const [],
+        bandHigh: smoothed?.high ?? const [],
+        // The barb strip stays on the RAW companion series — barbs are
+        // discrete samples of what the wind actually did at that instant,
+        // so smoothing them would misrepresent them.
         windSpeeds: _isTrueWindMetric
             ? (_def.skPath == mTws.skPath ? _points : _windCompanion)
             : const [],
@@ -458,15 +512,9 @@ class _GraphDialogState extends State<GraphDialog> {
             : const [],
         color: _def.color,
         unit: _def.unit,
-        windowStart: DateTime.now().subtract(
-          parseFluxRange(appRanges[_rIdx].flux),
-        ),
+        windowStart: DateTime.now().subtract(range),
         windowEnd: DateTime.now(),
-        expectedStepMs: parseAggEvery(
-          _usedSk
-              ? (_skAgg[appRanges[_rIdx].label] ?? appRanges[_rIdx].agg)
-              : appRanges[_rIdx].agg,
-        ).inMilliseconds.toDouble(),
+        expectedStepMs: step.inMilliseconds.toDouble(),
       ),
     );
   }
@@ -512,15 +560,16 @@ class _GraphDialogState extends State<GraphDialog> {
       );
     }
     if (_tankLevelRe.hasMatch(_def.skPath)) {
-      final elapsedHours = _points.last.time
-              .difference(_points.first.time)
-              .inSeconds
-              .abs() /
+      final elapsedHours =
+          _points.last.time.difference(_points.first.time).inSeconds.abs() /
           3600.0;
       final q = math.max(1, values.length ~/ 4);
       final early = values.take(q).fold(0.0, (a, b) => a + b) / q;
-      final late = values.skip(values.length - q).fold(0.0, (a, b) => a + b) / q;
-      final usefulChange = _def.tankDangerWhenHigh ? late - early : early - late;
+      final late =
+          values.skip(values.length - q).fold(0.0, (a, b) => a + b) / q;
+      final usefulChange = _def.tankDangerWhenHigh
+          ? late - early
+          : early - late;
       final reliable = elapsedHours >= 3 && usefulChange >= 2;
       final ratePctDay = reliable ? usefulChange / elapsedHours * 24 : null;
       final remainingPct = _def.tankDangerWhenHigh
@@ -743,8 +792,15 @@ class LineGraph extends StatefulWidget {
     required this.expectedStepMs,
     this.windSpeeds = const [],
     this.windDirections = const [],
+    this.bandLow = const [],
+    this.bandHigh = const [],
   });
   final List<GraphPoint> points;
+  // Min/max envelope drawn as a translucent area behind [points] — empty
+  // when the graph is showing the raw trace. Both lists are parallel to
+  // [points] (same times, same length); see smoothSeriesWithBand.
+  final List<GraphPoint> bandLow;
+  final List<GraphPoint> bandHigh;
   final Color color;
   final String unit;
   // The x-axis always spans the *requested* range (24h/48h/7d/1 mes), not
@@ -865,6 +921,8 @@ class _LineGraphState extends State<LineGraph> {
                 expectedStepMs: widget.expectedStepMs,
                 windSpeeds: widget.windSpeeds,
                 windDirections: widget.windDirections,
+                bandLow: widget.bandLow,
+                bandHigh: widget.bandHigh,
               ),
               child: const SizedBox.expand(),
             ),
@@ -886,6 +944,8 @@ class _LineGraphPainter extends CustomPainter {
     required this.expectedStepMs,
     required this.windSpeeds,
     required this.windDirections,
+    this.bandLow = const [],
+    this.bandHigh = const [],
   });
   final List<GraphPoint> points;
   final Color color;
@@ -895,6 +955,8 @@ class _LineGraphPainter extends CustomPainter {
   final double expectedStepMs;
   final List<GraphPoint> windSpeeds;
   final List<GraphPoint> windDirections;
+  final List<GraphPoint> bandLow;
+  final List<GraphPoint> bandHigh;
 
   static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0, _bPad = 30.0;
 
@@ -907,8 +969,17 @@ class _LineGraphPainter extends CustomPainter {
     final pB = size.height - _bPad;
     final pW = pR - pL, pH = pB - pT;
 
-    // Y scale
-    final vals = points.map((p) => p.value).toList();
+    // Y scale — must cover the envelope too, or the band gets clipped at
+    // the plot edges and reads as if the wind never went above the line.
+    final hasBand =
+        bandLow.length == points.length && bandHigh.length == points.length;
+    final vals = <double>[
+      for (final p in points) p.value,
+      if (hasBand) ...[
+        for (final p in bandLow) p.value,
+        for (final p in bandHigh) p.value,
+      ],
+    ];
     var yMin = vals.reduce(math.min), yMax = vals.reduce(math.max);
     final ySpan0 = yMax - yMin;
     final pad = ySpan0 < 0.5 ? 0.5 : ySpan0 * 0.08;
@@ -1073,6 +1144,35 @@ class _LineGraphPainter extends CustomPainter {
       }
     }
 
+    // Min/max envelope, drawn first so the mean line sits on top of it.
+    // Uses the SAME segmentation as the line, so a data gap breaks the
+    // band too instead of spanning it with a misleading filled block.
+    if (hasBand) {
+      final bandPaint = Paint()..color = color.withValues(alpha: 0.16);
+      var idx = 0;
+      for (final seg in segments) {
+        if (seg.length < 2) {
+          idx += seg.length;
+          continue;
+        }
+        final path = Path();
+        for (var k = 0; k < seg.length; k++) {
+          final x = toX(seg[k].time.millisecondsSinceEpoch.toDouble());
+          final y = toY(bandHigh[idx + k].value);
+          k == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
+        }
+        for (var k = seg.length - 1; k >= 0; k--) {
+          path.lineTo(
+            toX(seg[k].time.millisecondsSinceEpoch.toDouble()),
+            toY(bandLow[idx + k].value),
+          );
+        }
+        path.close();
+        canvas.drawPath(path, bandPaint);
+        idx += seg.length;
+      }
+    }
+
     final fillPath = Path();
     for (final seg in segments) {
       fillPath.moveTo(
@@ -1163,7 +1263,9 @@ class _LineGraphPainter extends CustomPainter {
       old.color != color ||
       old.selected != selected ||
       old.windSpeeds != windSpeeds ||
-      old.windDirections != windDirections;
+      old.windDirections != windDirections ||
+      old.bandLow != bandLow ||
+      old.bandHigh != bandHigh;
 }
 
 void _paintWindBarb(

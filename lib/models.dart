@@ -189,6 +189,114 @@ class GraphPoint {
   final double value;
 }
 
+/// A noisy series reduced to what's actually readable: the rolling mean
+/// ("sostenido") plus the min/max envelope of the same window.
+typedef SmoothedBand = ({
+  List<GraphPoint> mean,
+  List<GraphPoint> low,
+  List<GraphPoint> high,
+});
+
+/// Rolling mean + min/max envelope over a TIME window (not a fixed sample
+/// count — history sources return very different cadences per range, so a
+/// count-based window would mean wildly different real durations).
+///
+/// This is the standard meteorological way to read wind: a sustained line
+/// with the gust/lull envelope around it, rather than the raw trace, whose
+/// point-to-point oscillation hides the trend that actually matters when
+/// deciding sail area. Reported live 2026-09-07 ("la grafica de viento...
+/// es poco util con tanta oscilacion").
+///
+/// [circular] switches to circular statistics for ANGLES (AWA/TWA/TWD): a
+/// plain arithmetic mean is wrong the moment the series crosses its wrap
+/// seam (±180 for the relative angles, 0/360 for TWD) — e.g. -179 and +179
+/// are 2° apart but average to 0, dead ahead, which is the opposite of the
+/// truth. The mean goes through atan2(Σsin, Σcos) instead, and the
+/// envelope is built from each sample's wrapped deviation from that mean,
+/// so it stays correct across the seam too.
+///
+/// Note on the envelope's meaning: when the history source already
+/// aggregated with `mean` over its own step (InfluxDB's aggregateWindow
+/// does), the max here is a max OF MEANS, so it understates true gusts —
+/// it shows how much the averaged signal swings, not the 3-second peak a
+/// meteorological gust is defined as. Honest framing matters here, hence
+/// the UI labels this "variación", not "racha".
+SmoothedBand smoothSeriesWithBand(
+  List<GraphPoint> points,
+  Duration window, {
+  bool circular = false,
+}) {
+  if (points.length < 3 || window <= Duration.zero) {
+    return (mean: points, low: const [], high: const []);
+  }
+  final halfMs = window.inMilliseconds ~/ 2;
+  final mean = <GraphPoint>[];
+  final low = <GraphPoint>[];
+  final high = <GraphPoint>[];
+  // Two pointers over a time-sorted series — O(n) rather than O(n²).
+  var lo = 0, hi = 0;
+  for (var i = 0; i < points.length; i++) {
+    final tMs = points[i].time.millisecondsSinceEpoch;
+    while (lo < i && points[lo].time.millisecondsSinceEpoch < tMs - halfMs) {
+      lo++;
+    }
+    while (hi + 1 < points.length &&
+        points[hi + 1].time.millisecondsSinceEpoch <= tMs + halfMs) {
+      hi++;
+    }
+    final t = points[i].time;
+    if (circular) {
+      var sumSin = 0.0, sumCos = 0.0;
+      for (var j = lo; j <= hi; j++) {
+        final rad = points[j].value * math.pi / 180;
+        sumSin += math.sin(rad);
+        sumCos += math.cos(rad);
+      }
+      final circMean = math.atan2(sumSin, sumCos) * 180 / math.pi;
+      // Re-express near the raw sample so the plotted line stays
+      // numerically continuous instead of snapping to atan2's own branch.
+      final shift =
+          ((circMean - points[i].value + 180) % 360 + 360) % 360 - 180;
+      final m = points[i].value + shift;
+      var devMin = 0.0, devMax = 0.0;
+      for (var j = lo; j <= hi; j++) {
+        final dev = ((points[j].value - m + 180) % 360 + 360) % 360 - 180;
+        if (dev < devMin) devMin = dev;
+        if (dev > devMax) devMax = dev;
+      }
+      mean.add(GraphPoint(time: t, value: m));
+      low.add(GraphPoint(time: t, value: m + devMin));
+      high.add(GraphPoint(time: t, value: m + devMax));
+    } else {
+      var sum = 0.0;
+      var mn = points[lo].value, mx = points[lo].value;
+      for (var j = lo; j <= hi; j++) {
+        final v = points[j].value;
+        sum += v;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      mean.add(GraphPoint(time: t, value: sum / (hi - lo + 1)));
+      low.add(GraphPoint(time: t, value: mn));
+      high.add(GraphPoint(time: t, value: mx));
+    }
+  }
+  return (mean: mean, low: low, high: high);
+}
+
+/// Smoothing window for a given view: proportional to the visible range so
+/// the line keeps roughly the same visual "resolution" at every zoom, but
+/// never below a few raw samples (pointless) nor above 10 minutes for
+/// short views (the meteorological sustained-wind period).
+Duration smoothingWindowFor(Duration range, Duration sampleStep) {
+  final proportional = Duration(milliseconds: range.inMilliseconds ~/ 60);
+  final floor = sampleStep * 3;
+  const ceiling = Duration(minutes: 10);
+  var w = proportional < ceiling ? proportional : ceiling;
+  if (w < floor) w = floor;
+  return w;
+}
+
 /// One meteorological wind barb: [directionDeg] is the true direction the
 /// wind comes from and [speedKnots] controls the 5/10/50 kt feathers.
 class WindBarbSample {
