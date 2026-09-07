@@ -352,11 +352,21 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
   // GPS position is a compound value (lat+lon), so its two series need
   // joining by nearest timestamp (same technique as _realPolar) to
-  // reconstruct (lat, lon) pairs. [sog] filters out anchored/stationary
-  // samples (same SOG<=0.5kt threshold as the polar table) — without it,
-  // hundreds of GPS-jitter fixes recorded while sitting at anchor get
-  // connected point-to-point into a tangled scribble instead of the actual
-  // transit line, which is what made the map look like "muchas lineas".
+  // reconstruct (lat, lon) pairs. [sog] flags anchored/stationary samples
+  // (same SOG<=0.5kt threshold as the polar table): hundreds of GPS-jitter
+  // fixes recorded while sitting at anchor used to get connected
+  // point-to-point into a tangled scribble instead of the actual transit
+  // line ("muchas lineas"). The FIX for that used to just drop every
+  // stationary sample outright — which solved the scribble but erased
+  // real dwell time from the map entirely, so a report covering a period
+  // with real anchoring drew a route that skipped straight from wherever
+  // the boat was before dropping anchor to wherever it was after raising
+  // it, matching nothing in the boat's actual Signal K track ("no se
+  // parece nada", reported live 2026-09-07). Collapsing each contiguous
+  // stationary run into ONE averaged point instead keeps both fixes: no
+  // jitter scribble, and the stop still shows up as a real point on the
+  // route — the same way a chartplotter or MarineTraffic-style track
+  // shows a dwell as one knot, not a gap and not a blob.
   Future<List<({double lat, double lon, DateTime time})>> _fetchTrackPoints(
     List<GraphPoint> sog,
   ) async {
@@ -387,17 +397,38 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         return best;
       }
 
-      final out = <({double lat, double lon, DateTime time})>[];
+      final raw = <({double lat, double lon, DateTime time, bool moving})>[];
       for (final lp in lats) {
         final lonP = nearest(lons, lp.time);
         if (lonP == null || lp.value.abs() > 90 || lonP.value.abs() > 180) {
           continue;
         }
+        var moving = true;
         if (sog.isNotEmpty) {
           final sogP = nearest(sog, lp.time);
-          if (sogP == null || sogP.value <= 0.5) continue;
+          moving = sogP != null && sogP.value > 0.5;
         }
-        out.add((lat: lp.value, lon: lonP.value, time: lp.time));
+        raw.add((lat: lp.value, lon: lonP.value, time: lp.time, moving: moving));
+      }
+
+      final out = <({double lat, double lon, DateTime time})>[];
+      var i = 0;
+      while (i < raw.length) {
+        if (raw[i].moving) {
+          out.add((lat: raw[i].lat, lon: raw[i].lon, time: raw[i].time));
+          i++;
+          continue;
+        }
+        var j = i;
+        var sumLat = 0.0, sumLon = 0.0, n = 0;
+        while (j < raw.length && !raw[j].moving) {
+          sumLat += raw[j].lat;
+          sumLon += raw[j].lon;
+          n++;
+          j++;
+        }
+        out.add((lat: sumLat / n, lon: sumLon / n, time: raw[i].time));
+        i = j;
       }
       return out;
     } catch (_) {
@@ -853,7 +884,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               ),
             ),
             pw.SizedBox(height: 8),
-            pdfTrackMap(map: trackMap, points: _track, width: contentWidth),
+            pdfTrackMap(
+              map: trackMap,
+              points: _track,
+              width: contentWidth,
+              tws: tws,
+              twd: twd,
+            ),
           ],
           if (showWind) ...[
             if (showNavigation) pw.SizedBox(height: 16),
@@ -976,6 +1013,72 @@ List<pw.Widget> pdfHistogramRows(
           ),
         ),
   ];
+}
+
+/// Draws one meteorological wind barb glyph centered at (originX, originY)
+/// — a full shaft pointing the direction the wind blows FROM, with 50/10/5
+/// kt pennants/feathers. Shared by the wind timeline chart (origin = a
+/// position along the time axis) and the track map (origin = the boat's
+/// own charted position at that sample's time), so the same glyph reads
+/// consistently in both places instead of two near-duplicate copies
+/// drifting apart.
+void _drawWindBarbGlyph(
+  PdfGraphics canvas,
+  double originX,
+  double originY,
+  WindBarbSample barb, {
+  PdfColor color = pdfOrange,
+}) {
+  canvas
+    ..setStrokeColor(color)
+    ..setLineWidth(1.15);
+  if (barb.speedKnots < 2.5) {
+    canvas
+      ..drawEllipse(originX - 2, originY - 2, 4, 4)
+      ..strokePath();
+    return;
+  }
+  final angle = barb.directionDeg * math.pi / 180;
+  final ax = math.sin(angle), ay = math.cos(angle);
+  final sx = math.cos(angle), sy = -math.sin(angle);
+  const shaft = 14.0;
+  final tipX = originX + ax * shaft;
+  final tipY = originY + ay * shaft;
+  canvas
+    ..moveTo(originX, originY)
+    ..lineTo(tipX, tipY)
+    ..strokePath();
+  var units = (barb.speedKnots / 5).round() * 5;
+  var cursorX = tipX, cursorY = tipY;
+  while (units >= 50) {
+    final backX = cursorX - ax * 4.5;
+    final backY = cursorY - ay * 4.5;
+    canvas
+      ..setFillColor(color)
+      ..moveTo(cursorX, cursorY)
+      ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
+      ..lineTo(backX, backY)
+      ..closePath()
+      ..fillPath();
+    cursorX = backX - ax;
+    cursorY = backY - ay;
+    units -= 50;
+  }
+  while (units >= 10) {
+    canvas
+      ..moveTo(cursorX, cursorY)
+      ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
+      ..strokePath();
+    cursorX -= ax * 2.7;
+    cursorY -= ay * 2.7;
+    units -= 10;
+  }
+  if (units >= 5) {
+    canvas
+      ..moveTo(cursorX, cursorY)
+      ..lineTo(cursorX + sx * 3.2, cursorY + sy * 3.2)
+      ..strokePath();
+  }
 }
 
 pw.Widget pdfWindTimeline({
@@ -1134,62 +1237,8 @@ pw.Widget pdfWindTimeline({
             }
             canvas.strokePath();
 
-            void drawBarb(WindBarbSample barb) {
-              final originX = xAt(barb.time), originY = size.y - 20;
-              canvas
-                ..setStrokeColor(pdfOrange)
-                ..setLineWidth(1.15);
-              if (barb.speedKnots < 2.5) {
-                canvas
-                  ..drawEllipse(originX - 2, originY - 2, 4, 4)
-                  ..strokePath();
-                return;
-              }
-              final angle = barb.directionDeg * math.pi / 180;
-              final ax = math.sin(angle), ay = math.cos(angle);
-              final sx = math.cos(angle), sy = -math.sin(angle);
-              const shaft = 14.0;
-              final tipX = originX + ax * shaft;
-              final tipY = originY + ay * shaft;
-              canvas
-                ..moveTo(originX, originY)
-                ..lineTo(tipX, tipY)
-                ..strokePath();
-              var units = (barb.speedKnots / 5).round() * 5;
-              var cursorX = tipX, cursorY = tipY;
-              while (units >= 50) {
-                final backX = cursorX - ax * 4.5;
-                final backY = cursorY - ay * 4.5;
-                canvas
-                  ..setFillColor(pdfOrange)
-                  ..moveTo(cursorX, cursorY)
-                  ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
-                  ..lineTo(backX, backY)
-                  ..closePath()
-                  ..fillPath();
-                cursorX = backX - ax;
-                cursorY = backY - ay;
-                units -= 50;
-              }
-              while (units >= 10) {
-                canvas
-                  ..moveTo(cursorX, cursorY)
-                  ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
-                  ..strokePath();
-                cursorX -= ax * 2.7;
-                cursorY -= ay * 2.7;
-                units -= 10;
-              }
-              if (units >= 5) {
-                canvas
-                  ..moveTo(cursorX, cursorY)
-                  ..lineTo(cursorX + sx * 3.2, cursorY + sy * 3.2)
-                  ..strokePath();
-              }
-            }
-
             for (final barb in barbs) {
-              drawBarb(barb);
+              _drawWindBarbGlyph(canvas, xAt(barb.time), size.y - 20, barb);
             }
           },
         ),
@@ -1325,6 +1374,11 @@ pw.Widget pdfTrackMap({
   required List<({double lat, double lon, DateTime time})> points,
   required double width,
   double height = 220,
+  // Wind barbs placed ALONG the route itself, like MarineTraffic's own
+  // track view — not on a separate time axis. Optional: a caller with no
+  // wind history just gets the plain route/markers, same as before.
+  List<GraphPoint> tws = const [],
+  List<GraphPoint> twd = const [],
 }) {
   if (map == null || points.length < 2) {
     return pw.Container(
@@ -1361,6 +1415,66 @@ pw.Widget pdfTrackMap({
       ? const Duration(minutes: 20)
       : medianGap * 4;
 
+  // OSM tiles are 256px each, and the fetched grid's own aspect ratio
+  // (cols:rows) almost never matches this report's fixed width:height box
+  // — laying the grid out with `Expanded` cells used to force EVERY tile
+  // into a cell shaped by the OUTER box instead of the tile's own square
+  // shape, and BoxFit.cover cropped each one independently. Neighbouring
+  // tiles no longer lined up at their shared edge (each was stretched/
+  // cropped by a different amount), so the mosaic looked shredded — "el
+  // mapa... se come trozos" (reported live 2026-09-07). Rendering the
+  // mosaic at its true natural size first, THEN scaling the whole thing as
+  // one unit (same cover math FittedBox itself uses) keeps every tile
+  // boundary aligned; only the composed image's own outer edges get
+  // cropped, same as a normal cover-fit photo.
+  final naturalW = map.cols * 256.0;
+  final naturalH = map.rows * 256.0;
+  final coverScale = math.max(width / naturalW, height / naturalH);
+  final drawnW = naturalW * coverScale;
+  final drawnH = naturalH * coverScale;
+  final offsetX = (width - drawnW) / 2;
+  final offsetY = (height - drawnH) / 2;
+
+  // The route/marker overlay must use this SAME cover transform — not a
+  // plain 0..1-over-the-box mapping — or it drifts away from the map
+  // underneath it whenever the mosaic's aspect ratio forces a crop.
+  (double, double) toCanvas((double, double) frac) {
+    final topDownX = offsetX + frac.$1 * drawnW;
+    final topDownY = offsetY + frac.$2 * drawnH;
+    return (topDownX, height - topDownY); // package:pdf canvases are y-up
+  }
+
+  // Barbs ON the route, not on a separate time axis — "los barbs son en
+  // la ruta como hace marine traffic" (reported live 2026-09-07). Each
+  // sampled TWD/TWS pair is placed at whatever track point is closest in
+  // TIME to it, the same nearest-timestamp join used everywhere else in
+  // this report.
+  final windBarbs = (tws.isEmpty || twd.isEmpty)
+      ? const <WindBarbSample>[]
+      : sampleWindBarbs(
+          tws: tws,
+          twd: twd,
+          start: points.first.time,
+          end: points.last.time,
+          interval: windBarbInterval(
+            points.last.time.difference(points.first.time),
+            targetCount: math.max(1, (width / 90).floor()),
+          ),
+        );
+  (double, double)? nearestTrackCanvasPos(DateTime t) {
+    var bestIdx = -1;
+    Duration? bestDiff;
+    for (var i = 0; i < points.length; i++) {
+      final diff = points[i].time.difference(t).abs();
+      if (bestDiff == null || diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) return null;
+    return toCanvas(projected[bestIdx]);
+  }
+
   return pw.Container(
     width: width,
     height: height,
@@ -1375,17 +1489,21 @@ pw.Widget pdfTrackMap({
           child: pw.ClipRRect(
             horizontalRadius: 4,
             verticalRadius: 4,
-            child: pw.Column(
-              children: List.generate(
-                map.rows,
-                (row) => pw.Expanded(
-                  child: pw.Row(
-                    children: List.generate(
-                      map.cols,
-                      (col) => pw.Expanded(
-                        child: pw.Image(
+            child: pw.FittedBox(
+              fit: pw.BoxFit.cover,
+              child: pw.SizedBox(
+                width: naturalW,
+                height: naturalH,
+                child: pw.Column(
+                  children: List.generate(
+                    map.rows,
+                    (row) => pw.Row(
+                      children: List.generate(
+                        map.cols,
+                        (col) => pw.Image(
                           pw.MemoryImage(map.tiles[row * map.cols + col]),
-                          fit: pw.BoxFit.cover,
+                          width: 256,
+                          height: 256,
                         ),
                       ),
                     ),
@@ -1398,15 +1516,10 @@ pw.Widget pdfTrackMap({
         pw.Positioned.fill(
           child: pw.CustomPaint(
             painter: (canvas, size) {
-              // Tile fractions above are top-down, but `package:pdf`
-              // canvases are y-up (origin bottom-left) — same flip as the
-              // polar chart: canvasY = size.y * (1 - yFracTopDown).
               canvas.setStrokeColor(pdfCyan);
               canvas.setLineWidth(1.6);
               for (var i = 0; i < projected.length; i++) {
-                final (xf, yf) = projected[i];
-                final x = size.x * xf;
-                final y = size.y * (1 - yf);
+                final (x, y) = toCanvas(projected[i]);
                 final gapBefore = i == 0
                     ? Duration.zero
                     : points[i].time.difference(points[i - 1].time);
@@ -1419,8 +1532,7 @@ pw.Widget pdfTrackMap({
               canvas.strokePath();
 
               void marker((double, double) frac, PdfColor color) {
-                final x = size.x * frac.$1;
-                final y = size.y * (1 - frac.$2);
+                final (x, y) = toCanvas(frac);
                 canvas
                   ..setFillColor(color)
                   ..drawEllipse(x - 3, y - 3, 6, 6)
@@ -1433,6 +1545,12 @@ pw.Widget pdfTrackMap({
 
               marker(projected.first, pdfGreen);
               marker(projected.last, pdfRed);
+
+              for (final barb in windBarbs) {
+                final pos = nearestTrackCanvasPos(barb.time);
+                if (pos == null) continue;
+                _drawWindBarbGlyph(canvas, pos.$1, pos.$2, barb);
+              }
             },
           ),
         ),
