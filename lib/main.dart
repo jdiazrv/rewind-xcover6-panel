@@ -256,17 +256,24 @@ class _DashboardState extends State<Dashboard> {
   bool get _isCompactPremium => MediaQuery.sizeOf(context).height < 500;
 
   double _marineHorizonHours = 1;
-  // Each engine gauge goes stale independently, 2s after its own last
-  // delta — a dead/disconnected bridge must not leave a frozen RPM or
-  // temperature reading sitting there looking live forever. EEC1 arrives
-  // many times per second, so two seconds still provides ample debounce.
+  // Each engine gauge goes stale independently. RPM uses a tight 2 s window
+  // because EEC1 arrives frequently and drives running/contact detection;
+  // slow telemetry and the 3 s alarm heartbeat get 6 s so a normal 2–3 s
+  // publication interval never makes a healthy value flicker to no-data.
   static const _engineStaleAfter = Duration(seconds: 2);
-  double? _freshEngine(double? v, DateTime? updatedAt) {
+  static const _engineSlowStaleAfter = Duration(seconds: 6);
+  static const _engineAlarmStaleAfter = Duration(seconds: 6);
+  double? _freshEngine(
+    double? v,
+    DateTime? updatedAt, {
+    Duration staleAfter = _engineStaleAfter,
+  }) {
     if (v == null || updatedAt == null) return null;
-    return DateTime.now().difference(updatedAt) < _engineStaleAfter ? v : null;
+    return DateTime.now().difference(updatedAt) < staleAfter ? v : null;
   }
 
-  // Same staleness rule as _freshEngine, for the discrete DM1 fault bits
+  // Same per-field staleness principle as _freshEngine, with the wider alarm
+  // heartbeat window, for the discrete DM1 fault bits
   // (engineLowOilAlarm et al.) — those had no timestamp tracking at all
   // until now, so a bridge that stopped publishing (engine/bus powered
   // down, bridge disconnected) left whatever the *last* DM1 bit said
@@ -274,7 +281,9 @@ class _DashboardState extends State<Dashboard> {
   // decision then wrongly unconditionally trusts (see _activeAlarms).
   bool? _freshEngineFlag(bool? v, DateTime? updatedAt) {
     if (v == null || updatedAt == null) return null;
-    return DateTime.now().difference(updatedAt) < _engineStaleAfter ? v : null;
+    return DateTime.now().difference(updatedAt) < _engineAlarmStaleAfter
+        ? v
+        : null;
   }
 
   // Running state is derived only from fresh, measured RPM. There is no
@@ -295,19 +304,26 @@ class _DashboardState extends State<Dashboard> {
       _freshEngine(
             signalK.engineCoolantTempK,
             signalK.engineCoolantTempUpdate,
+            staleAfter: _engineSlowStaleAfter,
           ) !=
           null ||
       _freshEngine(
             signalK.engineOilPressurePa,
             signalK.engineOilPressureUpdate,
+            staleAfter: _engineSlowStaleAfter,
           ) !=
           null ||
       _freshEngine(
             signalK.engineAlternatorV,
             signalK.engineAlternatorVUpdate,
+            staleAfter: _engineSlowStaleAfter,
           ) !=
           null ||
-      _freshEngine(signalK.engineSupplyV, signalK.engineSupplyVUpdate) !=
+      _freshEngine(
+            signalK.engineSupplyV,
+            signalK.engineSupplyVUpdate,
+            staleAfter: _engineSlowStaleAfter,
+          ) !=
           null ||
       _freshEngineFlag(
             signalK.engineStarting,
@@ -528,10 +544,7 @@ class _DashboardState extends State<Dashboard> {
         'path': 'design.totalAnchorChainLength',
         'value': settings.anchorTotalChainLengthM,
       },
-      {
-        'path': 'design.gpsToBowDistance',
-        'value': settings.anchorGpsToBowM,
-      },
+      {'path': 'design.gpsToBowDistance', 'value': settings.anchorGpsToBowM},
       // InfluxDB connection — shared across every device once entered on
       // ONE of them, instead of retyping a token on each phone/tablet
       // ("pero el token tengo que ponerlo en cada dispositivo?", reported
@@ -646,7 +659,12 @@ class _DashboardState extends State<Dashboard> {
           lon != null &&
           heading != null &&
           settings.anchorGpsToBowM > 0) {
-        final bow = destinationPoint(lat, lon, settings.anchorGpsToBowM, heading);
+        final bow = destinationPoint(
+          lat,
+          lon,
+          settings.anchorGpsToBowM,
+          heading,
+        );
         lat = bow.lat;
         lon = bow.lon;
       }
@@ -1610,6 +1628,7 @@ class _DashboardState extends State<Dashboard> {
     final freshOilPa = _freshEngine(
       signalK.engineOilPressurePa,
       signalK.engineOilPressureUpdate,
+      staleAfter: _engineSlowStaleAfter,
     );
     final oilBar = freshOilPa == null ? null : freshOilPa / 100000.0;
     final freshLowOilAlarm = _freshEngineFlag(
@@ -1635,6 +1654,7 @@ class _DashboardState extends State<Dashboard> {
     final freshCoolantK = _freshEngine(
       signalK.engineCoolantTempK,
       signalK.engineCoolantTempUpdate,
+      staleAfter: _engineSlowStaleAfter,
     );
     final tempC = freshCoolantK == null ? null : freshCoolantK - 273.15;
     final freshOverTempAlarm = _freshEngineFlag(
@@ -1661,8 +1681,13 @@ class _DashboardState extends State<Dashboard> {
         _freshEngine(
           signalK.engineAlternatorV,
           signalK.engineAlternatorVUpdate,
+          staleAfter: _engineSlowStaleAfter,
         ) ??
-        _freshEngine(signalK.engineSupplyV, signalK.engineSupplyVUpdate);
+        _freshEngine(
+          signalK.engineSupplyV,
+          signalK.engineSupplyVUpdate,
+          staleAfter: _engineSlowStaleAfter,
+        );
     final freshLowVoltAlarm = _freshEngineFlag(
       signalK.engineLowVoltAlarm,
       signalK.engineLowVoltAlarmUpdate,
@@ -2740,8 +2765,7 @@ class _DashboardState extends State<Dashboard> {
     settings.anchorBoatWifiSsid =
         prefs.getString('anchorBoatWifiSsid') ?? settings.anchorBoatWifiSsid;
     settings.anchorShowElectrical =
-        prefs.getBool('anchorShowElectrical') ??
-        settings.anchorShowElectrical;
+        prefs.getBool('anchorShowElectrical') ?? settings.anchorShowElectrical;
     settings.alarmEngineOilSound =
         prefs.getBool('alarmEngineOilSound') ?? settings.alarmEngineOilSound;
     settings.alarmEngineOilMinBar =
@@ -3134,10 +3158,7 @@ class _DashboardState extends State<Dashboard> {
       settings.anchorDetectPhoneLeftByWifi,
     );
     await prefs.setString('anchorBoatWifiSsid', settings.anchorBoatWifiSsid);
-    await prefs.setBool(
-      'anchorShowElectrical',
-      settings.anchorShowElectrical,
-    );
+    await prefs.setBool('anchorShowElectrical', settings.anchorShowElectrical);
     await prefs.setBool('alarmEngineOilSound', settings.alarmEngineOilSound);
     await prefs.setDouble(
       'alarmEngineOilMinBar',
@@ -5584,6 +5605,18 @@ class _DashboardState extends State<Dashboard> {
                                 alarmPageIds: _alarmPageIds,
                                 alarmCount: _activeAlarms.length,
                                 onBellTap: () => _showAlarmsList(context),
+                                contextActionLabel: _selectedPageId == 'VNT'
+                                    ? 'INFORMES'
+                                    : null,
+                                contextActionIcon: _selectedPageId == 'VNT'
+                                    ? Icons.assessment_outlined
+                                    : null,
+                                onContextAction: _selectedPageId == 'VNT'
+                                    ? () => showPerformanceReportPicker(
+                                        context,
+                                        settings: settings,
+                                      )
+                                    : null,
                                 onSelect: _selectPage,
                               ),
                             ),
@@ -6783,18 +6816,22 @@ class _DashboardState extends State<Dashboard> {
     engineOilPressurePa: _freshEngine(
       signalK.engineOilPressurePa,
       signalK.engineOilPressureUpdate,
+      staleAfter: _engineSlowStaleAfter,
     ),
     engineCoolantTempK: _freshEngine(
       signalK.engineCoolantTempK,
       signalK.engineCoolantTempUpdate,
+      staleAfter: _engineSlowStaleAfter,
     ),
     engineAlternatorV: _freshEngine(
       signalK.engineAlternatorV,
       signalK.engineAlternatorVUpdate,
+      staleAfter: _engineSlowStaleAfter,
     ),
     engineSupplyV: _freshEngine(
       signalK.engineSupplyV,
       signalK.engineSupplyVUpdate,
+      staleAfter: _engineSlowStaleAfter,
     ),
     // Freshness-gated the same way _activeAlarms is — a lamp lit from a
     // stale DM1 bit (bridge stopped publishing, but the last thing it
@@ -8201,7 +8238,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
         _WindTapCard(
           label: 'AWA',
@@ -8221,7 +8257,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
         _WindTapCard(
           label: 'SOG',
@@ -8240,7 +8275,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
         _WindTapCard(
           label: 'TWS',
@@ -8262,7 +8296,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
         _WindTapCard(
           label: 'TWA',
@@ -8284,7 +8317,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
         _WindTapCard(
           label: 'TWD',
@@ -8303,7 +8335,6 @@ class _DashboardState extends State<Dashboard> {
           skPort: skP,
           skAuthBase64: skA,
           demo: settings.demoMode,
-          settings: settings,
         ),
       ],
     );
@@ -8681,59 +8712,70 @@ class _DashboardState extends State<Dashboard> {
     return out;
   }
 
-  // "lo que tiene cada depósito de esa categoría y la capacidad" — a
-  // group with more than one tank (e.g. two diesel tanks under the same
-  // label) shows this under the aggregate number, one "id liters/capacity"
-  // segment per tank, so the breakdown is visible without tapping through
-  // to _showTankGroup. Null for a single-tank group, where the card's own
-  // number already IS that one tank's reading.
-  String? _tankBreakdown(TankViewData t) {
-    if (t.slots.length < 2) return null;
-    return t.slots
-        .map((s) {
-          final pct = signalK.tanks[s.tankKey];
-          final liters = (pct != null && s.capacityL > 0)
-              ? (s.capacityL * pct / 100).round()
-              : null;
-          return '${s.groupLabel} ${liters == null ? '--' : '$liters/${s.capacityL}L'}';
-        })
-        // One tank per line, not all joined with " · " onto a single line —
-        // that packed every tank's level/capacity into one cramped,
-        // tiny-font line that regularly had to ellipsize. Reported live
-        // 2026-09-06.
-        .join('\n');
-  }
+  List<TankSegmentData> _tankSegments(TankViewData tank) => [
+    for (final slot in tank.slots)
+      TankSegmentData(
+        label: slot.groupLabel,
+        percent: signalK.tanks[slot.tankKey],
+        capacityL: slot.capacityL,
+      ),
+  ];
+
+  List<MetricDef> _tankHistoryMetrics(TankViewData tank) => [
+    for (final slot in tank.slots)
+      MetricDef(
+        slot.skPath,
+        slot.groupLabel,
+        '%',
+        scale: 100,
+        color: tank.color,
+        tankCapacityL: slot.capacityL > 0 ? slot.capacityL.toDouble() : null,
+        tankDangerWhenHigh: slot.type == 'blackWater',
+      ),
+  ];
 
   Widget _tankPage() {
     final tanks = tankOverview;
     return LayoutBuilder(
       builder: (ctx, c) {
-        // Capped, not just proportional — 20% of a tablet's full landscape
-        // width made each card huge (a lot of empty room the number didn't
-        // fill, since it used to be capped at a fixed pixel size). Still
-        // scales down freely below the cap for narrower/phone screens.
-        final cardW = (c.maxWidth * 0.20).clamp(0.0, 160.0);
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              for (final t in tanks)
-                SizedBox(
-                  width: cardW,
-                  child: TankCard(
-                    name: t.name,
-                    value: t.percent(signalK.tanks),
-                    capacityL: t.capacityL,
-                    color: t.color,
-                    icon: t.icon,
-                    flexible: true,
-                    breakdown: _tankBreakdown(t),
-                    onTap: () => _showTankGroup(t),
-                  ),
-                ),
-            ],
+        if (tanks.isEmpty) {
+          return const Center(
+            child: Text(
+              'SIN TANQUES CONFIGURADOS',
+              style: TextStyle(color: cMuted),
+            ),
+          );
+        }
+        const gap = 12.0;
+        const sidePadding = 12.0;
+        final visible = math.min(tanks.length, 4);
+        final available = c.maxWidth - sidePadding * 2 - gap * (visible - 1);
+        final cardW = (available / visible).clamp(220.0, 340.0);
+        return ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(
+            horizontal: sidePadding,
+            vertical: 12,
           ),
+          itemCount: tanks.length,
+          separatorBuilder: (_, _) => const SizedBox(width: gap),
+          itemBuilder: (context, index) {
+            final tank = tanks[index];
+            return SizedBox(
+              width: cardW,
+              child: TankCard(
+                name: tank.name,
+                value: tank.percent(signalK.tanks),
+                capacityL: tank.capacityL,
+                color: tank.color,
+                icon: tank.icon,
+                flexible: true,
+                segments: _tankSegments(tank),
+                dangerWhenHigh: tank.slots.first.type == 'blackWater',
+                onTap: () => _showTankGroup(tank),
+              ),
+            );
+          },
         );
       },
     );
@@ -9470,6 +9512,8 @@ class _DashboardState extends State<Dashboard> {
     ownLat: _timestampFresh(signalK.positionUpdate) ? signalK.latitude : null,
     ownLon: _timestampFresh(signalK.positionUpdate) ? signalK.longitude : null,
     shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
+    priorityCpaNm: settings.alarmAisCpaNm,
+    priorityTcpaMin: settings.alarmAisTcpaMin,
   );
 
   // ─── Settings page ──────────────────────────────────────────────────────────
@@ -12692,9 +12736,6 @@ class _DashboardState extends State<Dashboard> {
           bucket: settings.influxBucket,
           archiveBucket: settings.influxArchiveBucket,
           demo: settings.demoMode,
-          // "Informe de rendimiento" is wind-performance specific — only
-          // _WindTapCard (the VNT screen's cards) offers it.
-          settings: null,
         ),
       ),
     );
@@ -12707,52 +12748,71 @@ class _DashboardState extends State<Dashboard> {
       builder: (ctx) => Dialog.fullscreen(
         backgroundColor: Colors.black,
         child: SafeArea(
-          child: InkWell(
-            onTap: () => Navigator.of(ctx).pop(),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          group.name,
-                          style: const TextStyle(
-                            color: cText,
-                            fontSize: 30,
-                            fontWeight: FontWeight.w700,
-                          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        group.name,
+                        style: const TextStyle(
+                          color: cText,
+                          fontSize: 30,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      IconButton(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        icon: const Icon(Icons.close, color: cText),
-                      ),
-                    ],
-                  ),
-                  Expanded(
-                    child: Center(
-                      child: ListView(
-                        shrinkWrap: true,
-                        scrollDirection: Axis.horizontal,
-                        padding: const EdgeInsets.only(top: 24),
-                        children: [
-                          for (final slot in group.slots)
-                            TankCard(
-                              name: slot.groupLabel,
-                              value: signalK.tanks[slot.tankKey],
-                              capacityL: slot.capacityL,
-                              color: group.color,
-                              icon: group.icon,
-                              large: true,
-                            ),
-                        ],
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _showGraph(_tankHistoryMetrics(group));
+                      },
+                      icon: const Icon(Icons.show_chart, size: 19),
+                      label: const Text('HISTÓRICO'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: group.color,
+                        side: BorderSide(
+                          color: group.color.withValues(alpha: 0.55),
+                        ),
                       ),
                     ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      icon: const Icon(Icons.close, color: cText),
+                    ),
+                  ],
+                ),
+                Expanded(
+                  child: Center(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.only(top: 24),
+                      itemCount: group.slots.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 18),
+                      itemBuilder: (context, index) {
+                        final slot = group.slots[index];
+                        return SizedBox(
+                          width: 260,
+                          child: TankCard(
+                            name: slot.groupLabel,
+                            value: signalK.tanks[slot.tankKey],
+                            capacityL: slot.capacityL,
+                            color: group.color,
+                            icon: group.icon,
+                            large: true,
+                            flexible: true,
+                            dangerWhenHigh: slot.type == 'blackWater',
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

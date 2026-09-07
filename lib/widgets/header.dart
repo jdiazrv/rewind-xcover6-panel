@@ -113,6 +113,9 @@ class _Header extends StatefulWidget {
     this.alarmPageIds = const {},
     this.alarmCount = 0,
     this.onBellTap,
+    this.contextActionLabel,
+    this.contextActionIcon,
+    this.onContextAction,
   });
   final List<(String, IconData, Widget)> pages;
   final int selected;
@@ -122,6 +125,9 @@ class _Header extends StatefulWidget {
   final Set<String> alarmPageIds;
   final int alarmCount;
   final VoidCallback? onBellTap;
+  final String? contextActionLabel;
+  final IconData? contextActionIcon;
+  final VoidCallback? onContextAction;
 
   @override
   State<_Header> createState() => _HeaderState();
@@ -227,6 +233,28 @@ class _HeaderState extends State<_Header> {
               children: [for (var i = 0; i < widget.pages.length; i++) _tab(i)],
             ),
           ),
+          if (widget.onContextAction != null)
+            Tooltip(
+              message: widget.contextActionLabel ?? '',
+              child: TextButton.icon(
+                onPressed: widget.onContextAction,
+                icon: Icon(
+                  widget.contextActionIcon ?? Icons.more_horiz,
+                  color: cCyan,
+                  size: 19,
+                ),
+                label: MediaQuery.sizeOf(context).width >= 720
+                    ? Text(
+                        widget.contextActionLabel ?? '',
+                        style: const TextStyle(
+                          color: cCyan,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
           if (kIsWeb) const _FullscreenButton(),
           if (kIsWeb) const SizedBox(width: 8),
           // Always present, not just while something's actively alarming —

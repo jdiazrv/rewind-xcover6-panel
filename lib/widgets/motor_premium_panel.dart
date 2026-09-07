@@ -439,6 +439,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       if (widget.engineStarting == true) return 'ARRANCANDO…';
       if (widget.engineStopping == true) return 'PARANDO…';
       if (widget.enginePreheatActive == true) return 'PRECALENTANDO…';
+      if (!widget.engineContactOn) return 'SIN DATOS · CONTACTO OFF';
       return widget.engineRunning ? 'MOTOR EN MARCHA' : 'MOTOR PARADO';
     }
     switch (_engineState) {

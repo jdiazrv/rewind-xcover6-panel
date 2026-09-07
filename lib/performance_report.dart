@@ -22,18 +22,151 @@ typedef PolarData = ({
   List<List<int>> counts,
 });
 
-/// Opens the performance report for [range] — the same range the caller
-/// already has selected (e.g. a GraphDialog's own 1h/6h/12h/... buttons),
-/// so the report never asks the user to pick a period a second time.
+enum PerformanceReportKind { navigation, windAndSailing, complete }
+
+extension PerformanceReportKindLabel on PerformanceReportKind {
+  String get label => switch (this) {
+    PerformanceReportKind.navigation => 'Navegación',
+    PerformanceReportKind.windAndSailing => 'Viento y vela',
+    PerformanceReportKind.complete => 'Informe completo',
+  };
+
+  String get description => switch (this) {
+    PerformanceReportKind.navigation =>
+      'Distancia, tiempo navegando, SOG, STW y traza GPS',
+    PerformanceReportKind.windAndSailing =>
+      'Viento, barbas, escora y polar real',
+    PerformanceReportKind.complete =>
+      'Navegación, viento y rendimiento a vela en un único PDF',
+  };
+
+  IconData get icon => switch (this) {
+    PerformanceReportKind.navigation => Icons.route,
+    PerformanceReportKind.windAndSailing => Icons.air,
+    PerformanceReportKind.complete => Icons.picture_as_pdf_outlined,
+  };
+}
+
+Future<void> showPerformanceReportPicker(
+  BuildContext context, {
+  required SettingsModel settings,
+}) async {
+  var selectedRange = appRanges[3]; // 24 h: useful default, explicit in UI.
+  final selection =
+      await showDialog<({PerformanceReportKind kind, AppRange range})>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            backgroundColor: cPanel,
+            title: const Row(
+              children: [
+                Icon(Icons.assessment_outlined, color: cCyan),
+                SizedBox(width: 10),
+                Text('INFORMES', style: TextStyle(color: cText)),
+              ],
+            ),
+            content: SizedBox(
+              width: 560,
+              height: math.min(300, MediaQuery.sizeOf(context).height * 0.58),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'PERIODO',
+                      style: TextStyle(
+                        color: cMuted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SegmentedButton<AppRange>(
+                        showSelectedIcon: false,
+                        segments: [
+                          for (final range in appRanges)
+                            ButtonSegment(
+                              value: range,
+                              label: Text(range.label),
+                            ),
+                        ],
+                        selected: {selectedRange},
+                        onSelectionChanged: (value) =>
+                            setDialogState(() => selectedRange = value.first),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    for (final kind in PerformanceReportKind.values) ...[
+                      Material(
+                        color: cPanel2,
+                        borderRadius: BorderRadius.circular(10),
+                        child: ListTile(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          leading: Icon(kind.icon, color: cCyan),
+                          title: Text(
+                            kind.label,
+                            style: const TextStyle(
+                              color: cText,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          subtitle: Text(
+                            kind.description,
+                            style: const TextStyle(color: cMuted),
+                          ),
+                          trailing: const Icon(
+                            Icons.chevron_right,
+                            color: cMuted,
+                          ),
+                          onTap: () =>
+                              Navigator.of(dialogContext)
+                                  .pop((kind: kind, range: selectedRange)),
+                        ),
+                      ),
+                      if (kind != PerformanceReportKind.values.last)
+                        const SizedBox(height: 8),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancelar'),
+              ),
+            ],
+          ),
+        ),
+      );
+  if (selection == null || !context.mounted) return;
+  await openPerformanceReport(
+    context,
+    settings: settings,
+    range: selection.range,
+    kind: selection.kind,
+  );
+}
+
+/// Opens one report type for the period selected explicitly in the VNT report
+/// chooser. Graph dialogs deliberately no longer expose a generic PDF action:
+/// it looked like an export of that one graph while producing unrelated data.
 Future<void> openPerformanceReport(
   BuildContext context, {
   required SettingsModel settings,
   required AppRange range,
+  PerformanceReportKind kind = PerformanceReportKind.complete,
 }) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
-      builder: (_) => PerformanceReportPage(settings: settings, range: range),
+      builder: (_) =>
+          PerformanceReportPage(settings: settings, range: range, kind: kind),
     ),
   );
 }
@@ -43,9 +176,11 @@ class PerformanceReportPage extends StatefulWidget {
     super.key,
     required this.settings,
     required this.range,
+    required this.kind,
   });
   final SettingsModel settings;
   final AppRange range;
+  final PerformanceReportKind kind;
 
   @override
   State<PerformanceReportPage> createState() => _PerformanceReportPageState();
@@ -102,6 +237,14 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
+  Future<List<GraphPoint>> _optionalQuery(MetricDef def) async {
+    try {
+      return await _query(def);
+    } catch (_) {
+      return const [];
+    }
+  }
+
   List<({double lat, double lon, DateTime time})> _track = [];
 
   Future<void> _fetch() async {
@@ -120,6 +263,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'stw': demoGraphSeries(mStw, r.flux, r.agg),
           'aws': demoGraphSeries(mAws, r.flux, r.agg),
           'tws': demoGraphSeries(mTws, r.flux, r.agg),
+          'twd': demoGraphSeries(mTwd, r.flux, r.agg),
           'heel': demoGraphSeries(mHeel, r.flux, r.agg),
           'twa': demoGraphSeries(mTwa, r.flux, r.agg),
         };
@@ -130,6 +274,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           _query(mStw),
           _query(mAws),
           _query(mTws),
+          _optionalQuery(mTwd),
           _query(mHeel),
           _query(mTwa),
         ]);
@@ -138,8 +283,9 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'stw': results[1],
           'aws': results[2],
           'tws': results[3],
-          'heel': results[4],
-          'twa': results[5],
+          'twd': results[4],
+          'heel': results[5],
+          'twa': results[6],
         };
         _track = await _fetchTrackPoints(results[0]);
       }
@@ -266,7 +412,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       appBar: AppBar(
         backgroundColor: cBg,
         foregroundColor: cText,
-        title: Text('Informe de rendimiento - ${widget.range.label}'),
+        title: Text('${widget.kind.label} - ${widget.range.label}'),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -287,7 +433,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               canDebug: false,
               allowPrinting: true,
               allowSharing: true,
-              pdfFileName: 'rewind_rendimiento.pdf',
+              pdfFileName: switch (widget.kind) {
+                PerformanceReportKind.navigation => 'rewind_navegacion.pdf',
+                PerformanceReportKind.windAndSailing =>
+                  'rewind_viento_y_vela.pdf',
+                PerformanceReportKind.complete => 'rewind_informe_completo.pdf',
+              },
               build: (_) => _buildReportPdf(),
             ),
     );
@@ -428,11 +579,14 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   }
 
   Future<Uint8List> _buildReportPdf() async {
+    final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
+    final showWind = widget.kind != PerformanceReportKind.navigation;
     final r = widget.range;
     final sog = _series['sog'] ?? [];
     final stw = _series['stw'] ?? [];
     final aws = _series['aws'] ?? [];
     final tws = _series['tws'] ?? [];
+    final twd = _series['twd'] ?? [];
     final heel = _series['heel'] ?? [];
     final twa = _series['twa'] ?? [];
     final interval = parseAggEvery(r.agg);
@@ -451,7 +605,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final contentWidth = pageFormat.width - margin * 2;
 
     final doc = pw.Document();
-    final trackMap = await _fetchTrackMapTiles(_track);
+    final canvasFont = PdfFont.helvetica(doc.document);
+    final trackMap = showNavigation ? await _fetchTrackMapTiles(_track) : null;
 
     String fmtDateTime(DateTime d) =>
         '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
@@ -461,7 +616,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
         pw.Text(
-          'Informe de rendimiento - REWIND',
+          '${widget.kind.label} - REWIND',
           style: const pw.TextStyle(
             color: pdfText,
             fontSize: 16,
@@ -504,132 +659,173 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         ),
         build: (ctx) => [
           header(),
-          pw.Row(
-            children: [
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'Distancia',
-                    '${distanceNm.toStringAsFixed(1)} NM',
-                    'periodo completo',
-                    pdfCyan,
+          if (showNavigation)
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'Distancia',
+                      '${distanceNm.toStringAsFixed(1)} NM',
+                      'periodo completo',
+                      pdfCyan,
+                    ),
                   ),
                 ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'Tiempo navegando',
-                    '${underwayDur.inHours}h ${underwayDur.inMinutes % 60}m',
-                    '${(underwayFrac * 100).round()}% del periodo (SOG>0.5kt)',
-                    pdfGreen,
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'Tiempo navegando',
+                      '${underwayDur.inHours}h ${underwayDur.inMinutes % 60}m',
+                      '${(underwayFrac * 100).round()}% del periodo (SOG>0.5kt)',
+                      pdfGreen,
+                    ),
                   ),
                 ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'SOG',
-                    '${_avg(sog).toStringAsFixed(1)} kt media',
-                    'máx ${_max(sog).toStringAsFixed(1)} kt',
-                    pdfGreen,
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'SOG',
+                      '${_avg(sog).toStringAsFixed(1)} kt media',
+                      'máx ${_max(sog).toStringAsFixed(1)} kt',
+                      pdfGreen,
+                    ),
                   ),
                 ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'STW',
-                    '${_avg(stw).toStringAsFixed(1)} kt media',
-                    'máx ${_max(stw).toStringAsFixed(1)} kt',
-                    pdfTeal,
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'STW',
+                      '${_avg(stw).toStringAsFixed(1)} kt media',
+                      'máx ${_max(stw).toStringAsFixed(1)} kt',
+                      pdfTeal,
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-          pw.SizedBox(height: 8),
-          pw.Row(
-            children: [
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'AWS',
-                    '${_avg(aws).toStringAsFixed(1)} kt media',
-                    'ráfaga máx ${_max(aws).toStringAsFixed(1)} kt',
-                    pdfOrange,
-                  ),
-                ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'TWS',
-                    '${_avg(tws).toStringAsFixed(1)} kt media',
-                    'ráfaga máx ${_max(tws).toStringAsFixed(1)} kt',
-                    pdfCyan,
-                  ),
-                ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(
-                child: pw.SizedBox(
-                  height: 62,
-                  child: pdfInfoCard(
-                    'Escora',
-                    '${_maxAbs(heel).toStringAsFixed(0)}° máx',
-                    'media ${_avg(heel).toStringAsFixed(0)}°',
-                    pdfYellow,
-                  ),
-                ),
-              ),
-              pw.SizedBox(width: 8),
-              pw.Expanded(child: pw.SizedBox()),
-            ],
-          ),
-          pw.SizedBox(height: 22),
-          pw.Text(
-            'Distribución de SOG',
-            style: const pw.TextStyle(
-              color: pdfText,
-              fontSize: 12,
-              fontWeight: pw.FontWeight.bold,
+              ],
             ),
-          ),
-          pw.Text(
-            '% de muestras del periodo en cada franja de velocidad',
-            style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-          ),
-          pw.SizedBox(height: 6),
-          ...pdfHistogramRows(sog, 'kt', pdfGreen, contentWidth),
-          pw.SizedBox(height: 18),
-          pw.Text(
-            'Distribución de viento (TWS)',
-            style: const pw.TextStyle(
-              color: pdfText,
-              fontSize: 12,
-              fontWeight: pw.FontWeight.bold,
+          if (showWind) pw.SizedBox(height: 8),
+          if (showWind)
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'AWS',
+                      '${_avg(aws).toStringAsFixed(1)} kt media',
+                      'ráfaga máx ${_max(aws).toStringAsFixed(1)} kt',
+                      pdfOrange,
+                    ),
+                  ),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'TWS',
+                      '${_avg(tws).toStringAsFixed(1)} kt media',
+                      'ráfaga máx ${_max(tws).toStringAsFixed(1)} kt',
+                      pdfCyan,
+                    ),
+                  ),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'Escora',
+                      '${_maxAbs(heel).toStringAsFixed(0)}° máx',
+                      'media ${_avg(heel).toStringAsFixed(0)}°',
+                      pdfYellow,
+                    ),
+                  ),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(child: pw.SizedBox()),
+              ],
             ),
-          ),
-          pw.Text(
-            '% de muestras del periodo en cada franja de viento real',
-            style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-          ),
-          pw.SizedBox(height: 6),
-          ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
+          if (showNavigation) ...[
+            pw.SizedBox(height: 22),
+            pw.Text(
+              'Distribución de SOG',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Text(
+              '% de muestras del periodo en cada franja de velocidad',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+            ),
+            pw.SizedBox(height: 6),
+            ...pdfHistogramRows(sog, 'kt', pdfGreen, contentWidth),
+          ],
+          if (showWind) ...[
+            pw.SizedBox(height: 18),
+            pw.Text(
+              'Distribución de viento (TWS)',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Text(
+              '% de muestras del periodo en cada franja de viento real',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+            ),
+            pw.SizedBox(height: 6),
+            ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
+          ],
         ],
       ),
     );
+
+    if (showWind) {
+      doc.addPage(
+        pw.MultiPage(
+          pageTheme: pageTheme,
+          footer: (ctx) => pw.Align(
+            alignment: pw.Alignment.centerRight,
+            child: pw.Text(
+              'Página ${ctx.pageNumber} / ${ctx.pagesCount}',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
+            ),
+          ),
+          build: (ctx) => [
+            header(),
+            pw.Text(
+              'Evolución del viento verdadero',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.SizedBox(height: 4),
+            pdfWindTimeline(
+              font: canvasFont,
+              tws: tws,
+              twd: twd,
+              start: periodStart,
+              end: now,
+              width: contentWidth,
+            ),
+          ],
+        ),
+      );
+    }
 
     // Own page — the chart plus its legend plus the table together are
     // taller than the space usually left after the histograms, so sharing
@@ -647,31 +843,35 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         ),
         build: (ctx) => [
           header(),
-          pw.Text(
-            'Traza GPS del periodo',
-            style: const pw.TextStyle(
-              color: pdfText,
-              fontSize: 12,
-              fontWeight: pw.FontWeight.bold,
+          if (showNavigation) ...[
+            pw.Text(
+              'Traza GPS del periodo',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
             ),
-          ),
-          pw.SizedBox(height: 8),
-          pdfTrackMap(map: trackMap, points: _track, width: contentWidth),
-          pw.SizedBox(height: 16),
-          pw.Text(
-            'Polar de datos reales - STW media (kt)',
-            style: const pw.TextStyle(
-              color: pdfText,
-              fontSize: 12,
-              fontWeight: pw.FontWeight.bold,
+            pw.SizedBox(height: 8),
+            pdfTrackMap(map: trackMap, points: _track, width: contentWidth),
+          ],
+          if (showWind) ...[
+            if (showNavigation) pw.SizedBox(height: 16),
+            pw.Text(
+              'Polar de datos reales - STW media (kt)',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
             ),
-          ),
-          pw.Text(
-            'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Excluye momentos parado (SOG<0.5kt). Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
-            style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-          ),
-          pw.SizedBox(height: 8),
-          pdfPolarTable(polar, pdfGreen),
+            pw.Text(
+              'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Excluye momentos parado (SOG<0.5kt). Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+            ),
+            pw.SizedBox(height: 8),
+            pdfPolarTable(polar, pdfGreen),
+          ],
         ],
       ),
     );
@@ -776,6 +976,226 @@ List<pw.Widget> pdfHistogramRows(
           ),
         ),
   ];
+}
+
+pw.Widget pdfWindTimeline({
+  required PdfFont font,
+  required List<GraphPoint> tws,
+  required List<GraphPoint> twd,
+  required DateTime start,
+  required DateTime end,
+  required double width,
+  double height = 190,
+}) {
+  if (tws.isEmpty || twd.isEmpty) {
+    return pw.Container(
+      width: width,
+      height: height,
+      alignment: pw.Alignment.center,
+      decoration: pw.BoxDecoration(
+        color: const PdfColor.fromInt(0xffe8f5f8),
+        borderRadius: pw.BorderRadius.circular(5),
+      ),
+      child: pw.Text(
+        'Sin datos simultáneos de TWS y TWD para dibujar las barbas.',
+        style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+      ),
+    );
+  }
+
+  final interval = windBarbInterval(
+    end.difference(start),
+    targetCount: math.max(1, (width / 30).floor()),
+  );
+  final barbs = sampleWindBarbs(
+    tws: tws,
+    twd: twd,
+    start: start,
+    end: end,
+    interval: interval,
+  );
+  final visibleTws = tws
+      .where((p) => !p.time.isBefore(start) && !p.time.isAfter(end))
+      .toList();
+  final maxSpeed = visibleTws.isEmpty
+      ? 5.0
+      : visibleTws.map((p) => p.value).reduce(math.max);
+  final yMax = math.max(5.0, (maxSpeed / 5).ceil() * 5.0);
+  final rangeMs = math.max(1, end.difference(start).inMilliseconds);
+
+  String axisTime(DateTime dt) {
+    final local = dt.toLocal();
+    return '${local.day.toString().padLeft(2, '0')}/${local.month.toString().padLeft(2, '0')} '
+        '${local.hour.toString().padLeft(2, '0')}h';
+  }
+
+  return pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.start,
+    children: [
+      pw.Text(
+        'Curva: TWS en nudos. Barbas: TWD/TWS cada ${formatWindBarbInterval(interval)}. '
+        'Media barba = 5 kt; barba completa = 10 kt; triángulo = 50 kt.',
+        style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+      ),
+      pw.SizedBox(height: 7),
+      pw.Container(
+        width: width,
+        height: height,
+        padding: const pw.EdgeInsets.all(4),
+        decoration: pw.BoxDecoration(
+          color: const PdfColor.fromInt(0xfff5fafb),
+          border: pw.Border.all(color: pdfGrid, width: 0.6),
+          borderRadius: pw.BorderRadius.circular(5),
+        ),
+        child: pw.CustomPaint(
+          size: PdfPoint(width - 8, height - 8),
+          painter: (canvas, size) {
+            const pL = 30.0, pB = 18.0;
+            final pR = size.x - 6;
+            final curveTop = size.y - 43;
+            final pW = pR - pL;
+            final pH = curveTop - pB;
+            double xAt(DateTime time) =>
+                pL +
+                (time.millisecondsSinceEpoch - start.millisecondsSinceEpoch) /
+                    rangeMs *
+                    pW;
+            double yAt(double speed) =>
+                pB + speed.clamp(0.0, yMax).toDouble() / yMax * pH;
+
+            for (var i = 0; i <= 4; i++) {
+              final speed = yMax * i / 4;
+              final y = yAt(speed);
+              canvas
+                ..setStrokeColor(pdfGrid)
+                ..setLineWidth(0.45)
+                ..moveTo(pL, y)
+                ..lineTo(pR, y)
+                ..strokePath()
+                ..setFillColor(pdfMuted)
+                ..drawString(font, 6.5, speed.round().toString(), 2, y - 2.5);
+            }
+
+            final axisDates = [
+              start,
+              start.add(Duration(milliseconds: rangeMs ~/ 2)),
+              end,
+            ];
+            for (var i = 0; i < axisDates.length; i++) {
+              final label = axisTime(axisDates[i]);
+              final x = xAt(axisDates[i]);
+              canvas
+                ..setFillColor(pdfMuted)
+                ..drawString(
+                  font,
+                  6.5,
+                  label,
+                  i == 0
+                      ? x
+                      : i == axisDates.length - 1
+                      ? x - 35
+                      : x - 17,
+                  4,
+                );
+            }
+
+            final gaps = <int>[];
+            for (var i = 1; i < visibleTws.length; i++) {
+              final gap = visibleTws[i].time
+                  .difference(visibleTws[i - 1].time)
+                  .inMilliseconds;
+              if (gap > 0) gaps.add(gap);
+            }
+            gaps.sort();
+            final medianGap = gaps.isEmpty
+                ? const Duration(minutes: 5).inMilliseconds
+                : gaps[gaps.length ~/ 2];
+            final breakMs = math.max(
+              const Duration(minutes: 20).inMilliseconds,
+              medianGap * 4,
+            );
+            canvas
+              ..setStrokeColor(pdfCyan)
+              ..setLineWidth(1.5);
+            var started = false;
+            GraphPoint? previous;
+            for (final point in visibleTws) {
+              final x = xAt(point.time), y = yAt(point.value);
+              if (!started ||
+                  (previous != null &&
+                      point.time.difference(previous.time).inMilliseconds >
+                          breakMs)) {
+                canvas.moveTo(x, y);
+                started = true;
+              } else {
+                canvas.lineTo(x, y);
+              }
+              previous = point;
+            }
+            canvas.strokePath();
+
+            void drawBarb(WindBarbSample barb) {
+              final originX = xAt(barb.time), originY = size.y - 20;
+              canvas
+                ..setStrokeColor(pdfOrange)
+                ..setLineWidth(1.15);
+              if (barb.speedKnots < 2.5) {
+                canvas
+                  ..drawEllipse(originX - 2, originY - 2, 4, 4)
+                  ..strokePath();
+                return;
+              }
+              final angle = barb.directionDeg * math.pi / 180;
+              final ax = math.sin(angle), ay = math.cos(angle);
+              final sx = math.cos(angle), sy = -math.sin(angle);
+              const shaft = 14.0;
+              final tipX = originX + ax * shaft;
+              final tipY = originY + ay * shaft;
+              canvas
+                ..moveTo(originX, originY)
+                ..lineTo(tipX, tipY)
+                ..strokePath();
+              var units = (barb.speedKnots / 5).round() * 5;
+              var cursorX = tipX, cursorY = tipY;
+              while (units >= 50) {
+                final backX = cursorX - ax * 4.5;
+                final backY = cursorY - ay * 4.5;
+                canvas
+                  ..setFillColor(pdfOrange)
+                  ..moveTo(cursorX, cursorY)
+                  ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
+                  ..lineTo(backX, backY)
+                  ..closePath()
+                  ..fillPath();
+                cursorX = backX - ax;
+                cursorY = backY - ay;
+                units -= 50;
+              }
+              while (units >= 10) {
+                canvas
+                  ..moveTo(cursorX, cursorY)
+                  ..lineTo(cursorX + sx * 5.5, cursorY + sy * 5.5)
+                  ..strokePath();
+                cursorX -= ax * 2.7;
+                cursorY -= ay * 2.7;
+                units -= 10;
+              }
+              if (units >= 5) {
+                canvas
+                  ..moveTo(cursorX, cursorY)
+                  ..lineTo(cursorX + sx * 3.2, cursorY + sy * 3.2)
+                  ..strokePath();
+              }
+            }
+
+            for (final barb in barbs) {
+              drawBarb(barb);
+            }
+          },
+        ),
+      ),
+    ],
+  );
 }
 
 /// Real-data polar as a table — TWA bands (rows) × TWS bands (columns),

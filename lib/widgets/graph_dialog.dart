@@ -15,7 +15,6 @@ class GraphDialog extends StatefulWidget {
     this.bucket = influxBucketDefault,
     this.archiveBucket = influxBucketDefault,
     this.demo = false,
-    this.settings,
   });
   final List<MetricDef> metrics;
   final String historySource; // 'auto' | 'influx' | 'sk'
@@ -28,9 +27,6 @@ class GraphDialog extends StatefulWidget {
   final String bucket;
   final String archiveBucket;
   final bool demo;
-  // Only needed for the "Informe de rendimiento" button — null hides it
-  // (e.g. call sites that don't have the full SettingsModel handy).
-  final SettingsModel? settings;
 
   @override
   State<GraphDialog> createState() => _GraphDialogState();
@@ -67,6 +63,7 @@ class _GraphDialogState extends State<GraphDialog> {
   int _rIdx = 3;
   bool _histogramMode = false;
   List<GraphPoint> _points = [];
+  List<GraphPoint> _windCompanion = [];
   bool _loading = false;
   String? _error;
   bool _usedSk = false;
@@ -78,6 +75,8 @@ class _GraphDialogState extends State<GraphDialog> {
   List<bool?> _skRangeAvailable = List.filled(appRanges.length, null);
 
   MetricDef get _def => widget.metrics[_mIdx];
+  bool get _isTrueWindMetric =>
+      _def.skPath == mTws.skPath || _def.skPath == mTwd.skPath;
 
   @override
   void initState() {
@@ -92,13 +91,31 @@ class _GraphDialogState extends State<GraphDialog> {
       _error = null;
     });
     try {
+      final metricIndex = _mIdx;
+      final rangeIndex = _rIdx;
+      final def = widget.metrics[metricIndex];
       final r = appRanges[_rIdx];
       final (pts, usedSk) = widget.demo
-          ? (demoGraphSeries(_def, r.flux, r.agg), false)
-          : await _queryHistory(r);
-      if (!mounted) return;
+          ? (demoGraphSeries(def, r.flux, r.agg), false)
+          : await _queryHistory(r, def);
+      var companion = <GraphPoint>[];
+      if (def.skPath == mTws.skPath || def.skPath == mTwd.skPath) {
+        final companionDef = def.skPath == mTws.skPath ? mTwd : mTws;
+        try {
+          companion = widget.demo
+              ? demoGraphSeries(companionDef, r.flux, r.agg)
+              : usedSk
+              ? await _fetchSk(r, companionDef)
+              : await _fetchInflux(r, companionDef);
+        } catch (_) {
+          // The primary history remains useful even if its wind companion is
+          // unavailable; the graph simply omits the barb strip.
+        }
+      }
+      if (!mounted || metricIndex != _mIdx || rangeIndex != _rIdx) return;
       setState(() {
         _points = pts;
+        _windCompanion = companion;
         _loading = false;
         _usedSk = usedSk;
         _skRangeAvailable[_rIdx] = usedSk ? pts.isNotEmpty : null;
@@ -121,7 +138,7 @@ class _GraphDialogState extends State<GraphDialog> {
     for (var i = 0; i < appRanges.length; i++) {
       if (i == _rIdx || _skRangeAvailable[i] != null) continue;
       try {
-        final pts = await _fetchSk(appRanges[i]);
+        final pts = await _fetchSk(appRanges[i], _def);
         if (mounted) setState(() => _skRangeAvailable[i] = pts.isNotEmpty);
       } catch (_) {
         if (mounted) setState(() => _skRangeAvailable[i] = false);
@@ -129,37 +146,42 @@ class _GraphDialogState extends State<GraphDialog> {
     }
   }
 
-  Future<List<GraphPoint>> _fetchInflux(AppRange r) => influxQuery(
-    host: widget.influxHost,
-    org: widget.influxOrg,
-    token: widget.influxToken,
-    def: _def,
-    fluxRange: r.flux,
-    aggEvery: r.agg,
-    bucket: r.longRange ? widget.archiveBucket : widget.bucket,
-  );
+  Future<List<GraphPoint>> _fetchInflux(AppRange r, MetricDef def) =>
+      influxQuery(
+        host: widget.influxHost,
+        org: widget.influxOrg,
+        token: widget.influxToken,
+        def: def,
+        fluxRange: r.flux,
+        aggEvery: r.agg,
+        bucket: r.longRange ? widget.archiveBucket : widget.bucket,
+      );
 
-  Future<List<GraphPoint>> _fetchSk(AppRange r) => skHistoryQuery(
-    host: widget.skHost,
-    port: widget.skPort,
-    authBase64: widget.skAuthBase64,
-    def: _def,
-    range: parseFluxRange(r.flux),
-    resolution: parseAggEvery(_skAgg[r.label] ?? r.agg),
-  );
+  Future<List<GraphPoint>> _fetchSk(AppRange r, MetricDef def) =>
+      skHistoryQuery(
+        host: widget.skHost,
+        port: widget.skPort,
+        authBase64: widget.skAuthBase64,
+        def: def,
+        range: parseFluxRange(r.flux),
+        resolution: parseAggEvery(_skAgg[r.label] ?? r.agg),
+      );
 
-  Future<(List<GraphPoint>, bool)> _queryHistory(AppRange r) async {
+  Future<(List<GraphPoint>, bool)> _queryHistory(
+    AppRange r,
+    MetricDef def,
+  ) async {
     switch (widget.historySource) {
       case 'influx':
-        return (await _fetchInflux(r), false);
+        return (await _fetchInflux(r, def), false);
       case 'sk':
-        return (await _fetchSk(r), true);
+        return (await _fetchSk(r, def), true);
       default: // 'auto' — prefer InfluxDB (richer/longer history), fall back
         // to the Signal K History API (e.g. KIP/SQLite) if it fails.
         try {
-          return (await _fetchInflux(r), false);
+          return (await _fetchInflux(r, def), false);
         } catch (_) {
-          return (await _fetchSk(r), true);
+          return (await _fetchSk(r, def), true);
         }
     }
   }
@@ -224,16 +246,6 @@ class _GraphDialogState extends State<GraphDialog> {
                 : 'Ver distribución',
             onPressed: () => setState(() => _histogramMode = !_histogramMode),
           ),
-          if (widget.settings != null)
-            IconButton(
-              icon: Icon(Icons.picture_as_pdf, color: _def.color),
-              tooltip: 'Informe de rendimiento (${appRanges[_rIdx].label})',
-              onPressed: () => openPerformanceReport(
-                context,
-                settings: widget.settings!,
-                range: appRanges[_rIdx],
-              ),
-            ),
           // Range buttons — greyed out and untappable once we know (from a
           // Signal K/KIP probe) that range has no data at all for this
           // series. Horizontally scrollable so adding more ranges never
@@ -438,6 +450,12 @@ class _GraphDialogState extends State<GraphDialog> {
       padding: const EdgeInsets.fromLTRB(8, 4, 16, 4),
       child: LineGraph(
         points: _points,
+        windSpeeds: _isTrueWindMetric
+            ? (_def.skPath == mTws.skPath ? _points : _windCompanion)
+            : const [],
+        windDirections: _isTrueWindMetric
+            ? (_def.skPath == mTwd.skPath ? _points : _windCompanion)
+            : const [],
         color: _def.color,
         unit: _def.unit,
         windowStart: DateTime.now().subtract(
@@ -454,6 +472,9 @@ class _GraphDialogState extends State<GraphDialog> {
   }
 
   static final RegExp _engineRunTimeRe = RegExp(r'^propulsion\.[^.]+\.runTime');
+  static final RegExp _tankLevelRe = RegExp(
+    r'^tanks\.[^.]+\.[^.]+\.currentLevel$',
+  );
 
   Widget _buildStats() {
     final values = _points.map((p) => p.value).toList();
@@ -485,6 +506,68 @@ class _GraphDialogState extends State<GraphDialog> {
                 fontSize: 22,
                 fontWeight: FontWeight.w800,
               ),
+            ),
+          ],
+        ),
+      );
+    }
+    if (_tankLevelRe.hasMatch(_def.skPath)) {
+      final elapsedHours = _points.last.time
+              .difference(_points.first.time)
+              .inSeconds
+              .abs() /
+          3600.0;
+      final q = math.max(1, values.length ~/ 4);
+      final early = values.take(q).fold(0.0, (a, b) => a + b) / q;
+      final late = values.skip(values.length - q).fold(0.0, (a, b) => a + b) / q;
+      final usefulChange = _def.tankDangerWhenHigh ? late - early : early - late;
+      final reliable = elapsedHours >= 3 && usefulChange >= 2;
+      final ratePctDay = reliable ? usefulChange / elapsedHours * 24 : null;
+      final remainingPct = _def.tankDangerWhenHigh
+          ? (100 - current).clamp(0, 100)
+          : current.clamp(0, 100);
+      final daysRemaining = ratePctDay == null || ratePctDay <= 0
+          ? null
+          : remainingPct / ratePctDay;
+      final litersPerDay = ratePctDay == null || _def.tankCapacityL == null
+          ? null
+          : _def.tankCapacityL! * ratePctDay / 100;
+      final estimateLabel = _def.tankDangerWhenHigh
+          ? 'LLENADO ESTIMADO'
+          : 'CONSUMO ESTIMADO';
+      final timeLabel = _def.tankDangerWhenHigh ? 'lleno en' : 'autonomía';
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Text(
+                  reliable ? estimateLabel : 'TENDENCIA NO FIABLE',
+                  style: TextStyle(
+                    color: reliable ? _def.color : cMuted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${current.toStringAsFixed(1)}%',
+                  style: TextStyle(
+                    color: _def.color,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(
+              !reliable || daysRemaining == null
+                  ? 'Se necesitan ≥3 h y un cambio sostenido ≥2% para estimar.'
+                  : '${litersPerDay == null ? '${ratePctDay!.toStringAsFixed(1)}%/día' : '${litersPerDay.toStringAsFixed(1)} L/día'} · $timeLabel ${daysRemaining.toStringAsFixed(1)} días',
+              style: const TextStyle(color: cMuted, fontSize: 12),
             ),
           ],
         ),
@@ -658,6 +741,8 @@ class LineGraph extends StatefulWidget {
     required this.windowStart,
     required this.windowEnd,
     required this.expectedStepMs,
+    this.windSpeeds = const [],
+    this.windDirections = const [],
   });
   final List<GraphPoint> points;
   final Color color;
@@ -673,6 +758,8 @@ class LineGraph extends StatefulWidget {
   // break in the line instead of a straight connector, so missing data
   // reads as missing rather than a plausible-looking flat/sloped segment.
   final double expectedStepMs;
+  final List<GraphPoint> windSpeeds;
+  final List<GraphPoint> windDirections;
   @override
   State<LineGraph> createState() => _LineGraphState();
 }
@@ -776,6 +863,8 @@ class _LineGraphState extends State<LineGraph> {
                 windowStart: widget.windowStart,
                 windowEnd: widget.windowEnd,
                 expectedStepMs: widget.expectedStepMs,
+                windSpeeds: widget.windSpeeds,
+                windDirections: widget.windDirections,
               ),
               child: const SizedBox.expand(),
             ),
@@ -795,6 +884,8 @@ class _LineGraphPainter extends CustomPainter {
     required this.windowStart,
     required this.windowEnd,
     required this.expectedStepMs,
+    required this.windSpeeds,
+    required this.windDirections,
   });
   final List<GraphPoint> points;
   final Color color;
@@ -802,6 +893,8 @@ class _LineGraphPainter extends CustomPainter {
   final DateTime windowStart;
   final DateTime windowEnd;
   final double expectedStepMs;
+  final List<GraphPoint> windSpeeds;
+  final List<GraphPoint> windDirections;
 
   static const _lPad = 52.0, _rPad = 10.0, _tPad = 10.0, _bPad = 30.0;
 
@@ -809,7 +902,9 @@ class _LineGraphPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (points.isEmpty) return;
     final pL = _lPad, pR = size.width - _rPad;
-    final pT = _tPad, pB = size.height - _bPad;
+    final hasWindBarbs = windSpeeds.isNotEmpty && windDirections.isNotEmpty;
+    final pT = hasWindBarbs ? 58.0 : _tPad;
+    final pB = size.height - _bPad;
     final pW = pR - pL, pH = pB - pT;
 
     // Y scale
@@ -830,6 +925,46 @@ class _LineGraphPainter extends CustomPainter {
 
     double toX(double t) => pL + (t - tFirst) / tSpan * pW;
     double toY(double v) => pB - (v - yMin) / ySpan * pH;
+
+    if (hasWindBarbs) {
+      final range = windowEnd.difference(windowStart);
+      final interval = windBarbInterval(
+        range,
+        targetCount: math.max(1, (pW / 36).floor()),
+      );
+      final barbs = sampleWindBarbs(
+        tws: windSpeeds,
+        twd: windDirections,
+        start: windowStart,
+        end: windowEnd,
+        interval: interval,
+      );
+      canvas.drawLine(
+        const Offset(_lPad, 52),
+        Offset(pR, 52),
+        Paint()
+          ..color = const Color(0xff243b49)
+          ..strokeWidth = 1,
+      );
+      final intervalPainter = TextPainter(
+        text: TextSpan(
+          text: 'TWD/TWS · cada ${formatWindBarbInterval(interval)}',
+          style: const TextStyle(color: cMuted, fontSize: 9),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      intervalPainter.paint(canvas, Offset(pL, 1));
+      for (final barb in barbs) {
+        final x = toX(barb.time.millisecondsSinceEpoch.toDouble());
+        _paintWindBarb(
+          canvas,
+          Offset(x, 31),
+          speedKnots: barb.speedKnots,
+          directionDeg: barb.directionDeg,
+          color: cOrange,
+        );
+      }
+    }
 
     // Nice grid step
     double step;
@@ -1024,5 +1159,62 @@ class _LineGraphPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_LineGraphPainter old) =>
-      old.points != points || old.color != color || old.selected != selected;
+      old.points != points ||
+      old.color != color ||
+      old.selected != selected ||
+      old.windSpeeds != windSpeeds ||
+      old.windDirections != windDirections;
+}
+
+void _paintWindBarb(
+  Canvas canvas,
+  Offset origin, {
+  required double speedKnots,
+  required double directionDeg,
+  required Color color,
+}) {
+  final paint = Paint()
+    ..color = color
+    ..strokeWidth = 1.5
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+  if (speedKnots < 2.5) {
+    canvas.drawCircle(origin, 3, paint);
+    return;
+  }
+
+  final radians = directionDeg * math.pi / 180;
+  final along = Offset(math.sin(radians), -math.cos(radians));
+  final side = Offset(math.cos(radians), math.sin(radians));
+  const shaftLength = 18.0;
+  final tip = origin + along * shaftLength;
+  canvas.drawLine(origin, tip, paint);
+
+  var units = (speedKnots / 5).round() * 5;
+  var cursor = tip;
+  const featherStep = 3.2;
+  while (units >= 50) {
+    final back = cursor - along * 5.5;
+    final outer = cursor + side * 6.5;
+    final flag = Path()
+      ..moveTo(cursor.dx, cursor.dy)
+      ..lineTo(outer.dx, outer.dy)
+      ..lineTo(back.dx, back.dy)
+      ..close();
+    canvas.drawPath(
+      flag,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.fill,
+    );
+    cursor = back - along * 1.5;
+    units -= 50;
+  }
+  while (units >= 10) {
+    canvas.drawLine(cursor, cursor + side * 6.5, paint);
+    cursor -= along * featherStep;
+    units -= 10;
+  }
+  if (units >= 5) canvas.drawLine(cursor, cursor + side * 3.8, paint);
 }

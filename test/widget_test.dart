@@ -85,6 +85,27 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('VNT exposes the three report types directly', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.tap(find.text('VNT'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('INFORMES'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Navegación'), findsOneWidget);
+    expect(find.text('Viento y vela'), findsOneWidget);
+    expect(find.text('Informe completo'), findsOneWidget);
+    expect(find.text('24h'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final size in const [
     Size(640, 360),
     Size(800, 360),

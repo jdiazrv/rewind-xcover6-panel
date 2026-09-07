@@ -155,11 +155,20 @@ List<_AisPlot> _computeAisPlots(
       dispVN = relativeMotion ? vN : tVN;
       dispVE = relativeMotion ? vE : tVE;
     }
-    // Prefer a Signal K collision-alert plugin's own CPA/TCPA when it's publishing
-    // navigation.closestApproach.* for this target; fall back to our own geometry.
+    // Prefer a Signal K collision-alert plugin's own CPA/TCPA only while the
+    // complete triplet is recent. The NAV alarm service already applied this
+    // gate, but this list/radar did not, so a stopped plugin could leave a
+    // frozen value driving the sort indefinitely.
     final ownCpa = _cpa(relN, relE, vN, vE);
-    final cpaNm = t.pluginCpaNm ?? ownCpa?.cpaNm;
-    final tcpaMin = t.pluginTcpaMin ?? ownCpa?.tcpaMin;
+    final pluginCpaFresh =
+        t.pluginCpaUpdate != null &&
+        now.difference(t.pluginCpaUpdate!) < const Duration(seconds: 120);
+    final cpaNm = pluginCpaFresh
+        ? (t.pluginCpaNm ?? ownCpa?.cpaNm)
+        : ownCpa?.cpaNm;
+    final tcpaMin = pluginCpaFresh
+        ? (t.pluginTcpaMin ?? ownCpa?.tcpaMin)
+        : ownCpa?.tcpaMin;
     final crossing = hasVelocity
         ? _crossingLabel(relN, relE, vN, vE, headingRad)
         : null;
@@ -776,6 +785,8 @@ class AisRelativeView extends StatefulWidget {
     required this.ownLat,
     required this.ownLon,
     this.shipIconAsset = 'assets/img/own_ship.png',
+    this.priorityCpaNm = 1.0,
+    this.priorityTcpaMin = 10.0,
   });
   final Map<String, AisTarget> targets;
   final double? ownHeadingDeg;
@@ -784,6 +795,8 @@ class AisRelativeView extends StatefulWidget {
   final double? ownLat;
   final double? ownLon;
   final String shipIconAsset;
+  final double priorityCpaNm;
+  final double priorityTcpaMin;
 
   @override
   State<AisRelativeView> createState() => _AisRelativeViewState();
@@ -800,6 +813,16 @@ class _AisRelativeViewState extends State<AisRelativeView>
   // literally rather than adding a toggle-descending affordance nobody
   // asked for.
   String _sortColumn = 'tcpa';
+  static const _listReorderPeriod = Duration(seconds: 5);
+  static const _listInteractionHold = Duration(seconds: 4);
+  final List<String> _stableListOrder = [];
+  final Map<String, double?> _stableSortValues = {};
+  final Set<String> _priorityRiskIds = {};
+  final ScrollController _listScrollController = ScrollController();
+  Timer? _listOrderTimer;
+  DateTime _listOrderHoldUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _listInteracting = false;
+  bool _forceListReorder = true;
   bool _headingUp = true;
   bool _showTrail = false;
   bool _relativeMotion = true;
@@ -840,6 +863,11 @@ class _AisRelativeViewState extends State<AisRelativeView>
   void initState() {
     super.initState();
     _loadShipIconAsset();
+    _listOrderTimer = Timer.periodic(_listReorderPeriod, (_) {
+      if (!mounted || !_showList || _listInteracting) return;
+      if (DateTime.now().isBefore(_listOrderHoldUntil)) return;
+      setState(() => _forceListReorder = true);
+    });
   }
 
   @override
@@ -856,6 +884,8 @@ class _AisRelativeViewState extends State<AisRelativeView>
 
   @override
   void dispose() {
+    _listOrderTimer?.cancel();
+    _listScrollController.dispose();
     _mapController.dispose();
     super.dispose();
   }
@@ -1057,7 +1087,15 @@ class _AisRelativeViewState extends State<AisRelativeView>
                 right: 6,
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => setState(() => _showList = !_showList),
+                  onTap: () => setState(() {
+                    _showList = !_showList;
+                    if (_showList) {
+                      _forceListReorder = true;
+                      _listOrderHoldUntil = DateTime.fromMillisecondsSinceEpoch(
+                        0,
+                      );
+                    }
+                  }),
                   child: Container(
                     width: 60,
                     height: 60,
@@ -1247,9 +1285,188 @@ class _AisRelativeViewState extends State<AisRelativeView>
     );
   }
 
+  bool _meetsPriorityThreshold(_AisPlot plot, {required bool exiting}) {
+    final cpa = plot.cpaNm, tcpa = plot.tcpaMin;
+    final cpaMargin = exiting ? math.max(0.1, widget.priorityCpaNm * 0.15) : 0;
+    final tcpaMargin = exiting
+        ? math.max(1.0, widget.priorityTcpaMin * 0.15)
+        : 0;
+    return cpa != null &&
+        tcpa != null &&
+        tcpa >= 0 &&
+        cpa <= widget.priorityCpaNm + cpaMargin &&
+        tcpa <= widget.priorityTcpaMin + tcpaMargin;
+  }
+
+  bool _isPriorityRisk(_AisPlot plot) =>
+      _priorityRiskIds.contains(plot.target.context);
+
+  void _refreshPriorityRisks(List<_AisPlot> plots) {
+    final liveIds = plots.map((p) => p.target.context).toSet();
+    _priorityRiskIds.removeWhere((id) => !liveIds.contains(id));
+    for (final plot in plots) {
+      final id = plot.target.context;
+      final wasPriority = _priorityRiskIds.contains(id);
+      final remainsPriority = _meetsPriorityThreshold(
+        plot,
+        exiting: wasPriority,
+      );
+      if (remainsPriority) {
+        _priorityRiskIds.add(id);
+      } else {
+        _priorityRiskIds.remove(id);
+      }
+    }
+  }
+
+  double? _rawListSortValue(_AisPlot plot) => switch (_sortColumn) {
+    'sog' => plot.target.sogKn,
+    'brg' => plot.bearingDeg,
+    'dist' => plot.distNm,
+    'cpa' => plot.cpaNm,
+    'tcpa' => plot.tcpaMin,
+    _ => null,
+  };
+
+  double get _listSortDeadband => switch (_sortColumn) {
+    'sog' => 0.2,
+    'brg' => 3.0,
+    'dist' => 0.15,
+    'cpa' => 0.1,
+    'tcpa' => 1.0,
+    _ => 0.0,
+  };
+
+  void _refreshStableSortValues(List<_AisPlot> plots) {
+    final liveIds = plots.map((p) => p.target.context).toSet();
+    _stableSortValues.removeWhere((id, _) => !liveIds.contains(id));
+    final deadband = _listSortDeadband;
+    for (final plot in plots) {
+      final id = plot.target.context;
+      final raw = _rawListSortValue(plot);
+      if (!_stableSortValues.containsKey(id) || raw == null) {
+        _stableSortValues[id] = raw;
+        continue;
+      }
+      final previous = _stableSortValues[id];
+      if (previous == null) {
+        _stableSortValues[id] = raw;
+        continue;
+      }
+      final delta = _sortColumn == 'brg'
+          ? ((raw - previous + 540) % 360) - 180
+          : raw - previous;
+      if (delta.abs() >= deadband) {
+        _stableSortValues[id] = _sortColumn == 'brg'
+            ? normalize360(previous + delta)
+            : raw;
+      }
+    }
+  }
+
+  int _stablePlotCompare(
+    _AisPlot a,
+    _AisPlot b,
+    Map<String, int> previousRank,
+  ) {
+    int cmp;
+    if (const {'sog', 'brg', 'dist', 'cpa', 'tcpa'}.contains(_sortColumn)) {
+      final deadband = _listSortDeadband;
+      final valueA = _stableSortValues[a.target.context];
+      final valueB = _stableSortValues[b.target.context];
+      cmp = _compareNullableNum(
+        valueA == null || deadband <= 0 ? valueA : (valueA / deadband).round(),
+        valueB == null || deadband <= 0 ? valueB : (valueB / deadband).round(),
+      );
+    } else {
+      cmp = _aisListCompare(a, b, _sortColumn);
+    }
+    if (cmp != 0) return cmp;
+    final rankA = previousRank[a.target.context];
+    final rankB = previousRank[b.target.context];
+    if (rankA != null && rankB != null) return rankA.compareTo(rankB);
+    if (rankA != null) return -1;
+    if (rankB != null) return 1;
+    return a.target.context.compareTo(b.target.context);
+  }
+
+  List<_AisPlot> _stableAisListOrder(List<_AisPlot> plots) {
+    final byId = {for (final p in plots) p.target.context: p};
+    _refreshPriorityRisks(plots);
+    _stableListOrder.removeWhere((id) => !byId.containsKey(id));
+    final previousRank = {
+      for (var i = 0; i < _stableListOrder.length; i++) _stableListOrder[i]: i,
+    };
+    final canReorder =
+        _stableListOrder.isEmpty ||
+        (_forceListReorder &&
+            !_listInteracting &&
+            !DateTime.now().isBefore(_listOrderHoldUntil));
+
+    if (canReorder) {
+      _refreshStableSortValues(plots);
+      final priority = plots.where(_isPriorityRisk).toList()
+        ..sort((a, b) => _stablePlotCompare(a, b, previousRank));
+      final normal = plots.where((p) => !_isPriorityRisk(p)).toList()
+        ..sort((a, b) => _stablePlotCompare(a, b, previousRank));
+      _stableListOrder
+        ..clear()
+        ..addAll([
+          ...priority.map((p) => p.target.context),
+          ...normal.map((p) => p.target.context),
+        ]);
+      _forceListReorder = false;
+    } else {
+      // Risk-group changes are safety relevant and therefore immediate, but
+      // the relative order inside each group remains frozen while scrolling.
+      final existingPriority = _stableListOrder
+          .where((id) => byId[id] != null && _isPriorityRisk(byId[id]!))
+          .toList();
+      final newPriority = plots
+          .where(
+            (p) =>
+                _isPriorityRisk(p) &&
+                !_stableListOrder.contains(p.target.context),
+          )
+          .map((p) => p.target.context)
+          .toList();
+      final existingNormal = _stableListOrder
+          .where((id) => byId[id] != null && !_isPriorityRisk(byId[id]!))
+          .toList();
+      final newNormal = plots
+          .where(
+            (p) =>
+                !_isPriorityRisk(p) &&
+                !_stableListOrder.contains(p.target.context),
+          )
+          .map((p) => p.target.context)
+          .toList();
+      _stableListOrder
+        ..clear()
+        ..addAll([
+          ...existingPriority,
+          ...newPriority,
+          ...existingNormal,
+          ...newNormal,
+        ]);
+    }
+    return [
+      for (final id in _stableListOrder)
+        if (byId[id] != null) byId[id]!,
+    ];
+  }
+
+  void _beginListInteraction() {
+    _listInteracting = true;
+  }
+
+  void _endListInteraction() {
+    _listInteracting = false;
+    _listOrderHoldUntil = DateTime.now().add(_listInteractionHold);
+  }
+
   Widget _aisList(List<_AisPlot> plots) {
-    final sorted = [...plots]
-      ..sort((a, b) => _aisListCompare(a, b, _sortColumn));
+    final sorted = _stableAisListOrder(plots);
     Widget sortHeader(
       String label,
       String column,
@@ -1260,7 +1477,12 @@ class _AisRelativeViewState extends State<AisRelativeView>
       return SizedBox(
         width: width,
         child: InkWell(
-          onTap: () => setState(() => _sortColumn = column),
+          onTap: () => setState(() {
+            _sortColumn = column;
+            _stableSortValues.clear();
+            _forceListReorder = true;
+            _listOrderHoldUntil = DateTime.fromMillisecondsSinceEpoch(0);
+          }),
           child: Text(
             label,
             textAlign: align,
@@ -1297,126 +1519,170 @@ class _AisRelativeViewState extends State<AisRelativeView>
           ),
           const Divider(color: Color(0xff1e3040), height: 1),
           Expanded(
-            child: ListView.separated(
-              itemCount: sorted.length,
-              separatorBuilder: (_, _) =>
-                  const Divider(color: Color(0xff1e3040), height: 1),
-              itemBuilder: (ctx, i) {
-                final p = sorted[i];
-                final color = _aisColor(p);
-                final crosses = _aisShowsCrossing(p);
-                return InkWell(
-                  onTap: () => showAisTargetDetail(
-                    ctx,
-                    target: p.target,
-                    distNm: p.distNm,
-                    bearingDeg: p.bearingDeg,
-                    cpaNm: p.cpaNm,
-                    tcpaMin: p.tcpaMin,
-                    crossing: p.crossing,
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 9),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 150,
+            child: Listener(
+              onPointerDown: (_) => _beginListInteraction(),
+              onPointerUp: (_) => _endListInteraction(),
+              onPointerCancel: (_) => _endListInteraction(),
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification is ScrollStartNotification ||
+                      notification is ScrollUpdateNotification) {
+                    _beginListInteraction();
+                  } else if (notification is ScrollEndNotification) {
+                    _endListInteraction();
+                  }
+                  return false;
+                },
+                child: ListView.separated(
+                  controller: _listScrollController,
+                  itemCount: sorted.length,
+                  separatorBuilder: (_, _) =>
+                      const Divider(color: Color(0xff1e3040), height: 1),
+                  itemBuilder: (ctx, i) {
+                    final p = sorted[i];
+                    final color = _aisColor(p);
+                    final crosses = _aisShowsCrossing(p);
+                    final priority = _isPriorityRisk(p);
+                    return Material(
+                      key: ValueKey(p.target.context),
+                      color: priority
+                          ? cRed.withValues(alpha: 0.10)
+                          : Colors.transparent,
+                      child: InkWell(
+                        onTap: () => showAisTargetDetail(
+                          ctx,
+                          target: p.target,
+                          distNm: p.distNm,
+                          bearingDeg: p.bearingDeg,
+                          cpaNm: p.cpaNm,
+                          tcpaMin: p.tcpaMin,
+                          crossing: p.crossing,
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
                           child: Row(
                             children: [
-                              Icon(
-                                Icons.change_history,
-                                color: color,
-                                size: 14,
+                              SizedBox(
+                                width: 150,
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      priority
+                                          ? Icons.warning_amber_rounded
+                                          : Icons.change_history,
+                                      color: priority ? cRed : color,
+                                      size: 14,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        p.target.name ?? p.target.mmsi ?? '?',
+                                        style: const TextStyle(
+                                          color: cText,
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 13,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              const SizedBox(width: 6),
-                              Expanded(
+                              SizedBox(
+                                width: 78,
                                 child: Text(
-                                  p.target.name ?? p.target.mmsi ?? '?',
+                                  _aisTypeName(p.target.shipTypeId),
+                                  style: const TextStyle(
+                                    color: cMuted,
+                                    fontSize: 12,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 46,
+                                child: Text(
+                                  p.target.sogKn != null
+                                      ? p.target.sogKn!.toStringAsFixed(1)
+                                      : '--',
                                   style: const TextStyle(
                                     color: cText,
-                                    fontWeight: FontWeight.w600,
                                     fontSize: 13,
                                   ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.right,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 46,
+                                child: Text(
+                                  '${p.bearingDeg.round()}°',
+                                  style: const TextStyle(
+                                    color: cText,
+                                    fontSize: 13,
+                                  ),
+                                  textAlign: TextAlign.right,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 54,
+                                child: Text(
+                                  '${p.distNm.toStringAsFixed(1)} nm',
+                                  style: const TextStyle(
+                                    color: cText,
+                                    fontSize: 13,
+                                  ),
+                                  textAlign: TextAlign.right,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 52,
+                                child: Text(
+                                  p.cpaNm != null
+                                      ? '${p.cpaNm!.toStringAsFixed(1)} nm'
+                                      : '--',
+                                  style: const TextStyle(
+                                    color: cText,
+                                    fontSize: 13,
+                                  ),
+                                  textAlign: TextAlign.right,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 52,
+                                child: Text(
+                                  p.tcpaMin != null
+                                      ? '${p.tcpaMin!.round()} min'
+                                      : '--',
+                                  style: const TextStyle(
+                                    color: cText,
+                                    fontSize: 13,
+                                  ),
+                                  textAlign: TextAlign.right,
+                                ),
+                              ),
+                              SizedBox(
+                                width: 92,
+                                child: Text(
+                                  crosses ? p.crossing! : '--',
+                                  style: TextStyle(
+                                    color: crosses ? cOrange : cMuted,
+                                    fontSize: 12,
+                                    fontWeight: crosses
+                                        ? FontWeight.w800
+                                        : FontWeight.w400,
+                                  ),
+                                  textAlign: TextAlign.right,
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        SizedBox(
-                          width: 78,
-                          child: Text(
-                            _aisTypeName(p.target.shipTypeId),
-                            style: const TextStyle(color: cMuted, fontSize: 12),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 46,
-                          child: Text(
-                            p.target.sogKn != null
-                                ? p.target.sogKn!.toStringAsFixed(1)
-                                : '--',
-                            style: const TextStyle(color: cText, fontSize: 13),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 46,
-                          child: Text(
-                            '${p.bearingDeg.round()}°',
-                            style: const TextStyle(color: cText, fontSize: 13),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 54,
-                          child: Text(
-                            '${p.distNm.toStringAsFixed(1)} nm',
-                            style: const TextStyle(color: cText, fontSize: 13),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 52,
-                          child: Text(
-                            p.cpaNm != null
-                                ? '${p.cpaNm!.toStringAsFixed(1)} nm'
-                                : '--',
-                            style: const TextStyle(color: cText, fontSize: 13),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 52,
-                          child: Text(
-                            p.tcpaMin != null
-                                ? '${p.tcpaMin!.round()} min'
-                                : '--',
-                            style: const TextStyle(color: cText, fontSize: 13),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 92,
-                          child: Text(
-                            crosses ? p.crossing! : '--',
-                            style: TextStyle(
-                              color: crosses ? cOrange : cMuted,
-                              fontSize: 12,
-                              fontWeight: crosses
-                                  ? FontWeight.w800
-                                  : FontWeight.w400,
-                            ),
-                            textAlign: TextAlign.right,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
+                      ),
+                    );
+                  },
+                ),
+              ),
             ),
           ),
         ],

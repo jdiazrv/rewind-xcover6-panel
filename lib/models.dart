@@ -189,6 +189,138 @@ class GraphPoint {
   final double value;
 }
 
+/// One meteorological wind barb: [directionDeg] is the true direction the
+/// wind comes from and [speedKnots] controls the 5/10/50 kt feathers.
+class WindBarbSample {
+  const WindBarbSample({
+    required this.time,
+    required this.speedKnots,
+    required this.directionDeg,
+  });
+
+  final DateTime time;
+  final double speedKnots;
+  final double directionDeg;
+}
+
+const _windBarbNiceIntervals = <Duration>[
+  Duration(minutes: 5),
+  Duration(minutes: 10),
+  Duration(minutes: 15),
+  Duration(minutes: 30),
+  Duration(hours: 1),
+  Duration(hours: 2),
+  Duration(hours: 3),
+  Duration(hours: 6),
+  Duration(hours: 12),
+  Duration(days: 1),
+  Duration(days: 2),
+];
+
+Duration windBarbInterval(Duration range, {required int targetCount}) {
+  final wantedMs = range.inMilliseconds / math.max(1, targetCount);
+  for (final interval in _windBarbNiceIntervals) {
+    if (interval.inMilliseconds >= wantedMs) return interval;
+  }
+  return _windBarbNiceIntervals.last;
+}
+
+String formatWindBarbInterval(Duration interval) {
+  if (interval.inDays > 0) return '${interval.inDays} d';
+  if (interval.inHours > 0) return '${interval.inHours} h';
+  return '${interval.inMinutes} min';
+}
+
+Duration _medianGraphStep(List<GraphPoint> points) {
+  if (points.length < 2) return const Duration(minutes: 1);
+  final gaps = <int>[];
+  for (var i = 1; i < points.length; i++) {
+    final ms = points[i].time.difference(points[i - 1].time).inMilliseconds;
+    if (ms > 0) gaps.add(ms);
+  }
+  if (gaps.isEmpty) return const Duration(minutes: 1);
+  gaps.sort();
+  return Duration(milliseconds: gaps[gaps.length ~/ 2]);
+}
+
+GraphPoint? _nearestGraphPoint(
+  List<GraphPoint> points,
+  DateTime time,
+  Duration tolerance,
+) {
+  if (points.isEmpty) return null;
+  var lo = 0, hi = points.length;
+  final target = time.millisecondsSinceEpoch;
+  while (lo < hi) {
+    final mid = (lo + hi) >> 1;
+    if (points[mid].time.millisecondsSinceEpoch < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  GraphPoint? best;
+  var bestMs = tolerance.inMilliseconds + 1;
+  for (final i in [lo - 1, lo]) {
+    if (i < 0 || i >= points.length) continue;
+    final delta = (points[i].time.millisecondsSinceEpoch - target).abs();
+    if (delta <= tolerance.inMilliseconds && delta < bestMs) {
+      best = points[i];
+      bestMs = delta;
+    }
+  }
+  return best;
+}
+
+/// Samples independent TWS and TWD histories on stable clock boundaries.
+/// The tolerance follows the real source cadence, so a long data outage stays
+/// visibly empty instead of being filled with a distant value.
+List<WindBarbSample> sampleWindBarbs({
+  required List<GraphPoint> tws,
+  required List<GraphPoint> twd,
+  required DateTime start,
+  required DateTime end,
+  required Duration interval,
+}) {
+  if (tws.isEmpty || twd.isEmpty || !end.isAfter(start)) return const [];
+  final twsStep = _medianGraphStep(tws);
+  final twdStep = _medianGraphStep(twd);
+  final sourceStep = twsStep.inMilliseconds >= twdStep.inMilliseconds
+      ? twsStep
+      : twdStep;
+  final sourceTolerance = Duration(
+    milliseconds: math.max(30000, (sourceStep.inMilliseconds * 2.5).round()),
+  );
+  final slotTolerance = Duration(
+    milliseconds: (interval.inMilliseconds * 0.45).round(),
+  );
+  final tolerance = sourceTolerance < slotTolerance
+      ? sourceTolerance
+      : slotTolerance;
+  final stepMs = interval.inMilliseconds;
+  var slotMs = ((start.millisecondsSinceEpoch + stepMs - 1) ~/ stepMs) * stepMs;
+  final out = <WindBarbSample>[];
+  while (slotMs <= end.millisecondsSinceEpoch) {
+    final slot = DateTime.fromMillisecondsSinceEpoch(slotMs, isUtc: true);
+    final speed = _nearestGraphPoint(tws, slot, tolerance);
+    final direction = _nearestGraphPoint(twd, slot, tolerance);
+    if (speed != null &&
+        direction != null &&
+        speed.value >= 0 &&
+        direction.value.isFinite) {
+      out.add(
+        WindBarbSample(
+          time: slot,
+          speedKnots: speed.value,
+          directionDeg: (direction.value % 360 + 360) % 360,
+        ),
+      );
+    }
+    slotMs += stepMs;
+  }
+  return out;
+}
+
 // ─── Metric definitions ───────────────────────────────────────────────────────
 class MetricDef {
   const MetricDef(
@@ -198,6 +330,8 @@ class MetricDef {
     this.offset = 0.0,
     this.scale = 1.0,
     this.color = cCyan,
+    this.tankCapacityL,
+    this.tankDangerWhenHigh = false,
   });
   final String skPath;
   final String label;
@@ -205,6 +339,10 @@ class MetricDef {
   final double offset;
   final double scale;
   final Color color;
+  // Optional tank metadata lets the generic history screen translate a
+  // trustworthy level trend into litres/day and estimated time remaining.
+  final double? tankCapacityL;
+  final bool tankDangerWhenHigh;
 }
 
 const mPressure = MetricDef(

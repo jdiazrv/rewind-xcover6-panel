@@ -22,7 +22,6 @@ class _WindTapCard extends StatelessWidget {
     this.gust,
     this.beaufort,
     this.demo = false,
-    this.settings,
   });
   final String label;
   final String value;
@@ -42,7 +41,6 @@ class _WindTapCard extends StatelessWidget {
   final String influxToken;
   final String skHost;
   final int skPort;
-  final SettingsModel? settings;
   final String skAuthBase64;
   final bool demo;
 
@@ -68,7 +66,6 @@ class _WindTapCard extends StatelessWidget {
               bucket: bucket,
               archiveBucket: archiveBucket,
               demo: demo,
-              settings: settings,
             ),
           ),
         ),
@@ -1853,6 +1850,22 @@ class SideTriangle extends StatelessWidget {
   );
 }
 
+class TankSegmentData {
+  const TankSegmentData({
+    required this.label,
+    required this.percent,
+    required this.capacityL,
+  });
+
+  final String label;
+  final double? percent;
+  final int capacityL;
+
+  int? get liters => percent == null || capacityL <= 0
+      ? null
+      : (capacityL * percent!.clamp(0, 100) / 100).round();
+}
+
 class TankCard extends StatelessWidget {
   const TankCard({
     super.key,
@@ -1863,7 +1876,8 @@ class TankCard extends StatelessWidget {
     required this.icon,
     this.large = false,
     this.flexible = false,
-    this.breakdown,
+    this.segments = const [],
+    this.dangerWhenHigh = false,
     this.onTap,
   });
   final String name;
@@ -1873,144 +1887,275 @@ class TankCard extends StatelessWidget {
   final IconData icon;
   final bool large;
   final bool flexible;
-  // "id liters/capacity" per tank, joined with " · " — set only when this
-  // card aggregates more than one physical tank under one label, so the
-  // per-tank breakdown is visible without tapping through to the detail
-  // dialog. Null for a single-tank card.
-  final String? breakdown;
+  final List<TankSegmentData> segments;
+  // Fuel/fresh water warn as they empty. Holding/black-water tanks use the
+  // inverse thresholds because danger increases as they fill.
+  final bool dangerWhenHigh;
   final VoidCallback? onTap;
+
+  Color _levelColor(double percent, bool hasData) {
+    if (!hasData) return cMuted;
+    if (dangerWhenHigh) {
+      if (percent >= 90) return cRed;
+      if (percent >= 75) return cOrange;
+    } else {
+      if (percent <= 15) return cRed;
+      if (percent <= 30) return cOrange;
+    }
+    return color;
+  }
+
+  String _levelStatus(double percent, bool hasData) {
+    if (!hasData) return 'SIN DATOS';
+    if (dangerWhenHigh) {
+      if (percent >= 90) return 'VACIAR AHORA';
+      if (percent >= 75) return 'CASI LLENO';
+    } else {
+      if (percent <= 15) return 'NIVEL CRÍTICO';
+      if (percent <= 30) return 'NIVEL BAJO';
+    }
+    return 'NIVEL NORMAL';
+  }
+
+  Widget _segmentRow(TankSegmentData segment) {
+    final pct = segment.percent?.clamp(0, 100).toDouble();
+    final segmentColor = _levelColor(pct ?? 0, pct != null);
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: large ? 92 : 72,
+            child: Text(
+              segment.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: cText,
+                fontSize: large ? 13 : 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                minHeight: large ? 8 : 6,
+                value: pct == null ? 0 : pct / 100,
+                backgroundColor: cPanel2,
+                valueColor: AlwaysStoppedAnimation(
+                  pct == null ? cMuted.withValues(alpha: 0.25) : segmentColor,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: large ? 92 : 72,
+            child: Text(
+              pct == null
+                  ? '--'
+                  : segment.liters == null
+                  ? '${pct.round()}%'
+                  : '${segment.liters}/${segment.capacityL} L',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: pct == null ? cMuted : cText,
+                fontSize: large ? 12 : 10,
+                fontFeatures: const [ui.FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final hasData = value != null;
     final percent = (value ?? 0).clamp(0, 100).toDouble();
     final liters = capacityL <= 0 ? null : (capacityL * percent / 100).round();
     final cardWidth = flexible ? null : (large ? 190.0 : 152.0);
+    final levelColor = _levelColor(percent, hasData);
+    final segmentValues = segments
+        .map((s) => s.percent)
+        .whereType<double>()
+        .toList();
+    final imbalance = segmentValues.length < 2
+        ? null
+        : segmentValues.reduce(math.max) - segmentValues.reduce(math.min);
     return Container(
       width: cardWidth,
       margin: flexible ? null : EdgeInsets.only(right: large ? 18 : 10),
       child: Material(
-        color: const Color(0xff151515),
+        color: const Color(0xff10191f),
         borderRadius: BorderRadius.circular(16),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xff303030), width: 1.3),
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xff17252d), Color(0xff0c1318)],
+              ),
+              border: Border.all(
+                color: levelColor.withValues(alpha: hasData ? 0.5 : 0.2),
+                width: 1.3,
+              ),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Column(
               children: [
-                // Title bar
                 Container(
-                  height: large ? 46 : 30,
-                  color: color,
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontSize: large ? 20 : 14,
-                      fontWeight: FontWeight.w700,
+                  height: large ? 52 : 44,
+                  padding: EdgeInsets.symmetric(horizontal: large ? 16 : 12),
+                  decoration: BoxDecoration(
+                    color: levelColor.withValues(alpha: 0.10),
+                    border: Border(
+                      bottom: BorderSide(
+                        color: levelColor.withValues(alpha: 0.35),
+                      ),
                     ),
                   ),
+                  child: Row(
+                    children: [
+                      Icon(icon, color: levelColor, size: large ? 25 : 21),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          name.toUpperCase(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: cText,
+                            fontSize: large ? 18 : 14,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.7,
+                          ),
+                        ),
+                      ),
+                      if (onTap != null)
+                        Icon(
+                          Icons.chevron_right,
+                          color: cMuted.withValues(alpha: 0.65),
+                        ),
+                    ],
+                  ),
                 ),
-                // Body: left = icon + % + liters, right = gauge bar
                 Expanded(
                   child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      large ? 12 : 8,
-                      large ? 10 : 6,
-                      large ? 12 : 8,
-                      large ? 10 : 6,
-                    ),
-                    child: Row(
+                    padding: EdgeInsets.all(large ? 16 : 12),
+                    child: Column(
                       children: [
-                        // Left: icon, percentage, liters
                         Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                          child: Row(
                             children: [
-                              Icon(icon, color: cText, size: large ? 28 : 18),
-                              // fit: contain (not scaleDown) so the number
-                              // actually grows to fill the space the card's
-                              // own width gives it — on a wide tablet card
-                              // scaleDown left this stuck at its base size
-                              // with a lot of empty room around it, which
-                              // read as "the card is huge but the number is
-                              // small" rather than genuinely large text.
-                              FittedBox(
-                                fit: BoxFit.contain,
-                                alignment: Alignment.centerLeft,
-                                child: RichText(
-                                  text: TextSpan(
-                                    children: [
-                                      TextSpan(
-                                        // "--" (not "0") when there's no
-                                        // reading at all, so an actually-empty
-                                        // tank and a missing/unconfigured one
-                                        // don't look identical.
-                                        text: value == null
-                                            ? '--'
-                                            : percent.round().toString(),
-                                        style: TextStyle(
-                                          color: cText,
-                                          fontSize: large ? 52 : 40,
-                                          fontWeight: FontWeight.w300,
+                              Expanded(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    FittedBox(
+                                      fit: BoxFit.scaleDown,
+                                      alignment: Alignment.centerLeft,
+                                      child: RichText(
+                                        text: TextSpan(
+                                          children: [
+                                            TextSpan(
+                                              text: hasData
+                                                  ? percent.round().toString()
+                                                  : '--',
+                                              style: TextStyle(
+                                                color: cText,
+                                                fontSize: large ? 64 : 54,
+                                                fontWeight: FontWeight.w300,
+                                                fontFeatures: const [
+                                                  ui.FontFeature.tabularFigures(),
+                                                ],
+                                              ),
+                                            ),
+                                            TextSpan(
+                                              text: '%',
+                                              style: TextStyle(
+                                                color: cMuted,
+                                                fontSize: large ? 36 : 28,
+                                                fontWeight: FontWeight.w300,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
-                                      TextSpan(
-                                        text: '%',
-                                        style: TextStyle(
-                                          color: cMuted,
-                                          fontSize: large ? 36 : 26,
-                                          fontWeight: FontWeight.w300,
-                                        ),
+                                    ),
+                                    Text(
+                                      !hasData || liters == null
+                                          ? '-- L / $capacityL L'
+                                          : '$liters L / $capacityL L',
+                                      style: TextStyle(
+                                        color: cMuted,
+                                        fontSize: large ? 15 : 13,
+                                        fontFeatures: const [
+                                          ui.FontFeature.tabularFigures(),
+                                        ],
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                    const SizedBox(height: 7),
+                                    Text(
+                                      _levelStatus(percent, hasData),
+                                      style: TextStyle(
+                                        color: levelColor,
+                                        fontSize: large ? 12 : 10,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: 0.7,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              Text(
-                                liters == null
-                                    ? '-- l'
-                                    : '$liters/$capacityL l',
-                                style: TextStyle(
-                                  color: cMuted,
-                                  fontSize: large ? 14 : 13,
+                              SizedBox(
+                                width: large ? 66 : 54,
+                                child: SegmentedTankGauge(
+                                  percent: percent,
+                                  color: levelColor,
+                                  hasData: hasData,
                                 ),
                               ),
-                              if (breakdown != null)
-                                Text(
-                                  breakdown!,
-                                  // One tank per line (see the join('\n')
-                                  // that builds this string) instead of
-                                  // cramming every tank onto one line at a
-                                  // tiny font — 2 lines covers the common
-                                  // case (a card aggregating exactly 2
-                                  // tanks); a 3rd+ tank still ellipsizes
-                                  // rather than overflowing the card.
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: cMuted,
-                                    fontSize: large ? 12 : 11,
-                                    height: 1.25,
-                                  ),
-                                ),
                             ],
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        // Right: vertical gauge bar
-                        SizedBox(
-                          width: large ? 32 : 18,
-                          child: SegmentedTankGauge(percent: percent),
-                        ),
+                        if (segments.length > 1) ...[
+                          Divider(
+                            height: 12,
+                            color: levelColor.withValues(alpha: 0.18),
+                          ),
+                          for (final segment in segments.take(3))
+                            _segmentRow(segment),
+                          if (imbalance != null && imbalance >= 15)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 7),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.balance,
+                                    color: cOrange,
+                                    size: 15,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    'DESBALANCE ${imbalance.round()}%',
+                                    style: const TextStyle(
+                                      color: cOrange,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ],
                     ),
                   ),
@@ -2025,36 +2170,105 @@ class TankCard extends StatelessWidget {
 }
 
 class SegmentedTankGauge extends StatelessWidget {
-  const SegmentedTankGauge({super.key, required this.percent});
+  const SegmentedTankGauge({
+    super.key,
+    required this.percent,
+    required this.color,
+    required this.hasData,
+  });
   final double percent;
+  final Color color;
+  final bool hasData;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final fillHeight =
-            constraints.maxHeight * (percent / 100).clamp(0.0, 1.0);
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(9),
-          child: Stack(
-            children: [
-              Container(color: const Color(0xff10283d)),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: fillHeight,
-                child: Container(color: const Color(0xff3f86cc)),
-              ),
-              for (final mark in [0.25, 0.5, 0.75])
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: constraints.maxHeight * mark,
-                  child: Container(height: 3, color: Colors.black),
+        return Column(
+          children: [
+            Container(
+              width: constraints.maxWidth * 0.48,
+              height: 7,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: hasData ? 0.55 : 0.15),
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(3),
                 ),
-            ],
-          ),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(9),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xff091116),
+                    border: Border.all(
+                      color: color.withValues(alpha: hasData ? 0.7 : 0.25),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: TweenAnimationBuilder<double>(
+                          tween: Tween(
+                            begin: 0,
+                            end: hasData
+                                ? (percent / 100).clamp(0.0, 1.0)
+                                : 0,
+                          ),
+                          duration: const Duration(milliseconds: 450),
+                          curve: Curves.easeOutCubic,
+                          builder: (context, value, _) => Align(
+                            alignment: Alignment.bottomCenter,
+                            child: FractionallySizedBox(
+                              widthFactor: 1,
+                              heightFactor: value,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      color.withValues(alpha: 0.72),
+                                      color,
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      for (final mark in [0.25, 0.5, 0.75])
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: constraints.maxHeight * mark,
+                          child: Container(
+                            height: 1,
+                            color: Colors.white.withValues(alpha: 0.22),
+                          ),
+                        ),
+                      if (!hasData)
+                        const Center(
+                          child: Text(
+                            '?',
+                            style: TextStyle(
+                              color: cMuted,
+                              fontSize: 24,
+                              fontWeight: FontWeight.w300,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         );
       },
     );

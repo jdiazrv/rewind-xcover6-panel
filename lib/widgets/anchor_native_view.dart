@@ -362,6 +362,82 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     _editTimeoutTimer?.cancel();
   }
 
+  Future<void> _openNumericRadiusDialog() async {
+    // Do not let the 5 s map-edit timeout commit behind the modal while the
+    // user is still typing. A cancelled dialog simply returns to map editing;
+    // an accepted value is committed immediately, just like Confirm.
+    _editTimeoutTimer?.cancel();
+    final controller = TextEditingController(
+      text: (_dragRadiusM ?? widget.config.radiusM).round().toString(),
+    );
+    final formKey = GlobalKey<FormState>();
+
+    double? parsedRadius() =>
+        double.tryParse(controller.text.trim().replaceAll(',', '.'));
+
+    final radius = await showDialog<double>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: cPanel,
+        title: const Text(
+          'Radio de vigilancia',
+          style: TextStyle(color: cText),
+        ),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+            ],
+            style: const TextStyle(color: cText, fontSize: 22),
+            textAlign: TextAlign.center,
+            decoration: const InputDecoration(
+              labelText: 'Radio',
+              suffixText: 'm',
+              helperText: 'Entre 5 y 300 metros',
+            ),
+            validator: (_) {
+              final value = parsedRadius();
+              if (value == null) return 'Introduce un número válido';
+              if (value < 5 || value > 300) return 'Debe estar entre 5 y 300 m';
+              return null;
+            },
+            onFieldSubmitted: (_) {
+              if (formKey.currentState?.validate() ?? false) {
+                Navigator.of(dialogContext).pop(parsedRadius());
+              }
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState?.validate() ?? false) {
+                Navigator.of(dialogContext).pop(parsedRadius());
+              }
+            },
+            child: const Text('Aplicar'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted) return;
+    if (radius == null) {
+      if (_editMode != null) _resetEditTimeout();
+      return;
+    }
+    setState(() => _dragRadiusM = radius);
+    _confirmEdit();
+  }
+
   double? get _effectiveLat => _preferDeviceGps
       ? (_devicePosition?.latitude ?? widget.ownLat)
       : (widget.ownLat ?? _devicePosition?.latitude);
@@ -2063,9 +2139,13 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         markers.add(
           fm.Marker(
             point: handlePoint,
-            width: 22,
-            height: 22,
+            // 48 logical pixels is the recommended minimum touch target for
+            // a control used on a moving boat. The visible knob stays compact
+            // while the transparent hit area is more than twice as large.
+            width: 48,
+            height: 48,
             child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
               onLongPressStart: (_) {
                 HapticFeedback.mediumImpact();
                 _resetEditTimeout();
@@ -2109,11 +2189,23 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                   ).distanceM.clamp(5, 300);
                 });
               },
-              child: Container(
-                decoration: BoxDecoration(
-                  color: _editMode == 'radius' ? cYellow : cCyan,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.black38, width: 1.5),
+              child: Center(
+                child: Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    color: _editMode == 'radius' ? cYellow : cCyan,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.black54, width: 1.5),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black45, blurRadius: 5),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.open_with,
+                    color: Colors.black87,
+                    size: 15,
+                  ),
                 ),
               ),
             ),
@@ -2242,14 +2334,21 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
               Text(
                 _editMode == 'anchor'
                     ? 'Mantén pulsado y arrastra el ancla — luego confirma'
-                    : 'Mantén pulsado y arrastra el radio'
-                          '${_dragRadiusM != null ? ' (${_dragRadiusM!.round()} m)' : ''}',
+                    : 'Arrastra el punto amarillo o introduce el radio:',
                 style: const TextStyle(
                   color: Colors.black,
                   fontWeight: FontWeight.w800,
                   fontSize: 13,
                 ),
               ),
+              if (_editMode == 'radius') ...[
+                const SizedBox(width: 8),
+                _miniBtn(
+                  '${(_dragRadiusM ?? widget.config.radiusM).round()} m',
+                  _openNumericRadiusDialog,
+                  filled: true,
+                ),
+              ],
               const SizedBox(width: 12),
               _miniBtn('Cancelar', _cancelEdit),
               const SizedBox(width: 6),
@@ -3158,80 +3257,212 @@ class _LayersSheet extends StatefulWidget {
 }
 
 class _LayersSheetState extends State<_LayersSheet> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
   Widget _toggle(
     String label,
+    IconData icon,
     bool value,
     void Function(AnchorConfig, bool) set,
-  ) => SwitchListTile(
-    value: value,
-    onChanged: (v) {
-      setState(() => widget.onChanged((c) => set(c, v)));
-    },
-    title: Text(label, style: const TextStyle(color: cText)),
-    activeThumbColor: cCyan,
+  ) => Semantics(
+    button: true,
+    toggled: value,
+    label: label,
+    child: Material(
+      color: value ? cCyan.withValues(alpha: 0.10) : cPanel2,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _setLayer(!value, set),
+        child: Container(
+          height: 54,
+          padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: value
+                  ? cCyan.withValues(alpha: 0.45)
+                  : const Color(0xff2a3a44),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: value ? cCyan : cMuted),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: value ? cText : cMuted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Transform.scale(
+                scale: 0.78,
+                child: Switch(
+                  value: value,
+                  onChanged: (v) => _setLayer(v, set),
+                  activeThumbColor: cCyan,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
   );
+
+  void _setLayer(bool value, void Function(AnchorConfig, bool) set) {
+    widget.onChanged((c) => set(c, value));
+    if (mounted) setState(() {});
+  }
+
+  Widget _sectionTitle(String text) => Padding(
+    padding: const EdgeInsets.only(top: 8, bottom: 6),
+    child: Text(
+      text,
+      style: const TextStyle(
+        color: cMuted,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 0.9,
+      ),
+    ),
+  );
+
+  Widget _grid(List<Widget> children, double width) {
+    final columns = width >= 760
+        ? 3
+        : width >= 480
+        ? 2
+        : 1;
+    return GridView.count(
+      crossAxisCount: columns,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      mainAxisSpacing: 8,
+      crossAxisSpacing: 8,
+      mainAxisExtent: 54,
+      children: children,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = widget.config;
+    final screen = MediaQuery.sizeOf(context);
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+      top: false,
+      child: SizedBox(
+        height: math.min(420, screen.height * 0.88),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                'CAPAS',
-                style: TextStyle(
-                  color: cMuted,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 1,
-                ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 6, 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.layers, color: cCyan, size: 20),
+                  const SizedBox(width: 9),
+                  const Expanded(
+                    child: Text(
+                      'CAPAS DEL MAPA',
+                      style: TextStyle(
+                        color: cText,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Cerrar',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.close, color: cMuted),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
               ),
             ),
-            _toggle('Viento', c.showWind, (c, v) => c.showWind = v),
-            _toggle('Profundidad', c.showDepth, (c, v) => c.showDepth = v),
-            _toggle(
-              'Scope (cadena:profundidad)',
-              c.showScope,
-              (c, v) => c.showScope = v,
-            ),
-            _toggle(
-              'AIS cercanos',
-              c.showAisNearby,
-              (c, v) => c.showAisNearby = v,
-            ),
-            _toggle(
-              'Traza propia',
-              c.showOwnTrack,
-              (c, v) => c.showOwnTrack = v,
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'CAPA BASE',
-                  style: TextStyle(
-                    color: cMuted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.8,
+            const Divider(height: 1, color: Color(0xff263946)),
+            Expanded(
+              child: Scrollbar(
+                controller: _scrollController,
+                thumbVisibility: true,
+                child: SingleChildScrollView(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.fromLTRB(14, 2, 14, 14),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 980),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) => Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _sectionTitle('INFORMACIÓN Y SEGUIMIENTO'),
+                            _grid([
+                              _toggle(
+                                'Viento',
+                                Icons.air,
+                                c.showWind,
+                                (c, v) => c.showWind = v,
+                              ),
+                              _toggle(
+                                'Profundidad',
+                                Icons.water,
+                                c.showDepth,
+                                (c, v) => c.showDepth = v,
+                              ),
+                              _toggle(
+                                'Scope cadena/profundidad',
+                                Icons.link,
+                                c.showScope,
+                                (c, v) => c.showScope = v,
+                              ),
+                              _toggle(
+                                'AIS cercanos',
+                                Icons.directions_boat,
+                                c.showAisNearby,
+                                (c, v) => c.showAisNearby = v,
+                              ),
+                              _toggle(
+                                'Traza propia',
+                                Icons.route,
+                                c.showOwnTrack,
+                                (c, v) => c.showOwnTrack = v,
+                              ),
+                            ], constraints.maxWidth),
+                            _sectionTitle('CARTOGRAFÍA'),
+                            _grid([
+                              _toggle(
+                                'Imagen de satélite',
+                                Icons.satellite_alt,
+                                c.showSatelliteLayer,
+                                (c, v) => c.showSatelliteLayer = v,
+                              ),
+                              _toggle(
+                                'Carta OpenSeaMap',
+                                Icons.map,
+                                c.showSeamarkLayer,
+                                (c, v) => c.showSeamarkLayer = v,
+                              ),
+                            ], constraints.maxWidth),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            _toggle(
-              'Satélite',
-              c.showSatelliteLayer,
-              (c, v) => c.showSatelliteLayer = v,
-            ),
-            _toggle(
-              'Carta náutica (OpenSeaMap)',
-              c.showSeamarkLayer,
-              (c, v) => c.showSeamarkLayer = v,
             ),
           ],
         ),
