@@ -256,16 +256,11 @@ class _DashboardState extends State<Dashboard> {
   bool get _isCompactPremium => MediaQuery.sizeOf(context).height < 500;
 
   double _marineHorizonHours = 1;
-  // See the enginePath dynamic handler — set to "now + 20s" every time
-  // engine hours is observed to increase, so a short gap after the engine
-  // stops still reads as running rather than flickering off between deltas.
-  DateTime? _engineRunningUntil;
-  // Each engine gauge goes stale independently, 5s after its own last
+  // Each engine gauge goes stale independently, 2s after its own last
   // delta — a dead/disconnected bridge must not leave a frozen RPM or
-  // temperature reading sitting there looking live forever. Same window as
-  // nav/wind (_navWindStaleAfter): "possibly wrong right now" matters more
-  // than a flicker for instrument-cluster data.
-  static const _engineStaleAfter = Duration(seconds: 5);
+  // temperature reading sitting there looking live forever. EEC1 arrives
+  // many times per second, so two seconds still provides ample debounce.
+  static const _engineStaleAfter = Duration(seconds: 2);
   double? _freshEngine(double? v, DateTime? updatedAt) {
     if (v == null || updatedAt == null) return null;
     return DateTime.now().difference(updatedAt) < _engineStaleAfter ? v : null;
@@ -282,23 +277,11 @@ class _DashboardState extends State<Dashboard> {
     return DateTime.now().difference(updatedAt) < _engineStaleAfter ? v : null;
   }
 
-  // RPM is a direct real-time signal — if it's reporting meaningfully
-  // above idle/cranking noise, the engine is running full stop, regardless
-  // of what the runTime-delta grace window below currently thinks (that
-  // window only catches an increase *after* it's observed, so it can lag
-  // behind — or, if the bridge stalls, miss it entirely). Must be the
-  // *fresh* RPM though — a frozen high reading from a stalled bridge is
-  // exactly the case this would otherwise get fooled by.
+  // Running state is derived only from fresh, measured RPM. There is no
+  // post-stop grace: a received zero stops the indication immediately.
   bool get _engineRunning {
     final freshRpm = _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate);
-    final starting = _freshEngineFlag(
-      signalK.engineStarting,
-      signalK.engineDiagnosticUpdate,
-    );
-    return starting == true ||
-        (freshRpm != null && freshRpm > 200) ||
-        (_engineRunningUntil != null &&
-            DateTime.now().isBefore(_engineRunningUntil!));
+    return freshRpm != null && freshRpm > 200;
   }
 
   // "Is contact on" — the ECU is alive and reporting *something* recently,
@@ -3295,14 +3278,7 @@ class _DashboardState extends State<Dashboard> {
       h[c.enginePath!] = (v) {
         final n = _num(v);
         final hours = n == null ? null : n / 3600.0;
-        // propulsion.*.runTime is a lifetime counter, not an "is it on"
-        // flag — the engine reads as running for a short grace window
-        // after each observed increase, and as stopped once those
-        // increases stop arriving (see _engineRunning).
-        final prev = signalK.engineHours;
-        if (prev != null && hours != null && hours > prev) {
-          _engineRunningUntil = DateTime.now().add(const Duration(seconds: 20));
-        }
+        // A lifetime counter is not an engine-running/contact signal.
         signalK.engineHours = hours;
       };
       // Real engine telemetry beyond hours — RPM, coolant temp, oil
@@ -3317,22 +3293,7 @@ class _DashboardState extends State<Dashboard> {
         signalK.engineRpm = n == null ? null : n * 60;
         signalK.engineRpmUpdate = DateTime.now();
       };
-      // Signal K standard engineTorque is a ratio; retain the old
-      // torquePercent path as a compatibility input for older bridges.
-      h['$base.engineTorque'] = (v) {
-        final ratio = _num(v);
-        signalK.engineTorquePercent = ratio == null ? null : ratio * 100;
-        signalK.engineRpmUpdate = DateTime.now();
-      };
-      h['$base.torquePercent'] = (v) {
-        signalK.engineTorquePercent = _num(v);
-        signalK.engineRpmUpdate = DateTime.now();
-      };
       h['$base.coolantTemperature'] = (v) {
-        signalK.engineCoolantTempK = _num(v);
-        signalK.engineCoolantTempUpdate = DateTime.now();
-      };
-      h['$base.temperature'] = (v) {
         signalK.engineCoolantTempK = _num(v);
         signalK.engineCoolantTempUpdate = DateTime.now();
       };
@@ -3374,69 +3335,16 @@ class _DashboardState extends State<Dashboard> {
         signalK.engineGlowPlugFaultAlarm = v is bool ? v : null;
         signalK.engineGlowPlugFaultAlarmUpdate = DateTime.now();
       };
-      // Preheat-in-progress is a Volvo MDI status discovered in proprietary
-      // PGN 65417. It is a normal operating state, not a fault, and LIVE only
-      // publishes it as authoritative after that installation's bit map has
-      // been verified from a real capture.
-      h['$base.preheatActive'] = (v) {
-        signalK.enginePreheatActive = v is bool ? v : null;
-        signalK.enginePreheatActiveUpdate = DateTime.now();
+      h['$base.engineCheckAlarm'] = (v) {
+        signalK.engineCheckAlarm = v is bool ? v : null;
+        signalK.engineDiagnosticUpdate = DateTime.now();
       };
-      void diagnosticBool(String path, void Function(bool?) assign) {
-        h['$base.$path'] = (v) {
-          assign(v is bool ? v : null);
-          signalK.engineDiagnosticUpdate = DateTime.now();
-        };
-      }
-
-      diagnosticBool('engineCheckAlarm', (v) => signalK.engineCheckAlarm = v);
-      diagnosticBool('volvoMdi.detected', (v) => signalK.engineMdiDetected = v);
-      diagnosticBool(
-        'volvoMdi.mappingVerified',
-        (v) => signalK.engineMdiMappingVerified = v,
-      );
-      diagnosticBool(
-        'volvoMdi.dm1Available',
-        (v) => signalK.engineDm1Available = v,
-      );
-      diagnosticBool('volvoMdi.starting', (v) => signalK.engineStarting = v);
-      diagnosticBool('volvoMdi.stopping', (v) => signalK.engineStopping = v);
-      diagnosticBool(
-        'volvoMdi.systemFault',
-        (v) => signalK.engineSystemFault = v,
-      );
-      diagnosticBool(
-        'volvoMdi.auxiliaryFault',
-        (v) => signalK.engineAuxiliaryFault = v,
-      );
-      h['$base.volvoMdi.sourceAddress'] = (v) =>
-          signalK.engineSourceAddress = _num(v);
       h['$base.volvoMdi.activeDtcCount'] = (v) =>
           signalK.engineActiveDtcCount = _num(v);
       h['$base.volvoMdi.firstDtcSpn'] = (v) =>
           signalK.engineFirstDtcSpn = _num(v);
       h['$base.volvoMdi.firstDtcFmi'] = (v) =>
           signalK.engineFirstDtcFmi = _num(v);
-      h['$base.volvoMdi.can.rxMissed'] = (v) =>
-          signalK.engineCanRxMissed = _num(v);
-      h['$base.volvoMdi.can.rxOverrun'] = (v) =>
-          signalK.engineCanRxOverrun = _num(v);
-      h['$base.volvoMdi.can.busErrors'] = (v) =>
-          signalK.engineCanBusErrors = _num(v);
-      h['$base.volvoMdi.can.bitrateKbps'] = (v) =>
-          signalK.engineCanBitrateKbps = _num(v);
-      for (var i = 0; i < 8; i++) {
-        final byteIndex = i;
-        h['$base.volvoMdi.raw.byte$i'] = (v) =>
-            signalK.engineMdiRawBytes[byteIndex] = _num(v);
-      }
-      // Bridge diagnostics — frames it sees on the bus but doesn't decode
-      // yet (e.g. DM1 itself, before a firmware update adds it). Purely
-      // informational, shown in the "Completo" Motor panel.
-      h['$base.volvoMdi.unknownPgn'] = (v) =>
-          signalK.engineUnknownPgn = _num(v);
-      h['$base.volvoMdi.unknownFrameCount'] = (v) =>
-          signalK.engineUnknownFrameCount = _num(v);
     }
     for (final t in c.tanks.where((t) => t.enabled)) {
       h[t.skPath] = (v) => signalK.tanks[t.tankKey] = _pct(v);
@@ -6938,9 +6846,6 @@ class _DashboardState extends State<Dashboard> {
     engineActiveDtcCount: signalK.engineActiveDtcCount,
     engineFirstDtcSpn: signalK.engineFirstDtcSpn,
     engineFirstDtcFmi: signalK.engineFirstDtcFmi,
-    engineCanRxMissed: signalK.engineCanRxMissed,
-    engineCanRxOverrun: signalK.engineCanRxOverrun,
-    engineCanBusErrors: signalK.engineCanBusErrors,
     engineCanBitrateKbps: signalK.engineCanBitrateKbps,
     engineMdiRawBytes: List<double?>.of(signalK.engineMdiRawBytes),
     engineUnknownPgn: signalK.engineUnknownPgn,

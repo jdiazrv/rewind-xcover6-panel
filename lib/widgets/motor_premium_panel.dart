@@ -113,9 +113,6 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.engineActiveDtcCount,
     this.engineFirstDtcSpn,
     this.engineFirstDtcFmi,
-    this.engineCanRxMissed,
-    this.engineCanRxOverrun,
-    this.engineCanBusErrors,
     this.engineCanBitrateKbps,
     this.engineMdiRawBytes = const [],
     this.engineUnknownPgn,
@@ -173,9 +170,6 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   final double? engineActiveDtcCount;
   final double? engineFirstDtcSpn;
   final double? engineFirstDtcFmi;
-  final double? engineCanRxMissed;
-  final double? engineCanRxOverrun;
-  final double? engineCanBusErrors;
   final double? engineCanBitrateKbps;
   final List<double?> engineMdiRawBytes;
   // Bridge diagnostics — undecoded PGN frames, shown only in detailed mode.
@@ -752,13 +746,8 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     final count = widget.engineUnknownFrameCount;
     final pgn = widget.engineUnknownPgn;
     final dtcCount = widget.engineActiveDtcCount?.round() ?? 0;
-    final canIssues =
-        (widget.engineCanRxMissed ?? 0) +
-        (widget.engineCanRxOverrun ?? 0) +
-        (widget.engineCanBusErrors ?? 0);
     if (widget.engineMdiDetected != true &&
         dtcCount <= 0 &&
-        canIssues <= 0 &&
         (count == null || count <= 0)) {
       return const SizedBox.shrink();
     }
@@ -767,7 +756,6 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         'MDI SA ${widget.engineSourceAddress?.round() ?? "–"} · ${widget.engineCanBitrateKbps?.round() ?? "–"} kbit/s · ${widget.engineMdiMappingVerified == true ? "mapa verificado" : "PGN privado sin mapa"}',
       if (dtcCount > 0)
         'DTC $dtcCount · SPN ${widget.engineFirstDtcSpn?.round() ?? "–"} / FMI ${widget.engineFirstDtcFmi?.round() ?? "–"}',
-      if (canIssues > 0) 'CAN: ${canIssues.round()} incidencias',
       if (count != null && count > 0)
         pgn == null
             ? '${count.round()} PGN sin decodificar'

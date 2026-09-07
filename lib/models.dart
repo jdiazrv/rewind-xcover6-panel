@@ -687,9 +687,6 @@ class SignalKModel {
   double? engineActiveDtcCount;
   double? engineFirstDtcSpn;
   double? engineFirstDtcFmi;
-  double? engineCanRxMissed;
-  double? engineCanRxOverrun;
-  double? engineCanBusErrors;
   double? engineCanBitrateKbps;
   final engineMdiRawBytes = List<double?>.filled(8, null);
   // Bridge diagnostics (propulsion.<id>.volvoMdi.*) — PGN frames seen on
@@ -831,9 +828,6 @@ class SignalKModel {
     engineActiveDtcCount = null;
     engineFirstDtcSpn = null;
     engineFirstDtcFmi = null;
-    engineCanRxMissed = null;
-    engineCanRxOverrun = null;
-    engineCanBusErrors = null;
     engineCanBitrateKbps = null;
     for (var i = 0; i < engineMdiRawBytes.length; i++) {
       engineMdiRawBytes[i] = null;
