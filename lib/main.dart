@@ -6247,28 +6247,92 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  // Fills the space next to Profundidad on the Fondeado screen — Depth on
-  // its own as a full-width card was mostly empty air; pairing it with
-  // date/time uses that width for something useful instead.
-  Widget _premiumDateTimeCard() {
+  Widget _premiumAnchorMarginCard(
+    ({
+      double? distanceM,
+      double? boatBearingTrueDeg,
+      double? displayHeadingDeg,
+      bool fresh,
+      bool hadPosition,
+    })
+    geometry,
+  ) {
+    final radius = settings.anchorConfig.radiusM;
+    final distance = geometry.fresh ? geometry.distanceM : null;
+    final margin = distance == null ? null : radius - distance;
+    final fraction = distance == null || radius <= 0 ? null : distance / radius;
+    final outside =
+        distance != null &&
+        geometry.boatBearingTrueDeg != null &&
+        isOutsideWatchZone(
+          distanceM: distance,
+          radiusM: radius,
+          shape: settings.anchorConfig.shape,
+          bearingFromDropDeg: geometry.boatBearingTrueDeg!,
+          sectorStartDeg: settings.anchorConfig.sectorStartDeg,
+          sectorEndDeg: settings.anchorConfig.sectorEndDeg,
+        );
+    final String status;
+    final Color color;
+    if (!geometry.fresh) {
+      status = geometry.hadPosition ? 'DATOS ANTIGUOS' : 'SIN POSICIÓN';
+      color = cOrange;
+    } else if (margin == null) {
+      status = 'SIN POSICIÓN';
+      color = cOrange;
+    } else if (_anchorIsDragging || outside) {
+      status = _anchorIsDragging ? 'GARREANDO' : 'FUERA DEL RADIO';
+      color = cRed;
+    } else if (fraction! >= 0.9) {
+      status = 'CERCA DEL LÍMITE';
+      color = cOrange;
+    } else if (fraction >= 0.7) {
+      status = 'VIGILAR';
+      color = cYellow;
+    } else {
+      status = 'FONDEO SEGURO';
+      color = cGreen;
+    }
+    return MetricCard(
+      title: 'Margen',
+      value: margin?.toStringAsFixed(0) ?? '--',
+      unit: margin == null ? null : 'm',
+      subtitle: status,
+      color: color,
+      onTap: () => _goToTab('ANC'),
+    );
+  }
+
+  String _anchorElapsedLabel() {
+    final droppedAt = settings.anchorConfig.droppedAt;
+    if (droppedAt == null) return '--';
+    final elapsed = skNow().difference(droppedAt);
+    if (elapsed.isNegative) return '--';
+    final days = elapsed.inDays;
+    final hours = elapsed.inHours.remainder(24);
+    final minutes = elapsed.inMinutes.remainder(60);
+    if (days > 0) return '$days d $hours h';
+    if (elapsed.inHours > 0) return '${elapsed.inHours} h $minutes min';
+    return '$minutes min';
+  }
+
+  // El tiempo transcurrido desde largar el ancla es más útil durante una
+  // guardia que repetir la fecha civil. Se conserva la hora actual debajo.
+  Widget _premiumAnchorElapsedCard() {
     final now = DateTime.now();
+    final elapsed = _anchorElapsedLabel();
     if (_isCompactPremium) {
-      // Phone: bigLines instead of value+subtitle — the date used to
-      // render as a small muted subtitle under a big time, but the two
-      // are equally useful at anchor, so they share the same big-number
-      // treatment here.
       return MetricCard(
-        title: 'Hora',
-        value: hhmm(now),
-        bigLines: [hhmm(now), ddmmyyyy(now)],
+        title: 'Fondeado',
+        value: elapsed,
+        bigLines: [elapsed, 'Ahora ${hhmm(now)}'],
         color: cText,
       );
     }
-    // Tablet: original.
     return MetricCard(
-      title: 'Hora',
-      value: hhmm(now),
-      subtitle: ddmmyyyy(now),
+      title: 'Fondeado',
+      value: elapsed,
+      subtitle: 'Ahora ${hhmm(now)}',
       color: cText,
     );
   }
@@ -6913,13 +6977,85 @@ class _DashboardState extends State<Dashboard> {
   // watch geometry lives only in SignalKModel, drawn as a boat-centered
   // "radar" (ring = maxRadius, marker = anchor at its live distance/bearing)
   // instead of the numbers-only classic anchor alarm webview.
+  ({
+    double? distanceM,
+    double? boatBearingTrueDeg,
+    double? displayHeadingDeg,
+    bool fresh,
+    bool hadPosition,
+  })
+  _anchorNavGeometry() {
+    final cfg = settings.anchorConfig;
+    final skFresh =
+        signalK.connected &&
+        _timestampFresh(signalK.positionUpdate) &&
+        signalK.latitude != null &&
+        signalK.longitude != null;
+    final fallbackFresh =
+        _timestampFresh(_anchorEffectivePositionUpdatedAt) &&
+        _anchorEffectiveLat != null &&
+        _anchorEffectiveLon != null;
+    var lat = skFresh
+        ? signalK.latitude
+        : (fallbackFresh ? _anchorEffectiveLat : null);
+    var lon = skFresh
+        ? signalK.longitude
+        : (fallbackFresh ? _anchorEffectiveLon : null);
+    final fresh = skFresh || fallbackFresh;
+    final hadPosition =
+        signalK.latitude != null ||
+        signalK.longitude != null ||
+        _anchorEffectiveLat != null ||
+        _anchorEffectiveLon != null ||
+        signalK.anchorDistanceFromBowM != null;
+    final heading = _freshHeading;
+    if (lat == null ||
+        lon == null ||
+        cfg.dropLat == null ||
+        cfg.dropLon == null) {
+      return (
+        distanceM: null,
+        boatBearingTrueDeg: null,
+        displayHeadingDeg: null,
+        fresh: fresh,
+        hadPosition: hadPosition,
+      );
+    }
+    // Apply the same GPS-antenna-to-bow correction used by the alarm
+    // engine whenever a real heading is available.
+    if (heading != null && settings.anchorGpsToBowM > 0) {
+      final bow = destinationPoint(lat, lon, settings.anchorGpsToBowM, heading);
+      lat = bow.lat;
+      lon = bow.lon;
+    }
+    final boatToAnchor = bearingDistanceMeters(
+      lat,
+      lon,
+      cfg.dropLat!,
+      cfg.dropLon!,
+    );
+    return (
+      distanceM: boatToAnchor.distanceM,
+      // The display is north-up, so the boat's position is the reciprocal
+      // of the true bearing from boat to anchor.
+      boatBearingTrueDeg: normalize360(boatToAnchor.bearingDeg + 180),
+      // With no heading, point the bow at the anchor rather than inventing
+      // a north-facing boat. Its position remains geographically correct.
+      displayHeadingDeg: heading ?? boatToAnchor.bearingDeg,
+      fresh: fresh,
+      hadPosition: hadPosition,
+    );
+  }
+
   Widget _navPremiumAnchorPage() {
     final wind = _navCardData('appWind');
     final depth = _navCardData('depth');
-    // Heading, not COG — at anchor the boat isn't tracking a course over
-    // ground, it's swinging on the chain, so COG is just noise; heading
-    // (which way the bow is lying) is the useful number here.
-    final heading = _navCardData('heading');
+    final geometry = _anchorNavGeometry();
+    final dropDepth = settings.anchorConfig.dropDepthM;
+    final liveDepth = _freshEngine(signalK.depthM, signalK.depthMUpdate);
+    final depthDelta = dropDepth == null || liveDepth == null
+        ? null
+        : liveDepth - dropDepth;
 
     return Padding(
       padding: const EdgeInsets.all(8),
@@ -6927,7 +7063,7 @@ class _DashboardState extends State<Dashboard> {
         children: [
           // Anchor card is intentionally small — the ANC tab already has a
           // full map with anchor tracking, this is just a glance.
-          Expanded(flex: 7, child: _premiumAnchorCard()),
+          Expanded(flex: 7, child: _premiumAnchorCard(geometry)),
           const SizedBox(width: 8),
           Expanded(
             flex: 13,
@@ -6940,17 +7076,7 @@ class _DashboardState extends State<Dashboard> {
                     children: [
                       Expanded(child: _premiumBatteryCard()),
                       const SizedBox(width: 8),
-                      Expanded(
-                        child: _premiumVmgCard(
-                          heading,
-                          unitNextToValue: true,
-                          // The marker triangle is fixed at 12 o'clock —
-                          // it never actually rotates to point at the
-                          // heading, so on phone (where "sin flecha" was
-                          // explicit) it's just noise; tablet keeps it.
-                          showMarker: !_isCompactPremium,
-                        ),
-                      ),
+                      Expanded(child: _premiumAnchorMarginCard(geometry)),
                     ],
                   ),
                 ),
@@ -6962,10 +7088,13 @@ class _DashboardState extends State<Dashboard> {
                         child: _premiumDepthCard(
                           depth,
                           alignWithSpeedGauge: false,
+                          footer: depthDelta == null
+                              ? 'Sin referencia al fondear'
+                              : 'Desde fondeo ${depthDelta >= 0 ? '+' : ''}${depthDelta.toStringAsFixed(1)} m',
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Expanded(child: _premiumDateTimeCard()),
+                      Expanded(child: _premiumAnchorElapsedCard()),
                     ],
                   ),
                 ),
@@ -7530,6 +7659,7 @@ class _DashboardState extends State<Dashboard> {
   Widget _premiumDepthCard(
     NavCardData data, {
     bool alignWithSpeedGauge = true,
+    String? footer,
   }) {
     final value = double.tryParse(data.value);
     final depthMax = _depthScaleWithHysteresis(value);
@@ -7671,6 +7801,19 @@ class _DashboardState extends State<Dashboard> {
                       ],
                     ),
             ),
+            if (footer != null)
+              Center(
+                child: Text(
+                  footer,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: cMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -7989,53 +8132,39 @@ class _DashboardState extends State<Dashboard> {
   // configured swing limit (maxRadius), and the marker shows the anchor's
   // live distance/bearing from the bow within it — reads at a glance
   // whether it's centered or nearing the edge, instead of two bare numbers.
-  Widget _premiumAnchorCard() {
-    // NOT anchorCurrentRadiusM/anchorMaxRadiusM — despite their names,
-    // those are the CONFIGURED watch radius and its initial value (near-
-    // constant, barely ever changes while armed), not a live reading.
-    // Binding "DISTANCIA" and the ring's fraction to them showed a
-    // frozen-looking number and a ring that never reflected where the
-    // boat actually was within its circle. distanceFromBow is the real,
-    // continuously-updating distance; anchorCurrentRadiusM (used here as
-    // the ring's outer bound) is at least the ACTIVE alarm radius, not
-    // the stale initial one. Reported live 2026-09-06 ("has cogido como
-    // distancia el radio no la distancia al ancla").
-    final current = signalK.anchorDistanceFromBowM;
-    final maxR = signalK.anchorCurrentRadiusM;
-    // "Apparent" bearing is relative to the bow by definition, so it's only
-    // meaningful with a real, fresh heading behind it — apparentBearing
-    // itself has no timestamp of its own, so a boat that loses its heading
-    // source could otherwise keep showing the last bearing it ever
-    // computed, frozen, instead of falling back to the painter's "point
-    // the bow at the anchor" case below.
-    // Recomputed live from the TRUE bearing + this device's current
-    // heading — NOT anchorApparentBearingDeg, which is already relative-
-    // ized against whatever heading was fresh at PUBLISH time (every 5s,
-    // see _publishAnchorDelta) and just passed through as-is. ANC's own
-    // status panel (_demoraLabel) recomputes this same way on every
-    // frame, so a heading change between publishes made the two screens
-    // visibly disagree until the next republish caught up. Same formula
-    // as _demoraLabel, verified live 2026-09-06 ("pintas mal el bearing
-    // to anchor, no está igual que en la pantalla anchor").
-    final trueBearing = signalK.anchorBearingTrueDeg;
-    final heading = _freshHeading;
-    final bearing = (trueBearing != null && heading != null)
-        ? ((trueBearing - heading + 540) % 360) - 180
-        : null;
-    final frac = (current != null && maxR != null && maxR > 0)
+  Widget _premiumAnchorCard(
+    ({
+      double? distanceM,
+      double? boatBearingTrueDeg,
+      double? displayHeadingDeg,
+      bool fresh,
+      bool hadPosition,
+    })
+    geometry,
+  ) {
+    // Compute from the latest fresh boat position rather than displaying a
+    // periodically echoed Signal K value that can look safely frozen.
+    final current = geometry.fresh ? geometry.distanceM : null;
+    final maxR = settings.anchorConfig.radiusM;
+    final frac = (current != null && maxR > 0)
         ? (current / maxR).clamp(0.0, 1.3)
         : null;
-    final color = frac == null
+    final color = !geometry.fresh
+        ? cOrange
+        : frac == null
         ? cMuted
-        : frac < 0.6
+        : frac < 0.7
         ? cGreen
         : frac < 0.9
+        ? cYellow
+        : frac < 1
         ? cOrange
         : cRed;
     final ring = CustomPaint(
       painter: _PremiumAnchorPainter(
         radiusFraction: frac,
-        bearingDeg: bearing,
+        boatBearingTrueDeg: geometry.boatBearingTrueDeg,
+        boatHeadingTrueDeg: geometry.displayHeadingDeg,
         color: color,
         shipIcon: _shipIcon,
         compact: _isCompactPremium,
@@ -8044,9 +8173,9 @@ class _DashboardState extends State<Dashboard> {
     );
     final footer = Center(
       child: Text(
-        maxR != null
-            ? 'Radio máx. ${maxR.toStringAsFixed(0)} m'
-            : 'Sin radio configurado',
+        !geometry.fresh
+            ? (geometry.hadPosition ? 'DATOS ANTIGUOS' : 'SIN POSICIÓN')
+            : 'N ↑  ·  Radio máx. ${maxR.toStringAsFixed(0)} m',
         style: const TextStyle(
           color: cMuted,
           fontSize: 13,
@@ -8748,9 +8877,17 @@ class _DashboardState extends State<Dashboard> {
         }
         const gap = 12.0;
         const sidePadding = 12.0;
-        final visible = math.min(tanks.length, 4);
+        // The XCover's usable width is smaller than its physical 915 px once
+        // the side navigation is deducted. Choose how many cards fit from the
+        // actual constraint instead of forcing the old 220 px minimum.
+        const minCardWidth = 168.0;
+        final maxVisible =
+            ((c.maxWidth - sidePadding * 2 + gap) / (minCardWidth + gap))
+                .floor()
+                .clamp(1, 5);
+        final visible = math.min(tanks.length, maxVisible);
         final available = c.maxWidth - sidePadding * 2 - gap * (visible - 1);
-        final cardW = (available / visible).clamp(220.0, 340.0);
+        final cardW = (available / visible).clamp(minCardWidth, 340.0);
         return ListView.separated(
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(
@@ -8762,6 +8899,7 @@ class _DashboardState extends State<Dashboard> {
           itemBuilder: (context, index) {
             final tank = tanks[index];
             return SizedBox(
+              key: ValueKey('tank-card-${tank.name}'),
               width: cardW,
               child: TankCard(
                 name: tank.name,

@@ -60,6 +60,18 @@ void main() {
     expect(find.text('Agua'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
+    final overviewCards = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith('tank-card-'),
+    );
+    expect(overviewCards, findsWidgets);
+    for (final element in overviewCards.evaluate()) {
+      final rect = tester.getRect(find.byElementPredicate((e) => e == element));
+      expect(rect.left, greaterThanOrEqualTo(0));
+      expect(rect.right, lessThanOrEqualTo(tester.view.physicalSize.width));
+    }
+
     await tester.tap(find.text('Fuel'));
     await tester.pumpAndSettle();
     // The summary card remains mounted behind the fullscreen dialog, so the

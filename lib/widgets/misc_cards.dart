@@ -1925,7 +1925,7 @@ class TankCard extends StatelessWidget {
       child: Row(
         children: [
           SizedBox(
-            width: large ? 92 : 72,
+            width: large ? 92 : 58,
             child: Text(
               segment.label,
               maxLines: 1,
@@ -1950,9 +1950,9 @@ class TankCard extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 8),
+          SizedBox(width: large ? 8 : 6),
           SizedBox(
-            width: large ? 92 : 72,
+            width: large ? 92 : 64,
             child: Text(
               pct == null
                   ? '--'
@@ -1960,6 +1960,8 @@ class TankCard extends StatelessWidget {
                   ? '${pct.round()}%'
                   : '${segment.liters}/${segment.capacityL} L',
               textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.fade,
               style: TextStyle(
                 color: pct == null ? cMuted : cText,
                 fontSize: large ? 12 : 10,
@@ -2094,6 +2096,8 @@ class TankCard extends StatelessWidget {
                                       !hasData || liters == null
                                           ? '-- L / $capacityL L'
                                           : '$liters L / $capacityL L',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.fade,
                                       style: TextStyle(
                                         color: cMuted,
                                         fontSize: large ? 15 : 13,

@@ -360,16 +360,18 @@ class _PremiumCompassPainter extends CustomPainter {
 class _PremiumAnchorPainter extends CustomPainter {
   const _PremiumAnchorPainter({
     required this.radiusFraction,
-    required this.bearingDeg,
+    required this.boatBearingTrueDeg,
+    required this.boatHeadingTrueDeg,
     required this.color,
     this.shipIcon,
     this.compact = false,
   });
   final double? radiusFraction;
-  // Relative to the bow, not true north — the ring is drawn bow-up, so the
-  // boat's screen angle is this bearing (reversed, see paint()) with no
-  // extra heading rotation applied.
-  final double? bearingDeg;
+  // North-up geometry: position is the true bearing anchor→boat and the
+  // icon rotates independently to the boat's true heading. When heading is
+  // unavailable, the caller supplies boat→anchor so the bow faces the rode.
+  final double? boatBearingTrueDeg;
+  final double? boatHeadingTrueDeg;
   final Color color;
   final ui.Image? shipIcon;
   // Phone-only bump (0.43→0.47) — with the distance readout moved into
@@ -399,6 +401,21 @@ class _PremiumAnchorPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2,
     );
+    final northTp = TextPainter(
+      text: const TextSpan(
+        text: 'N',
+        style: TextStyle(
+          color: cMuted,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    northTp.paint(
+      canvas,
+      Offset(center.dx - northTp.width / 2, center.dy - radius + 3),
+    );
     // The anchor is dropped and stays put — it's the fixed reference, not
     // the boat. Drawn as the Material "anchor" glyph (same icon as the ANC
     // tab) via TextPainter, since it's just a font glyph under the hood.
@@ -421,35 +438,28 @@ class _PremiumAnchorPainter extends CustomPainter {
     );
 
     final frac = radiusFraction;
-    final bearing = bearingDeg;
+    final boatBearing = boatBearingTrueDeg;
     if (frac == null) return;
-    // Normal case: bearingDeg (anchor's direction as seen from the boat)
-    // is known, so the boat's position around the now-fixed anchor is the
-    // reverse vector — it sits opposite that bearing. Without it (e.g. no
-    // heading source on this boat to derive an *apparent*/bow-relative
-    // bearing from), there's no real angle to plot — rather than drawing
-    // nothing, place the boat at a fixed point (straight up) at the
-    // correct distance and rotate its icon to face the anchor, so the
-    // card still reads as "anchored, this far away" instead of empty.
-    final hasBearing = bearing != null;
+    final hasBearing = boatBearing != null;
     final a = hasBearing
-        ? -math.pi / 2 + (bearing + 180) * math.pi / 180
+        ? -math.pi / 2 + boatBearing * math.pi / 180
         : -math.pi / 2;
     final r = frac.clamp(0.0, 1.15) * radius;
     final boatPos = center + Offset(math.cos(a), math.sin(a)) * r;
+    final headingRad = (boatHeadingTrueDeg ?? 0) * math.pi / 180;
+    final bowPos =
+        boatPos + Offset(math.sin(headingRad), -math.cos(headingRad)) * 10;
+    // Rode/chain: terminate at the bow, never at the boat's centre.
     canvas.drawLine(
       center,
-      boatPos,
+      bowPos,
       Paint()
         ..color = color.withValues(alpha: 0.5)
         ..strokeWidth = 1.4,
     );
-    // Same top-down artwork as the AIS radar; the ring is bow-up, so the
-    // icon just sits pointing straight up (that already *is* "facing our
-    // heading" in this frame) rather than being rotated a second time —
-    // except in the no-bearing fallback above, where "up" has no meaning
-    // and the icon is rotated 180° instead so the bow faces back down at
-    // the anchor (center) as requested.
+    // North-up plot: rotate the hull to true heading. With no heading the
+    // caller deliberately supplies the boat→anchor bearing, so the bow is
+    // shown facing the anchor and the rode still meets the correct end.
     final icon = shipIcon;
     if (icon != null) {
       const targetH = 22.0;
@@ -461,7 +471,7 @@ class _PremiumAnchorPainter extends CustomPainter {
       );
       canvas.save();
       canvas.translate(boatPos.dx, boatPos.dy);
-      if (!hasBearing) canvas.rotate(math.pi);
+      canvas.rotate(headingRad);
       canvas.drawImageRect(
         icon,
         Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
@@ -471,18 +481,23 @@ class _PremiumAnchorPainter extends CustomPainter {
       canvas.restore();
     } else {
       final boatPath = Path()
-        ..moveTo(boatPos.dx, boatPos.dy - 9)
-        ..lineTo(boatPos.dx - 7, boatPos.dy + 8)
-        ..lineTo(boatPos.dx + 7, boatPos.dy + 8)
+        ..moveTo(0, -9)
+        ..lineTo(-7, 8)
+        ..lineTo(7, 8)
         ..close();
+      canvas.save();
+      canvas.translate(boatPos.dx, boatPos.dy);
+      canvas.rotate(headingRad);
       canvas.drawPath(boatPath, Paint()..color = color);
+      canvas.restore();
     }
   }
 
   @override
   bool shouldRepaint(covariant _PremiumAnchorPainter oldDelegate) =>
       oldDelegate.radiusFraction != radiusFraction ||
-      oldDelegate.bearingDeg != bearingDeg ||
+      oldDelegate.boatBearingTrueDeg != boatBearingTrueDeg ||
+      oldDelegate.boatHeadingTrueDeg != boatHeadingTrueDeg ||
       oldDelegate.color != color ||
       oldDelegate.shipIcon != shipIcon ||
       oldDelegate.compact != compact;
