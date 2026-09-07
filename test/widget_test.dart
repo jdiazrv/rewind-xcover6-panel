@@ -62,8 +62,11 @@ void main() {
 
     await tester.tap(find.text('Fuel'));
     await tester.pumpAndSettle();
-    expect(find.text('Fuel 1'), findsOneWidget);
-    expect(find.text('Fuel 2'), findsOneWidget);
+    // The summary card remains mounted behind the fullscreen dialog, so the
+    // individual names can legitimately exist in both layers.
+    expect(find.text('Fuel 1'), findsWidgets);
+    expect(find.text('Fuel 2'), findsWidgets);
+    expect(find.text('HISTÓRICO'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

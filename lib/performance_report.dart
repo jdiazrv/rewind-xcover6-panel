@@ -637,7 +637,16 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
     final doc = pw.Document();
     final canvasFont = PdfFont.helvetica(doc.document);
-    final trackMap = showNavigation ? await _fetchTrackMapTiles(_track) : null;
+    // Must match pdfTrackMap's own inner box (its default 220pt height,
+    // both minus the 4pt padding on each side) — the tile grid is
+    // stretched to this aspect so the whole route fits without cropping.
+    const trackMapHeight = 220.0;
+    final trackMap = showNavigation
+        ? await _fetchTrackMapTiles(
+            _track,
+            targetAspect: (contentWidth - 8) / (trackMapHeight - 8),
+          )
+        : null;
 
     String fmtDateTime(DateTime d) =>
         '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
@@ -1290,6 +1299,14 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
   List<({double lat, double lon, DateTime time})> points, {
   int maxCols = 6,
   int maxRows = 5,
+  // Aspect ratio (w/h) of the box this mosaic will be drawn into. The
+  // padded bounding box is stretched to match it BEFORE tiles are chosen,
+  // which is what makes "cover the box" and "show the whole track" the
+  // same thing at draw time. Without this the two genuinely conflict
+  // whenever the route's shape differs from the box's — filling the box
+  // then necessarily crops the ends of the route off the page ("se come
+  // coordenadas del inicio y final", reported live 2026-09-07).
+  double targetAspect = 1.0,
 }) async {
   if (points.length < 2) return null;
   try {
@@ -1309,15 +1326,49 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
     minLon -= lonPad;
     maxLon += lonPad;
 
+    // Normalized Web-Mercator (0..1 over the whole world) — the aspect
+    // stretch has to happen HERE, not in raw degrees: a degree of latitude
+    // and a degree of longitude are different distances on the map, and
+    // Mercator's own latitude scaling makes that ratio change with
+    // latitude, so matching aspect in degrees would be wrong except at
+    // the equator.
+    double mercX(double lon) => (lon + 180) / 360;
+    double mercY(double lat) {
+      final r = lat * math.pi / 180;
+      return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2;
+    }
+
+    double invMercY(double y) {
+      final n = math.pi * (1 - 2 * y);
+      return math.atan(0.5 * (math.exp(n) - math.exp(-n))) * 180 / math.pi;
+    }
+
+    var x0 = mercX(minLon), x1 = mercX(maxLon);
+    var y0 = mercY(maxLat), y1 = mercY(minLat); // y grows southward
+    final spanX = x1 - x0, spanY = y1 - y0;
+    if (spanX <= 0 || spanY <= 0) return null;
+    if (spanX / spanY < targetAspect) {
+      // Too tall for the box — widen it.
+      final want = spanY * targetAspect;
+      final cx = (x0 + x1) / 2;
+      x0 = cx - want / 2;
+      x1 = cx + want / 2;
+    } else {
+      // Too wide — heighten it.
+      final want = spanX / targetAspect;
+      final cy = (y0 + y1) / 2;
+      y0 = cy - want / 2;
+      y1 = cy + want / 2;
+    }
+    if (y0 < 0 || y1 > 1) return null; // ran off the poles — not plottable
+    minLon = x0 * 360 - 180;
+    maxLon = x1 * 360 - 180;
+    maxLat = invMercY(y0);
+    minLat = invMercY(y1);
+
     (double, double) proj(int z, double lat, double lon) {
       final n = math.pow(2, z).toDouble();
-      final latRad = lat * math.pi / 180;
-      final x = (lon + 180) / 360 * n;
-      final y =
-          (1 - math.log(math.tan(latRad) + 1 / math.cos(latRad)) / math.pi) /
-          2 *
-          n;
-      return (x, y);
+      return (mercX(lon) * n, mercY(lat) * n);
     }
 
     for (var z = 16; z >= 2; z--) {
@@ -1396,6 +1447,13 @@ pw.Widget pdfTrackMap({
     );
   }
 
+  // The Stack below sits inside 4pt of padding, so every measurement here
+  // must be in that INNER space — the CustomPaint's own `size` is the
+  // inner box, and mixing the two would offset the route from the tiles
+  // it's drawn over by exactly that padding.
+  final innerW = math.max(width - 8, 1.0);
+  final innerH = math.max(height - 8, 1.0);
+
   final projected = points.map((p) => map.project(p.lat, p.lon)).toList();
 
   // Long gaps between consecutive samples (anchored for days between two
@@ -1429,50 +1487,145 @@ pw.Widget pdfTrackMap({
   // cropped, same as a normal cover-fit photo.
   final naturalW = map.cols * 256.0;
   final naturalH = map.rows * 256.0;
-  final coverScale = math.max(width / naturalW, height / naturalH);
-  final drawnW = naturalW * coverScale;
-  final drawnH = naturalH * coverScale;
-  final offsetX = (width - drawnW) / 2;
-  final offsetY = (height - drawnH) / 2;
+  // Scale to fit the TRACK's own bounding box, not the whole tile grid.
+  // Cover-fitting the grid meant whichever axis overflowed got its edges
+  // cropped — and the track's start/end sit near those edges by
+  // definition, so the first and last coordinates were being cut off the
+  // map ("se come coordenadas del inicio y final", reported live
+  // 2026-09-07). The tile grid is snapped out to whole tiles and so always
+  // extends past the track's padded box; letting the crop eat THAT margin
+  // instead keeps every real fix on the page.
+  var fx0 = 1.0, fx1 = 0.0, fy0 = 1.0, fy1 = 0.0;
+  for (final (fx, fy) in projected) {
+    if (fx < fx0) fx0 = fx;
+    if (fx > fx1) fx1 = fx;
+    if (fy < fy0) fy0 = fy;
+    if (fy > fy1) fy1 = fy;
+  }
+  // Room for the start/end markers themselves (~5pt radius) plus a little
+  // breathing space, so a fix exactly on the bbox edge isn't half-drawn.
+  const edgePad = 12.0;
+  final trackW = math.max((fx1 - fx0) * naturalW, 1.0);
+  final trackH = math.max((fy1 - fy0) * naturalH, 1.0);
+  final fitScale = math.min(
+    math.max(innerW - 2 * edgePad, 1.0) / trackW,
+    math.max(innerH - 2 * edgePad, 1.0) / trackH,
+  );
+  // Showing the whole track wins over filling every last pixel with map:
+  // losing a real fix off the edge is a data bug, a sliver of background
+  // is cosmetic. In practice it never comes to that — the tile request
+  // already stretched its bounding box to this box's aspect ratio (see
+  // _fetchTrackMapTiles) precisely so that covering and containing
+  // coincide. The cap stops a boat that barely moved from blowing one
+  // tile up into a blurry wall.
+  final coverScale = math.max(innerW / naturalW, innerH / naturalH);
+  final scale = math.min(fitScale, coverScale * 4);
+  final drawnW = naturalW * scale;
+  final drawnH = naturalH * scale;
+  // Center on the TRACK's midpoint rather than the grid's, so whatever
+  // cropping does happen falls on surplus tile margin around the route.
+  final trackCx = (fx0 + fx1) / 2 * drawnW;
+  final trackCy = (fy0 + fy1) / 2 * drawnH;
+  var offsetX = innerW / 2 - trackCx;
+  var offsetY = innerH / 2 - trackCy;
+  // Only pull back toward the edges while the mosaic is actually big
+  // enough to fill the box; if it isn't, keep it centered instead.
+  offsetX = drawnW >= innerW
+      ? offsetX.clamp(innerW - drawnW, 0.0)
+      : (innerW - drawnW) / 2;
+  offsetY = drawnH >= innerH
+      ? offsetY.clamp(innerH - drawnH, 0.0)
+      : (innerH - drawnH) / 2;
 
-  // The route/marker overlay must use this SAME cover transform — not a
-  // plain 0..1-over-the-box mapping — or it drifts away from the map
-  // underneath it whenever the mosaic's aspect ratio forces a crop.
+  // The route/marker overlay must use this SAME transform — not a plain
+  // 0..1-over-the-box mapping — or it drifts away from the map underneath
+  // it whenever the mosaic's aspect ratio forces a crop.
   (double, double) toCanvas((double, double) frac) {
     final topDownX = offsetX + frac.$1 * drawnW;
     final topDownY = offsetY + frac.$2 * drawnH;
-    return (topDownX, height - topDownY); // package:pdf canvases are y-up
+    return (topDownX, innerH - topDownY); // package:pdf canvases are y-up
   }
 
-  // Barbs ON the route, not on a separate time axis — "los barbs son en
-  // la ruta como hace marine traffic" (reported live 2026-09-07). Each
-  // sampled TWD/TWS pair is placed at whatever track point is closest in
-  // TIME to it, the same nearest-timestamp join used everywhere else in
-  // this report.
-  final windBarbs = (tws.isEmpty || twd.isEmpty)
-      ? const <WindBarbSample>[]
-      : sampleWindBarbs(
-          tws: tws,
-          twd: twd,
-          start: points.first.time,
-          end: points.last.time,
-          interval: windBarbInterval(
-            points.last.time.difference(points.first.time),
-            targetCount: math.max(1, (width / 90).floor()),
-          ),
-        );
-  (double, double)? nearestTrackCanvasPos(DateTime t) {
-    var bestIdx = -1;
-    Duration? bestDiff;
-    for (var i = 0; i < points.length; i++) {
-      final diff = points[i].time.difference(t).abs();
-      if (bestDiff == null || diff < bestDiff) {
-        bestDiff = diff;
-        bestIdx = i;
+  // Barbs ON the route, like MarineTraffic's own track view — "los barbs
+  // son en la ruta" (reported live 2026-09-07).
+  //
+  // Spaced by DISTANCE ALONG THE ROUTE, not by clock time. Time slots were
+  // wrong twice over: an anchored stretch stacks many slots onto the same
+  // spot, and — worse — a slot only produces a barb when BOTH TWS and TWD
+  // happen to have data within tolerance of it, so on a boat whose two
+  // series only overlap for part of the period (verified on REWIND: TWD
+  // ends 15:10, TWS starts 04:25 the same day, ~11h of overlap in 48h)
+  // almost every slot came up empty and the map showed a single barb
+  // ("no veo las barbas del viento"). Walking the drawn route instead
+  // puts barbs where there IS a route, and each one independently takes
+  // the nearest TWS/TWD sample it can find.
+  final windBarbs = <({double x, double y, WindBarbSample barb})>[];
+  if (tws.isNotEmpty && twd.isNotEmpty && projected.length > 1) {
+    GraphPoint? nearestIn(List<GraphPoint> s, DateTime t, Duration tol) {
+      GraphPoint? best;
+      Duration? bestDiff;
+      for (final p in s) {
+        final d = p.time.difference(t).abs();
+        if (d > tol) continue;
+        if (bestDiff == null || d < bestDiff) {
+          best = p;
+          bestDiff = d;
+        }
+      }
+      return best;
+    }
+
+    Duration tolFor(List<GraphPoint> s) {
+      if (s.length < 2) return const Duration(minutes: 30);
+      final gaps = <int>[];
+      for (var i = 1; i < s.length; i++) {
+        final ms = s[i].time.difference(s[i - 1].time).inMilliseconds;
+        if (ms > 0) gaps.add(ms);
+      }
+      if (gaps.isEmpty) return const Duration(minutes: 30);
+      gaps.sort();
+      final median = gaps[gaps.length ~/ 2];
+      final t = Duration(milliseconds: (median * 3).round());
+      return t < const Duration(minutes: 10) ? const Duration(minutes: 10) : t;
+    }
+
+    final twsTol = tolFor(tws), twdTol = tolFor(twd);
+    // Cumulative on-page length of the route, so spacing is what the eye
+    // actually sees rather than what the clock did.
+    final canvasPts = [for (final f in projected) toCanvas(f)];
+    final cum = <double>[0];
+    for (var i = 1; i < canvasPts.length; i++) {
+      final dx = canvasPts[i].$1 - canvasPts[i - 1].$1;
+      final dy = canvasPts[i].$2 - canvasPts[i - 1].$2;
+      cum.add(cum[i - 1] + math.sqrt(dx * dx + dy * dy));
+    }
+    final total = cum.last;
+    if (total > 1) {
+      final target = math.max(3, (width / 78).floor());
+      final stepLen = total / target;
+      var nextAt = stepLen / 2; // offset so the first isn't on the start marker
+      var idx = 0;
+      while (nextAt < total && idx < cum.length) {
+        while (idx < cum.length - 1 && cum[idx] < nextAt) {
+          idx++;
+        }
+        final t = points[idx].time;
+        final sp = nearestIn(tws, t, twsTol);
+        final dir = nearestIn(twd, t, twdTol);
+        if (sp != null && dir != null && sp.value >= 0 && dir.value.isFinite) {
+          windBarbs.add((
+            x: canvasPts[idx].$1,
+            y: canvasPts[idx].$2,
+            barb: WindBarbSample(
+              time: t,
+              speedKnots: sp.value,
+              directionDeg: (dir.value % 360 + 360) % 360,
+            ),
+          ));
+        }
+        nextAt += stepLen;
       }
     }
-    if (bestIdx < 0) return null;
-    return toCanvas(projected[bestIdx]);
   }
 
   return pw.Container(
@@ -1485,27 +1638,26 @@ pw.Widget pdfTrackMap({
     ),
     child: pw.Stack(
       children: [
-        pw.Positioned.fill(
-          child: pw.ClipRRect(
-            horizontalRadius: 4,
-            verticalRadius: 4,
-            child: pw.FittedBox(
-              fit: pw.BoxFit.cover,
-              child: pw.SizedBox(
-                width: naturalW,
-                height: naturalH,
-                child: pw.Column(
+        // Placed with the SAME scale/offset the route overlay uses, rather
+        // than a FittedBox doing its own independent fit — that's what
+        // keeps the drawn track sitting exactly where it belongs on the
+        // map instead of drifting relative to it.
+        pw.Positioned(
+          left: offsetX,
+          top: offsetY,
+          child: pw.SizedBox(
+            width: drawnW,
+            height: drawnH,
+            child: pw.Column(
+              children: List.generate(
+                map.rows,
+                (row) => pw.Row(
                   children: List.generate(
-                    map.rows,
-                    (row) => pw.Row(
-                      children: List.generate(
-                        map.cols,
-                        (col) => pw.Image(
-                          pw.MemoryImage(map.tiles[row * map.cols + col]),
-                          width: 256,
-                          height: 256,
-                        ),
-                      ),
+                    map.cols,
+                    (col) => pw.Image(
+                      pw.MemoryImage(map.tiles[row * map.cols + col]),
+                      width: drawnW / map.cols,
+                      height: drawnH / map.rows,
                     ),
                   ),
                 ),
@@ -1546,10 +1698,8 @@ pw.Widget pdfTrackMap({
               marker(projected.first, pdfGreen);
               marker(projected.last, pdfRed);
 
-              for (final barb in windBarbs) {
-                final pos = nearestTrackCanvasPos(barb.time);
-                if (pos == null) continue;
-                _drawWindBarbGlyph(canvas, pos.$1, pos.$2, barb);
+              for (final b in windBarbs) {
+                _drawWindBarbGlyph(canvas, b.x, b.y, b.barb);
               }
             },
           ),
