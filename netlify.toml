@@ -1,0 +1,29 @@
+# Netlify build for the REWIND webapp.
+#
+# Why this file exists at all: the repo's committed `public/` folder is the
+# build for SIGNAL K, which serves the app from the subpath
+# /rewind-xcover6-panel/ and therefore has
+# <base href="/rewind-xcover6-panel/"> baked into its index.html. Netlify
+# serves from the site root, so pointing Netlify at `public/` makes every
+# asset resolve to /rewind-xcover6-panel/main.dart.js and 404 — the app
+# never loads. It isn't a matter of picking a different folder to publish;
+# the two hosts genuinely need two different builds, so Netlify does its
+# own here with the root base href.
+#
+# Flutter isn't preinstalled on Netlify images, hence the shallow clone.
+# Pinned to a tag rather than tracking `stable` so a future Flutter
+# release can't silently change what this site builds.
+
+[build]
+  command = """
+    git clone https://github.com/flutter/flutter.git --depth 1 -b 3.47.1 "$HOME/flutter" &&
+    export PATH="$HOME/flutter/bin:$PATH" &&
+    flutter config --no-analytics &&
+    flutter pub get &&
+    flutter build web --release
+  """
+  publish = "build/web"
+
+[build.environment]
+  # Flutter needs a writable pub cache inside the build sandbox.
+  PUB_CACHE = "/opt/build/cache/.pub-cache"
