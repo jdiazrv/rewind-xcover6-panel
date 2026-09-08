@@ -5792,6 +5792,29 @@ class _DashboardState extends State<Dashboard> {
   final _navScrollController = ScrollController();
 
   // ─── VNT page ───────────────────────────────────────────────────────────────
+  // Physics for the vertical-swipe carousels (NAV and VNT). Explicitly
+  // CLAMPING, not the platform default that AlwaysScrollableScrollPhysics
+  // resolves to on its own.
+  //
+  // Both carousels page by listening for OverscrollNotification (see the
+  // long comment on NAV's ListView for why it's driven that way and not
+  // by a GestureDetector). BouncingScrollPhysics — Flutter's default on
+  // iOS, and therefore also in Safari/iOS on the web build — deliberately
+  // lets the scroll position travel PAST its extents to produce the
+  // rubber-band effect, so applyBoundaryConditions returns zero and
+  // NO overscroll is ever reported: the drag just bounces and nothing
+  // pages. Android got ClampingScrollPhysics by default and worked,
+  // which is exactly the split reported live 2026-09-08 ("no funciona en
+  // el ios y en la web de netlify el arrastre vertical").
+  //
+  // Nothing is lost by clamping here: these lists are exactly one
+  // viewport tall, so there is no real scrolling whose feel could change
+  // — the only behaviour that depends on the physics is whether the
+  // overscroll that drives paging gets reported at all.
+  static const _pagingScrollPhysics = AlwaysScrollableScrollPhysics(
+    parent: ClampingScrollPhysics(),
+  );
+
   // Same vertical-swipe-via-overscroll carousel as NAV above (see the long
   // comment on that ListView for why it's a ListView + overscroll instead
   // of a nested PageView) — separate state so paging one doesn't affect
@@ -5879,7 +5902,7 @@ class _DashboardState extends State<Dashboard> {
                 child: ListView(
                   key: const PageStorageKey<String>('wind-scroll'),
                   controller: _windScrollController,
-                  physics: const AlwaysScrollableScrollPhysics(),
+                  physics: _pagingScrollPhysics,
                   padding: EdgeInsets.zero,
                   children: [
                     AnimatedSwitcher(
@@ -6073,7 +6096,7 @@ class _DashboardState extends State<Dashboard> {
           return ListView(
             key: const PageStorageKey<String>('nav-scroll'),
             controller: _navScrollController,
-            physics: const AlwaysScrollableScrollPhysics(),
+            physics: _pagingScrollPhysics,
             padding: EdgeInsets.zero,
             children: [page],
           );
@@ -6129,7 +6152,7 @@ class _DashboardState extends State<Dashboard> {
                 child: ListView(
                   key: const PageStorageKey<String>('nav-scroll'),
                   controller: _navScrollController,
-                  physics: const AlwaysScrollableScrollPhysics(),
+                  physics: _pagingScrollPhysics,
                   padding: EdgeInsets.zero,
                   children: [
                     AnimatedSwitcher(
