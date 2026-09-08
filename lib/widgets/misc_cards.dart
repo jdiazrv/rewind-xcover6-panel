@@ -297,15 +297,34 @@ class ForecastCard extends StatelessWidget {
                                 height: 1.0,
                               ),
                             ),
-                            if (mn != null && mx != null)
-                              Text(
-                                '${mx.round()}° / ${mn.round()}°',
-                                style: const TextStyle(
-                                  color: cMuted,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                            // Siempre presente, aunque no haya máx/mín: solo
+                            // se vuelve invisible.
+                            //
+                            // Todo el contenido va dentro de un FittedBox
+                            // BoxFit.contain, así que la escala la fija la
+                            // tarjeta MÁS ALTA de su propio contenido. Con
+                            // esta línea solo en la tarjeta de ahora, esa
+                            // salía con una línea más y por tanto se
+                            // encogía respecto a las vecinas — muy visible
+                            // en la tablet, donde la caja da de sí y la
+                            // escala la manda la altura ("temperatura
+                            // prevista en este momento sale más pequeña en
+                            // la tablet", 2026-09-08). En el XCover no se
+                            // notaba porque ahí la anchura manda antes que
+                            // la altura. Reservando el hueco, todas las
+                            // tarjetas miden igual y escalan igual.
+                            Text(
+                              (mn != null && mx != null)
+                                  ? '${mx.round()}° / ${mn.round()}°'
+                                  : ' ',
+                              style: TextStyle(
+                                color: (mn != null && mx != null)
+                                    ? cMuted
+                                    : Colors.transparent,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
                               ),
+                            ),
                             Text(
                               'Lluvia ${fmt(p.rainPct, 0, '%')} · ${fmt(p.rainMm, 1, ' mm')}',
                               style: const TextStyle(
@@ -617,13 +636,25 @@ class PressureTrendCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 4),
+            // Con Expanded a secas la chispa se quedaba con TODO el alto
+            // sobrante de la tarjeta, y una sparkline no gana nada por ser
+            // más alta: su trabajo es enseñar la forma de la tendencia, no
+            // llenar hueco ("demasiado espacio vertical para la gráfica",
+            // 2026-09-08). Se le pone un techo y el resto del espacio se
+            // reparte alrededor, así el número y la fila de mín/máx quedan
+            // más aireados en vez de aplastados contra los bordes.
             Expanded(
-              child: CustomPaint(
-                painter: _PressureSparklinePainter(
-                  samples: samples,
-                  color: cPurple,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 46),
+                  child: CustomPaint(
+                    painter: _PressureSparklinePainter(
+                      samples: samples,
+                      color: cPurple,
+                    ),
+                    child: const SizedBox.expand(),
+                  ),
                 ),
-                child: const SizedBox.expand(),
               ),
             ),
             const SizedBox(height: 3),

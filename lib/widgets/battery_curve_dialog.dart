@@ -13,6 +13,13 @@ part of '../main.dart';
 // the curve is only meaningful at rest, so charging/discharging is called
 // out explicitly instead of presenting a number that would otherwise just
 // be wrong under load.
+// Añadido después (2026-09-08): "bow y arranque damos por hecho que estan
+// en flotacion asi que a lo mejor es mejor quitar esa funcion". Cierto — en
+// flotación el voltaje lo fija el cargador, no la batería, así que la curva
+// marcaría 100% tanto con una batería sana como con una muerta. Cuando está
+// en flotación se dice eso y punto, y en su lugar se enseña lo único que sí
+// mide su salud sin shunt: cuánto se hunde bajo carga fuerte (arrancar el
+// motor, usar el propulsor). Ver BatteryLoadWatcher en models.dart.
 class BatteryCurveDialog extends StatelessWidget {
   const BatteryCurveDialog({
     super.key,
@@ -21,6 +28,7 @@ class BatteryCurveDialog extends StatelessWidget {
     required this.trendDirection,
     required this.color,
     required this.chemistry,
+    this.loadEvents = const [],
   });
 
   final String title;
@@ -28,11 +36,13 @@ class BatteryCurveDialog extends StatelessWidget {
   final int trendDirection; // -1 descargando, 0 en reposo, 1 cargando
   final Color color;
   final String chemistry; // 'lead' | 'agm' | 'gel' | 'lithium'
+  final List<BatteryLoadEvent> loadEvents;
 
   @override
   Widget build(BuildContext context) {
     final v = voltage;
-    final soc = v == null ? null : socFromVoltage(v, chemistry);
+    final onFloat = batteryOnFloat(v);
+    final soc = (v == null || onFloat) ? null : socFromVoltage(v, chemistry);
     final chemLabel = batteryChemistryLabels[chemistry] ?? 'Plomo-ácido';
     return Dialog(
       backgroundColor: cPanel,
@@ -62,32 +72,49 @@ class BatteryCurveDialog extends StatelessWidget {
               ],
             ),
             Text(
-              'Curva de carga/descarga — $chemLabel, en reposo (aproximado)',
+              onFloat
+                  ? '$chemLabel — cargador conectado'
+                  : 'Curva de carga/descarga — $chemLabel, en reposo (aproximado)',
               style: const TextStyle(color: cMuted, fontSize: 12),
             ),
             const SizedBox(height: 16),
-            SizedBox(
-              height: 220,
-              width: double.infinity,
-              child: v == null
-                  ? const Center(
-                      child: Text(
-                        'Sin lectura de voltaje',
-                        style: TextStyle(color: cMuted),
-                      ),
-                    )
-                  : CustomPaint(
-                      size: Size.infinite,
-                      painter: _BatteryCurvePainter(
-                        voltage: v,
-                        soc: soc!,
-                        color: color,
-                        chemistry: chemistry,
-                      ),
-                    ),
-            ),
-            if (v != null) ...[const SizedBox(height: 14), _trendBanner(soc!)],
-            if (v != null && chemistry == 'lithium') ...[
+            if (v == null)
+              const SizedBox(
+                height: 220,
+                width: double.infinity,
+                child: Center(
+                  child: Text(
+                    'Sin lectura de voltaje',
+                    style: TextStyle(color: cMuted),
+                  ),
+                ),
+              )
+            else if (onFloat) ...[
+              _floatBanner(v),
+              const SizedBox(height: 14),
+              _loadSection(),
+            ] else ...[
+              SizedBox(
+                height: 220,
+                width: double.infinity,
+                child: CustomPaint(
+                  size: Size.infinite,
+                  painter: _BatteryCurvePainter(
+                    voltage: v,
+                    soc: soc!,
+                    color: color,
+                    chemistry: chemistry,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              _trendBanner(soc),
+              if (loadEvents.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                _loadSection(),
+              ],
+            ],
+            if (v != null && !onFloat && chemistry == 'lithium') ...[
               const SizedBox(height: 10),
               const Text(
                 'El litio (LiFePO4) mantiene el voltaje casi plano entre el '
@@ -101,6 +128,122 @@ class BatteryCurveDialog extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // En flotación no hay nada que estimar: se dice el estado y se explica
+  // por qué no aparece un porcentaje, en vez de enseñar un 100% falso.
+  Widget _floatBanner(double v) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: cPanel2,
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: color.withValues(alpha: 0.4)),
+    ),
+    child: Row(
+      children: [
+        Icon(Icons.battery_charging_full, color: color, size: 30),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'En flotación · ${v.toStringAsFixed(2)} V',
+                style: const TextStyle(
+                  color: cText,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 17,
+                ),
+              ),
+              const SizedBox(height: 3),
+              const Text(
+                'Con el cargador puesto, el voltaje lo fija él y no dice '
+                'nada del estado de carga. Lo que sí mide su salud es '
+                'cuánto se hunde al pedirle corriente.',
+                style: TextStyle(color: cMuted, fontSize: 12, height: 1.35),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  // Histórico de esfuerzos: lo útil no es un valor suelto sino su
+  // evolución — si el mismo arranque hunde cada vez más, la batería se
+  // está acabando.
+  Widget _loadSection() {
+    if (loadEvents.isEmpty) {
+      return const Text(
+        'Aún no se ha registrado ningún esfuerzo. Al arrancar el motor o '
+        'usar el propulsor se anotará aquí cuánto cae el voltaje, para '
+        'poder comparar con el tiempo.',
+        style: TextStyle(color: cMuted, fontSize: 12, height: 1.35),
+      );
+    }
+    final recent = loadEvents.reversed.take(5).toList();
+    final worst = recent.first;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Esfuerzos recientes',
+          style: TextStyle(
+            color: cText,
+            fontWeight: FontWeight.w800,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'Último: bajó a ${worst.minV.toStringAsFixed(2)} V '
+          '(−${worst.dropV.toStringAsFixed(2)} V) y tardó '
+          '${worst.recoverySeconds} s en recuperarse.',
+          style: const TextStyle(color: cMuted, fontSize: 12),
+        ),
+        const SizedBox(height: 8),
+        for (final e in recent)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 96,
+                  child: Text(
+                    _stamp(e.at),
+                    style: const TextStyle(color: cMuted, fontSize: 11),
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    '${e.minV.toStringAsFixed(2)} V',
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+                Text(
+                  '−${e.dropV.toStringAsFixed(2)} V · ${e.recoverySeconds} s',
+                  style: const TextStyle(
+                    color: cMuted,
+                    fontSize: 11,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _stamp(DateTime at) {
+    final d = at.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(d.day)}/${two(d.month)} ${two(d.hour)}:${two(d.minute)}';
   }
 
   Widget _trendBanner(double soc) {

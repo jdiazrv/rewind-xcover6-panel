@@ -35,6 +35,19 @@ void main() {
     test('leaves null alone', () {
       expect(normalizePressureHpa(null), isNull);
     });
+
+    test('drops implausible samples instead of plotting them', () {
+      // The reported glitch: a "caída a 510" that isn't weather at all.
+      // 510 is not valid in any interpretation — as hPa it's far below
+      // the record low, /100 and *100 are nowhere near either.
+      expect(normalizePressureHpa(510), isNull);
+      expect(normalizePressureHpa(0), isNull);
+      expect(normalizePressureHpa(-3), isNull);
+      expect(normalizePressureHpa(double.nan), isNull);
+      expect(normalizePressureHpa(double.infinity), isNull);
+      // ...and the graph path must drop them too, not fall back to raw.
+      expect(mPressure.normalize!(510), isNull);
+    });
   });
 
   test('mPressure carries the normalizer so graphs match the live card', () {

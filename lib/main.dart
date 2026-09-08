@@ -393,6 +393,12 @@ class _DashboardState extends State<Dashboard> {
   final _ownTrack = OwnTrackHistory();
   final _startVTrend = _VoltageTrendTracker();
   final _bowVTrend = _VoltageTrendTracker();
+  // Salud de las baterías SIN shunt. En flotación su voltaje lo impone el
+  // cargador y no dice nada del estado de carga, así que lo que se guarda
+  // es la caída bajo carga fuerte: arranque del motor y uso del propulsor
+  // de proa. Ver BatteryLoadWatcher.
+  final _startLoadWatcher = BatteryLoadWatcher();
+  final _bowLoadWatcher = BatteryLoadWatcher();
   // Fed by NativeAnchorView's onEffectivePositionChanged — its own
   // device-GPS fallback lives inside that widget, invisible from here
   // otherwise. Used by the "sin posición" alarm below so it doesn't fire
@@ -2762,6 +2768,18 @@ class _DashboardState extends State<Dashboard> {
         settings.batteryChemistryStart;
     settings.batteryChemistryBow =
         prefs.getString('batteryChemistryBow') ?? settings.batteryChemistryBow;
+    for (final (key, watcher) in [
+      ('startLoadEvents', _startLoadWatcher),
+      ('bowLoadEvents', _bowLoadWatcher),
+    ]) {
+      final raw = prefs.getString(key);
+      if (raw == null) continue;
+      try {
+        watcher.loadJson(jsonDecode(raw) as List<dynamic>);
+      } catch (_) {
+        /* histórico corrupto: se empieza de cero, no es crítico */
+      }
+    }
     settings.ntfyTopic = prefs.getString('ntfyTopic') ?? settings.ntfyTopic;
     settings.ntfyAlarmKeys
       ..clear()
@@ -3163,6 +3181,17 @@ class _DashboardState extends State<Dashboard> {
       settings.batteryChemistryStart,
     );
     await prefs.setString('batteryChemistryBow', settings.batteryChemistryBow);
+    // Histórico de esfuerzos de arranque/propulsor: se guarda para poder
+    // comparar la evolución a lo largo de la temporada, que es lo que
+    // distingue "batería gastándose" de "así fue siempre" (cableado).
+    await prefs.setString(
+      'startLoadEvents',
+      jsonEncode(_startLoadWatcher.toJson()),
+    );
+    await prefs.setString(
+      'bowLoadEvents',
+      jsonEncode(_bowLoadWatcher.toJson()),
+    );
     await prefs.setString('ntfyTopic', settings.ntfyTopic);
     await prefs.setStringList('ntfyAlarmKeys', settings.ntfyAlarmKeys.toList());
     await prefs.setInt('ntfyMinIntervalSec', settings.ntfyMinIntervalSec);
@@ -3295,6 +3324,11 @@ class _DashboardState extends State<Dashboard> {
     h['electrical.batteries.${c.batteryStartId}.voltage'] = (v) {
       signalK.startV = _num(v);
       _startVTrend.add(signalK.startV);
+      // El hundimiento al arrancar es la prueba de salud real de esta
+      // batería; en flotación el voltaje solo refleja al cargador.
+      if (_startLoadWatcher.add(signalK.startV, DateTime.now()) != null) {
+        unawaited(_saveSettings());
+      }
     };
     if (c.solarPath != null && c.solarPath!.isNotEmpty) {
       h[c.solarPath!] = (v) => signalK.solarW = _num(v);
@@ -3765,6 +3799,7 @@ class _DashboardState extends State<Dashboard> {
       unawaited(_fetchVesselName());
       unawaited(_fetchSelfMmsi());
       unawaited(_seedOwnTrackFromHistory());
+      unawaited(_autoConfigureBlankSensorPaths());
       // signalK.connected/status flip to true/'Signal K' in
       // _onSignalKMessage, only once real data actually arrives — that's
       // a stronger signal than the WS handshake completing (which
@@ -4346,8 +4381,17 @@ class _DashboardState extends State<Dashboard> {
         // Via normalizePressureHpa rather than a bare /100, because not
         // every source actually honours the Pa unit it declares — see
         // that function's own doc comment.
-        signalK.outsidePressureHpa = normalizePressureHpa(n);
-        _pressureHistory.add(signalK.outsidePressureHpa);
+        // Un valor imposible se IGNORA (no se borra la última lectura
+        // buena): un frame corrupto del sensor no debe dejar la tarjeta en
+        // "--" ni meter un pico en la tendencia. Solo cuando llega null de
+        // verdad — la ruta se ha quedado sin dato — se limpia.
+        final hpa = normalizePressureHpa(n);
+        if (hpa != null) {
+          signalK.outsidePressureHpa = hpa;
+          _pressureHistory.add(hpa);
+        } else if (n == null) {
+          signalK.outsidePressureHpa = null;
+        }
       case 'environment.interior.temperature':
         signalK.indoorTempK = n;
       case 'environment.interior.humidity':
@@ -4369,6 +4413,11 @@ class _DashboardState extends State<Dashboard> {
       case 'electrical.batteries.bowthruster.voltage':
         signalK.bowthrusterV = n;
         _bowVTrend.add(n);
+        // Igual que en arranque: el propulsor pide cientos de amperios
+        // unos segundos y esa caída sí mide el estado de la batería.
+        if (_bowLoadWatcher.add(n, DateTime.now()) != null) {
+          unawaited(_saveSettings());
+        }
       case 'electrical.batteries.bowthruster.temperature':
         signalK.bowthrusterTempK = n;
       case 'electrical.venus.dcPower':
@@ -4703,6 +4752,70 @@ class _DashboardState extends State<Dashboard> {
   // Timeout raised from 8s: this fetches the *entire* self vessel tree,
   // not a single value, so it's naturally slower than the app's other
   // one-off REST calls, especially over a VPN tunnel.
+  // Rellena solos los paths que siguen en blanco, en cuanto hay conexión.
+  //
+  // Antes esto solo pasaba pulsando "buscar sensores" en CFG > Sensores, y
+  // ahí está la pega: para configurar las horas de motor hace falta estar
+  // conectado, pero justo cuando lo estás no tienes por qué acordarte de
+  // entrar a configurarlo — y desconectado no se puede ("horas de motor no
+  // lo puedo configurar si no está conectado", 2026-09-08). Ahora, en
+  // cuanto el barco publica el dato, se toma solo.
+  //
+  // Deliberadamente conservador: SOLO toca campos vacíos, nunca pisa una
+  // elección del usuario, y si algo falla no se dice nada — es una
+  // comodidad, no una función crítica, y el diálogo de CFG sigue estando
+  // ahí para corregir cualquier acierto discutible.
+  Future<void> _autoConfigureBlankSensorPaths() async {
+    if (settings.demoMode) return;
+    final c = settings.sensorConfig;
+    if (c.enginePath != null &&
+        c.depthPath != null &&
+        c.solarPath != null &&
+        c.fridge1Path != null) {
+      return; // nada que rellenar: no gastamos una consulta del árbol entero
+    }
+    try {
+      final d = await discoverSkPaths();
+      if (!mounted) return;
+      var changed = false;
+      if (c.enginePath == null && d.enginePaths.isNotEmpty) {
+        c.enginePath = d.enginePaths.first;
+        changed = true;
+      }
+      if (c.depthPath == null && d.depthPaths.isNotEmpty) {
+        c.depthPath = d.depthPaths.first;
+        changed = true;
+      }
+      // Controladores reales primero: con dos hay que coger sus dos
+      // panelPower, no un total — ver solarControllerPathsPreferred.
+      final solar = d.solarControllerPathsPreferred;
+      if (c.solarPath == null && solar.isNotEmpty) {
+        c.solarPath = solar.first;
+        if (c.solarPath2 == null && solar.length > 1) {
+          c.solarPath2 = solar[1];
+        }
+        changed = true;
+      }
+      if (c.fridge1Path == null && d.fridgePaths.isNotEmpty) {
+        c.fridge1Path = d.fridgePaths.first;
+        if (c.fridge2Path == null && d.fridgePaths.length > 1) {
+          c.fridge2Path = d.fridgePaths[1];
+        }
+        changed = true;
+      }
+      if (!changed) return;
+      await _saveSettings();
+      if (!mounted) return;
+      // Los handlers dinámicos y la suscripción se construyen a partir de
+      // estos paths, así que hay que rehacerlos o el dato recién
+      // descubierto no llegaría hasta la siguiente reconexión.
+      setState(_buildDynamicHandlers);
+      _sendSignalKSubscription();
+    } catch (_) {
+      // Sin conexión o árbol ilegible: se reintenta en la próxima conexión.
+    }
+  }
+
   Future<SkDiscovery> discoverSkPaths() async {
     final uri = Uri.parse(
       'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self',
@@ -4779,6 +4892,15 @@ class _DashboardState extends State<Dashboard> {
             lowerPath.endsWith('totalpanelpower');
         if (isPanelPowerField && !individualPanel) {
           result.solarTotalPaths.add(path);
+          // El nombre del dispositivo es lo único que delata un agregado
+          // cuya ruta tiene la misma forma que la de un controlador — ver
+          // SkDiscovery.solarControllerPathsPreferred.
+          final owner = path.substring(0, path.lastIndexOf('.'));
+          final nameNode = leaves['$owner.name'];
+          final nameVal = nameNode is Map ? nameNode['value'] : null;
+          if (nameVal is String && nameVal.isNotEmpty) {
+            result.solarPathNames[path] = nameVal.toLowerCase();
+          }
         }
       }
       if (lowerPath.contains('depth')) {
@@ -8736,12 +8858,16 @@ class _DashboardState extends State<Dashboard> {
     if (updated == null) return ' · sin actualizar';
     final age = DateTime.now().difference(updated);
     if (age <= staleAfter) return '';
+    // "hace 6 min", no "ANTIGUO 6 min": la antigüedad ya la dice el propio
+    // tiempo transcurrido, así que la etiqueta en mayúsculas solo añadía
+    // alarma a un dato que puede ser perfectamente normal en un sensor
+    // lento. Petición en vivo 2026-09-08.
     final text = age.inMinutes < 1
-        ? '${age.inSeconds}s'
+        ? '${age.inSeconds} s'
         : age.inHours < 1
-        ? '${age.inMinutes}min'
-        : '${age.inHours}h';
-    return ' · ANTIGUO $text';
+        ? '${age.inMinutes} min'
+        : '${age.inHours} h';
+    return ' · hace $text';
   }
 
   String _slowSensorSubtitle(
@@ -8924,7 +9050,9 @@ class _DashboardState extends State<Dashboard> {
                     // used to be a separate TEMP-page card.
                     subtitle:
                         (signalK.bowthrusterTempK == null
-                            ? 'batería proa'
+                            ? (batteryOnFloat(signalK.bowthrusterV)
+                                  ? 'batería proa · en flotación'
+                                  : 'batería proa')
                             : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}') +
                         _staleSuffix(bowPath),
                     color: bowColor,
@@ -8939,6 +9067,7 @@ class _DashboardState extends State<Dashboard> {
                             trend: _bowVTrend.direction,
                             color: bowColor,
                             chemistry: settings.batteryChemistryBow,
+                            loadEvents: _bowLoadWatcher.events,
                           ),
                   ),
                 ),
@@ -8949,7 +9078,9 @@ class _DashboardState extends State<Dashboard> {
                     value: fmt(signalK.startV, 2, ''),
                     unit: 'V',
                     subtitle:
-                        '${settings.sensorConfig.batteryStartId}${_staleSuffix(startPath)}',
+                        '${settings.sensorConfig.batteryStartId}'
+                        '${batteryOnFloat(signalK.startV) ? ' · en flotación' : ''}'
+                        '${_staleSuffix(startPath)}',
                     color: startColor,
                     customIcon: StarterMotorGlyph(color: startColor),
                     zoom: _showZoom,
@@ -8962,6 +9093,7 @@ class _DashboardState extends State<Dashboard> {
                             trend: _startVTrend.direction,
                             color: startColor,
                             chemistry: settings.batteryChemistryStart,
+                            loadEvents: _startLoadWatcher.events,
                           ),
                   ),
                 ),
@@ -9143,23 +9275,25 @@ class _DashboardState extends State<Dashboard> {
     // with a shared one. Reported live 2026-09-04 ("no se porque has
     // perdido el nombre fuel 1 y 2 agua stbd y port").
     for (final t in settings.sensorConfig.tanks.where((t) => t.enabled)) {
-      final key = _groupedTankTypes.contains(t.type) ? t.type : t.tankKey;
+      // Por KIND, no por type: un tanque `unknown` marcado como LPG
+      // en CFG debe agruparse y pintarse como LPG (ver TankSlot.kind).
+      final key = _groupedTankTypes.contains(t.kind) ? t.kind : t.tankKey;
       groups.putIfAbsent(key, () => []).add(t);
     }
     final out = [
       for (final entry in groups.entries)
         TankViewData(
           name:
-              _tankCategoryNames[entry.value.first.type] ??
+              _tankCategoryNames[entry.value.first.kind] ??
               entry.value.first.groupLabel,
           slots: entry.value,
-          color: _tankColors[entry.value.first.type] ?? cCyan,
-          icon: _tankIcons[entry.value.first.type] ?? Icons.water_drop,
+          color: _tankColors[entry.value.first.kind] ?? cCyan,
+          icon: _tankIcons[entry.value.first.kind] ?? Icons.water_drop,
         ),
     ];
     out.sort((a, b) {
-      final ai = _tankTypeOrder.indexOf(a.slots.first.type);
-      final bi = _tankTypeOrder.indexOf(b.slots.first.type);
+      final ai = _tankTypeOrder.indexOf(a.slots.first.kind);
+      final bi = _tankTypeOrder.indexOf(b.slots.first.kind);
       return (ai < 0 ? _tankTypeOrder.length : ai).compareTo(
         bi < 0 ? _tankTypeOrder.length : bi,
       );
@@ -10193,6 +10327,7 @@ class _DashboardState extends State<Dashboard> {
     required int trend,
     required Color color,
     required String chemistry,
+    List<BatteryLoadEvent> loadEvents = const [],
   }) {
     showDialog<void>(
       context: context,
@@ -10202,6 +10337,7 @@ class _DashboardState extends State<Dashboard> {
         trendDirection: trend,
         color: color,
         chemistry: chemistry,
+        loadEvents: loadEvents,
       ),
     );
   }

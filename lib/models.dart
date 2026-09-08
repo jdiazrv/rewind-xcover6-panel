@@ -206,16 +206,35 @@ class GraphPoint {
 /// outside roughly 870–1085 hPa (87,000–108,500 Pa). Anything under ~500
 /// can only be an over-divided value; anything over ~10,000 can only be
 /// Pascals. Neither branch can misfire on a plausible reading.
+/// Plausible sea-level pressure. The extremes ever recorded on Earth are
+/// ~870 hPa (typhoon Tip) and ~1084 hPa (Siberia); this window is wider
+/// than either, so nothing real is ever rejected.
+const _minPlausibleHpa = 800.0;
+const _maxPlausibleHpa = 1100.0;
+
 double? normalizePressureHpa(double? raw) {
-  if (raw == null) return null;
-  if (raw > 10000) return raw / 100; // Pascals, as the spec intends
-  if (raw > 0 && raw < 500) return raw * 100; // already divided once too often
-  return raw; // already hPa/mbar
+  if (raw == null || !raw.isFinite) return null;
+  // Try each interpretation and keep the one that lands in the plausible
+  // window. Ordered most- to least-likely; they can't both match, since
+  // the windows are two orders of magnitude apart.
+  for (final candidate in [raw, raw / 100, raw * 100]) {
+    if (candidate >= _minPlausibleHpa && candidate <= _maxPlausibleHpa) {
+      return candidate;
+    }
+  }
+  // Nothing plausible: DROP the sample rather than show it. A reading of
+  // 510 mbar isn't weather, it's a glitch (a partial/corrupt frame from
+  // the BLE sensor, or a stray value during the Node-RED unit change),
+  // and plotting it drags the whole trend graph's scale down and fakes a
+  // dramatic "crash". Reported live 2026-09-08 ("la presión muestra una
+  // caída a 510, filtra para que no pasen esas cosas").
+  return null;
 }
 
-/// Non-null wrapper, so it can be referenced from a const [MetricDef].
-double normalizePressureHpaValue(double raw) =>
-    normalizePressureHpa(raw) ?? raw;
+/// Wrapper referenceable from a const [MetricDef]. Deliberately keeps the
+/// null: an implausible sample must be DROPPED by the history path, not
+/// plotted, or it drags the graph's scale into a fake crash.
+double? normalizePressureHpaValue(double raw) => normalizePressureHpa(raw);
 
 /// A noisy series reduced to what's actually readable: the rolling mean
 /// ("sostenido") plus the min/max envelope of the same window.
@@ -480,7 +499,7 @@ class MetricDef {
   // (see normalizePressureHpa). Runs in every history path — Influx, the
   // Signal K API and the demo series — so a graph can't disagree with the
   // live card.
-  final double Function(double)? normalize;
+  final double? Function(double)? normalize;
   final Color color;
   // Optional tank metadata lets the generic history screen translate a
   // trustworthy level trend into litres/day and estimated time remaining.
@@ -1141,8 +1160,22 @@ class TankSlot {
     this.warningPct,
     this.alarmPct,
     this.calibrated = false,
+    this.displayType,
   });
   String type; // 'freshWater' | 'fuel' | 'blackWater' | ...
+  // Tipo con el que se PINTA (icono, color, nombre de categoría, orden y
+  // agrupación), cuando no coincide con el que trae la ruta de Signal K.
+  //
+  // Hace falta porque `type` forma parte del path y no se puede cambiar
+  // sin dejar de leer el dato. El caso real: signalk-venus-plugin solo
+  // traduce los tipos de fluido 0-5 de Victron, así que una bombona de
+  // gas (tipo 8) llega como `tanks.unknown.32` por mucho que en el Venus
+  // esté puesta como LPG. Con esto se marca como 'lpg' en CFG y se ve
+  // como tal, sin tocar el servidor ni perder el histórico de la ruta.
+  String? displayType;
+  // El tipo a efectos de presentación. Todo lo visual debe usar esto;
+  // solo skPath/tankKey siguen usando `type`.
+  String get kind => displayType ?? type;
   String id; // Signal K instance id
   String groupLabel; // tanks sharing the same label are averaged into one card
   int capacityL;
@@ -1162,6 +1195,7 @@ class TankSlot {
     'warningPct': warningPct,
     'alarmPct': alarmPct,
     'calibrated': calibrated,
+    'displayType': displayType,
   };
   factory TankSlot.fromJson(Map<String, dynamic> j) => TankSlot(
     type: j['type'] as String,
@@ -1172,6 +1206,7 @@ class TankSlot {
     warningPct: (j['warningPct'] as num?)?.toDouble(),
     alarmPct: (j['alarmPct'] as num?)?.toDouble(),
     calibrated: j['calibrated'] as bool? ?? false,
+    displayType: j['displayType'] as String?,
   );
 }
 
@@ -1533,6 +1568,43 @@ class SkDiscovery {
   // electrical.solar.?.panelpower para el total" (reported live
   // 2026-09-04).
   final List<String> solarTotalPaths = [];
+  // Nombre publicado por cada ruta de solarTotalPaths (minúsculas), cuando
+  // el dispositivo publica uno. Sirve para distinguir un controlador real
+  // de un AGREGADO que llega por la misma forma de ruta: en REWIND,
+  // electrical.solar.100 se llama "BLE Solar PORT+STBD" y suma los dos
+  // controladores, así que elegirlo junto a otro total contaría los mismos
+  // paneles dos veces. Ver solarControllerPathsPreferred.
+  final Map<String, String> solarPathNames = {};
+
+  /// solarTotalPaths ordenado poniendo delante los CONTROLADORES reales y
+  /// dejando al final los agregados.
+  ///
+  /// Con dos controladores hay que coger los dos panelPower individuales,
+  /// no un total ("si hay dos controladores tiene que coger los dos
+  /// panelpower no el total", 2026-09-08): un total ya incluye a ambos, y
+  /// combinarlo con otra ruta suma los mismos paneles dos veces. Un
+  /// agregado se reconoce por dos vías, porque ninguna basta sola:
+  /// - la propia ruta lo dice (`totalPanelPower`, o cuelga de `venus`,
+  ///   que es el sumario del Cerbo, no un cargador);
+  /// - o lo dice su nombre (el "PORT+STBD" del ejemplo), única pista
+  ///   cuando la ruta es idéntica en forma a la de un controlador.
+  List<String> get solarControllerPathsPreferred {
+    bool isAggregate(String path) {
+      final p = path.toLowerCase();
+      if (p.contains('totalpanelpower') || p.startsWith('electrical.venus.')) {
+        return true;
+      }
+      final name = solarPathNames[path] ?? '';
+      return name.contains('+') ||
+          name.contains('total') ||
+          name.contains('todos') ||
+          name.contains('both');
+    }
+
+    final controllers = solarTotalPaths.where((p) => !isAggregate(p)).toList();
+    final aggregates = solarTotalPaths.where(isAggregate).toList();
+    return [...controllers, ...aggregates];
+  }
   final List<String> fridgePaths = [];
   final List<String> depthPaths = [];
   final List<String> enginePaths = [];
@@ -1716,6 +1788,145 @@ class AnchorTrackPoint {
   final DateTime t;
   final double lat;
   final double lon;
+}
+
+// ─── Estado de baterías sin shunt (arranque / propulsor de proa) ─────────
+//
+// Estas dos viven permanentemente en FLOTACIÓN: el cargador impone el
+// voltaje (~13,2-13,8 V en plomo), así que no dice nada del estado de
+// carga — 13,5 V solo significa "el cargador está haciendo su trabajo".
+// Traducir eso a un porcentaje con la curva de reposo es inventar un dato
+// ("bow y arranque damos por hecho que están en flotación", 2026-09-08).
+//
+// Lo que sí se puede medir sin shunt es la CAÍDA BAJO CARGA: al arrancar
+// el motor, o al usar el propulsor, la batería entrega cientos de amperios
+// unos segundos y el voltaje se hunde. Cuánto se hunde, y cuánto tarda en
+// recuperarse, es la prueba de estado clásica y vale mucho más que el SOC.
+
+/// Un episodio de carga fuerte: arranque del motor o uso del propulsor.
+class BatteryLoadEvent {
+  const BatteryLoadEvent({
+    required this.at,
+    required this.restingV,
+    required this.minV,
+    required this.recoverySeconds,
+  });
+
+  final DateTime at;
+
+  /// Voltaje justo antes del esfuerzo (referencia de la que cayó).
+  final double restingV;
+
+  /// Mínimo alcanzado. Es el indicador principal de salud.
+  final double minV;
+
+  /// Segundos hasta recuperar casi todo el voltaje de partida. Una batería
+  /// sana vuelve casi al instante; una cansada se queda baja. Distingue
+  /// "pico normal" de "batería gastada".
+  final int recoverySeconds;
+
+  double get dropV => restingV - minV;
+
+  Map<String, dynamic> toJson() => {
+    'at': at.toIso8601String(),
+    'restingV': restingV,
+    'minV': minV,
+    'recoverySeconds': recoverySeconds,
+  };
+
+  factory BatteryLoadEvent.fromJson(Map<String, dynamic> j) =>
+      BatteryLoadEvent(
+        at: DateTime.tryParse(j['at'] as String? ?? '') ?? DateTime.now(),
+        restingV: (j['restingV'] as num?)?.toDouble() ?? 0,
+        minV: (j['minV'] as num?)?.toDouble() ?? 0,
+        recoverySeconds: (j['recoverySeconds'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// ¿Está el cargador imponiendo el voltaje ahora mismo?
+///
+/// Se puede distinguir con fiabilidad porque los rangos NO se solapan: una
+/// batería de plomo llena en reposo da ~12,7 V, y flotación son ~13,2-13,8
+/// V. Por encima del umbral el porcentaje no debe mostrarse; por debajo y
+/// estable, la curva de reposo sí es válida.
+bool batteryOnFloat(double? volts) => volts != null && volts >= 13.0;
+
+/// Detecta episodios de carga fuerte a partir del voltaje.
+///
+/// No necesita saber cuándo arrancas ni cuándo usas el propulsor: el
+/// hundimiento del voltaje lo delata solo. La app se suscribe con política
+/// `instant` (sin promediar), así que recibe cada cambio que publique el
+/// servidor; con qué resolución se capta el valle depende del ritmo al que
+/// lo publique el Cerbo.
+class BatteryLoadWatcher {
+  BatteryLoadWatcher({this.dropThresholdV = 0.6, this.maxEvents = 20});
+
+  /// Caída mínima respecto al nivel previo para considerarlo un esfuerzo y
+  /// no ruido de medida. Un arranque hunde varios voltios; el ruido normal
+  /// de un BLE está muy por debajo de esto.
+  final double dropThresholdV;
+  final int maxEvents;
+
+  final List<BatteryLoadEvent> events = [];
+
+  double? _baseline; // nivel estable antes del esfuerzo
+  double? _minV; // mínimo del episodio en curso
+  DateTime? _startedAt;
+
+  /// Alimenta una lectura. Devuelve el evento si acaba de cerrarse uno.
+  BatteryLoadEvent? add(double? volts, DateTime at) {
+    if (volts == null || !volts.isFinite || volts <= 0) return null;
+    final base = _baseline;
+    if (base == null) {
+      _baseline = volts;
+      return null;
+    }
+    if (_startedAt == null) {
+      if (base - volts >= dropThresholdV) {
+        // Empieza el esfuerzo.
+        _startedAt = at;
+        _minV = volts;
+      } else {
+        // En reposo: la referencia sigue al voltaje, pero solo hacia
+        // ARRIBA de golpe y hacia abajo despacio, para que una bajada
+        // lenta (consumo normal) no se coma el umbral y acabe ocultando
+        // un esfuerzo real.
+        _baseline = volts > base ? volts : base - (base - volts) * 0.05;
+      }
+      return null;
+    }
+    if (volts < (_minV ?? volts)) _minV = volts;
+    // Recuperado: vuelve a menos de un tercio de la caída que lo disparó.
+    if (volts >= base - dropThresholdV / 3) {
+      final event = BatteryLoadEvent(
+        at: _startedAt!,
+        restingV: base,
+        minV: _minV ?? volts,
+        recoverySeconds: at.difference(_startedAt!).inSeconds,
+      );
+      _startedAt = null;
+      _minV = null;
+      _baseline = volts;
+      events.add(event);
+      if (events.length > maxEvents) events.removeAt(0);
+      return event;
+    }
+    return null;
+  }
+
+  BatteryLoadEvent? get last => events.isEmpty ? null : events.last;
+
+  List<Map<String, dynamic>> toJson() => [
+    for (final e in events) e.toJson(),
+  ];
+
+  void loadJson(List<dynamic> raw) {
+    events
+      ..clear()
+      ..addAll(
+        raw.whereType<Map<String, dynamic>>().map(BatteryLoadEvent.fromJson),
+      );
+  }
 }
 
 class OwnTrackHistory {

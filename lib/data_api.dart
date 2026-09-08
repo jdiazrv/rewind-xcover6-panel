@@ -121,12 +121,13 @@ Future<List<GraphPoint>> influxQuery({
     final v = double.tryParse(vs);
     if (dt == null || v == null || !v.isFinite) continue;
     final scaled = v * def.scale + def.offset;
-    points.add(
-      GraphPoint(
-        time: dt,
-        value: def.normalize?.call(scaled) ?? scaled,
-      ),
-    );
+    // A normalizer returning null means "implausible, drop it" — plotting
+    // such a sample would drag the whole graph's scale to fit a glitch.
+    final normalized = def.normalize == null
+        ? scaled
+        : def.normalize!(scaled);
+    if (normalized == null) continue;
+    points.add(GraphPoint(time: dt, value: normalized));
   }
   return _sortAndDedupe(points);
 }
@@ -257,12 +258,13 @@ Future<List<GraphPoint>> skHistoryQuery({
     final v = raw is num ? raw.toDouble() : null;
     if (dt == null || v == null || !v.isFinite) continue;
     final scaled = v * def.scale + def.offset;
-    points.add(
-      GraphPoint(
-        time: dt,
-        value: def.normalize?.call(scaled) ?? scaled,
-      ),
-    );
+    // A normalizer returning null means "implausible, drop it" — plotting
+    // such a sample would drag the whole graph's scale to fit a glitch.
+    final normalized = def.normalize == null
+        ? scaled
+        : def.normalize!(scaled);
+    if (normalized == null) continue;
+    points.add(GraphPoint(time: dt, value: normalized));
   }
   return _sortAndDedupe(points);
 }

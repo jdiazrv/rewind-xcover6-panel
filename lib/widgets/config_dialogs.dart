@@ -1,5 +1,17 @@
 part of '../main.dart';
 
+// Etiquetas del selector "Mostrar como" de cada tanque. 'unknown' aparece
+// tal cual porque es lo que publica Signal K cuando el plugin de Venus no
+// sabe traducir el tipo de fluido — ver TankSlot.displayType.
+const _tankKindLabels = <String, String>{
+  'fuel': 'Diésel',
+  'lpg': 'LPG',
+  'freshWater': 'Agua',
+  'blackWater': 'Negras',
+  'wasteWater': 'Grises',
+  'unknown': 'Sin tipo',
+};
+
 String friendlyApiError(Object e) {
   final s = e.toString();
   final match = RegExp(r'Exception: (.+)').firstMatch(s);
@@ -1324,6 +1336,57 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                             color: cMuted,
                                             fontSize: 11,
                                           ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        // Tipo con el que se PINTA, que no
+                                        // siempre puede ser el de la ruta:
+                                        // signalk-venus-plugin solo traduce
+                                        // los fluidos 0-5 de Victron, así
+                                        // que una bombona de gas (tipo 8)
+                                        // llega como `unknown` aunque en el
+                                        // Venus esté puesta como LPG. Aquí
+                                        // se marca como tal sin tocar el
+                                        // path del que se lee el dato.
+                                        SizedBox(
+                                          width: 108,
+                                          child:
+                                              DropdownButtonFormField<String>(
+                                                initialValue: t.kind,
+                                                isDense: true,
+                                                decoration:
+                                                    const InputDecoration(
+                                                      isDense: true,
+                                                      labelText: 'Mostrar como',
+                                                    ),
+                                                items: [
+                                                  for (final k in {
+                                                    t.type,
+                                                    'fuel',
+                                                    'lpg',
+                                                    'freshWater',
+                                                    'blackWater',
+                                                  })
+                                                    DropdownMenuItem(
+                                                      value: k,
+                                                      child: Text(
+                                                        _tankKindLabels[k] ?? k,
+                                                        style: const TextStyle(
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                ],
+                                                onChanged: (v) => setState(() {
+                                                  // Guardamos null cuando
+                                                  // coincide con el tipo real,
+                                                  // para no fijar una
+                                                  // anulación innecesaria.
+                                                  t.displayType =
+                                                      (v == null || v == t.type)
+                                                      ? null
+                                                      : v;
+                                                }),
+                                              ),
                                         ),
                                         const SizedBox(width: 8),
                                         SizedBox(
