@@ -10942,33 +10942,362 @@ class _DashboardState extends State<Dashboard> {
     }
 
     Future<void> showSettingsSearch(BuildContext tabContext) async {
-      const destinations = <(String, int)>[
-        ('Signal K, servidor, host, puerto, credenciales', 0),
-        ('Sensores, baterías, solar, motor, neveras, tanques', 1),
-        ('Histórico, InfluxDB, KIP, gráficas, bucket', 2),
-        ('Pantalla, brillo, navegación, AIS, icono del barco', 3),
-        ('Alarmas, sonido, voltaje, temperatura, CPA', 4),
-        ('Fondeo, ancla, cadena, guiñada, garreo', 5),
-        ('Diagnóstico, estado, errores, datos recibidos', 6),
-      ];
-      final controller = TextEditingController();
+      const destinations =
+          <({String title, String section, String keywords, int tab})>[
+            // CONEXIÓN
+            (
+              title: 'Estado y servidor Signal K',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'conexion conectado desconectado servidor signalk',
+              tab: 0,
+            ),
+            (
+              title: 'Host, dirección IP y puerto',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'host ip puerto local remoto tailscale mdns lysmarine',
+              tab: 0,
+            ),
+            (
+              title: 'Buscar Signal K en la red',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'buscar escanear descubrir lan wifi red servidor 3000',
+              tab: 0,
+            ),
+            (
+              title: 'Credenciales de escritura',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'usuario contraseña password login autenticacion auth basic token escritura permisos',
+              tab: 0,
+            ),
+            (
+              title: 'Guardar, reconectar y probar conexión',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'guardar reconectar probar test cambios sin guardar automatico',
+              tab: 0,
+            ),
+
+            // SENSORES
+            (
+              title: 'Buscar y configurar sensores',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'buscar descubrir autoconfigurar paths rutas datos mapeo signalk',
+              tab: 1,
+            ),
+            (
+              title: 'Baterías de servicio, arranque y proa',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'bateria baterias servicio house arranque start proa bow thruster voltaje corriente soc shunt',
+              tab: 1,
+            ),
+            (
+              title: 'Paneles y controladores solares',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords:
+                  'solar panel paneles controlador cargador potencia mppt',
+              tab: 1,
+            ),
+            (
+              title: 'Profundidad y transductor',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'profundidad depth sonda transductor offset quilla',
+              tab: 1,
+            ),
+            (
+              title: 'Motor y horas de motor',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'motor engine rpm revoluciones runtime horas temperatura refrigerante tension voltaje mdi volvo alarmas',
+              tab: 1,
+            ),
+            (
+              title: 'Temperaturas y neveras',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'temperatura temperaturas nevera neveras frigorifico congelador freezer cuadro fusibles mar etiquetas paths',
+              tab: 1,
+            ),
+            (
+              title: 'Tanques, capacidades y tipos',
+              section: 'SENSORES · Mapeo Signal K',
+              keywords: 'tanque tanques tnk agua diesel combustible fuel aguas negras grises waste black grey lpg gas glp propano capacidad litros nivel venus cerbo unknown tipo mostrar como',
+              tab: 1,
+            ),
+            (
+              title: 'Química de las baterías',
+              section: 'SENSORES · Química de batería',
+              keywords: 'quimica bateria plomo acido agm gel litio lifepo4 curva carga descarga soc arranque proa bow',
+              tab: 1,
+            ),
+            (
+              title: 'Escora con el acelerómetro',
+              section: 'SENSORES · Escora (balanceo)',
+              keywords: 'escora heel inclinacion balanceo acelerometro dispositivo telefono calibracion eje',
+              tab: 1,
+            ),
+
+            // HISTÓRICO
+            (
+              title: 'Fuente del histórico',
+              section: 'HISTÓRICO · Fuente y almacenamiento',
+              keywords: 'historico historia graficas fuente automatico influx influxdb signalk history api kip sqlite',
+              tab: 2,
+            ),
+            (
+              title: 'Servidor y organización InfluxDB',
+              section: 'HISTÓRICO · Fuente y almacenamiento',
+              keywords: 'influx influxdb host servidor org organizacion',
+              tab: 2,
+            ),
+            (
+              title: 'Token de InfluxDB',
+              section: 'HISTÓRICO · Fuente y almacenamiento',
+              keywords: 'influx influxdb token credencial contraseña seguridad',
+              tab: 2,
+            ),
+            (
+              title: 'Buckets actual y de archivo',
+              section: 'HISTÓRICO · Fuente y almacenamiento',
+              keywords: 'bucket archivo retencion 7 dias mes datos muestras almacenamiento',
+              tab: 2,
+            ),
+            (
+              title: 'Guardar y probar el histórico',
+              section: 'HISTÓRICO · Fuente y almacenamiento',
+              keywords:
+                  'guardar probar test fuente muestras sog cambios sin guardar',
+              tab: 2,
+            ),
+
+            // PANTALLA
+            (
+              title: 'Pantalla siempre activa',
+              section: 'PANTALLA · Comportamiento',
+              keywords: 'pantalla activa wakelock bloqueo dormir encendida',
+              tab: 3,
+            ),
+            (
+              title: 'Ocultar el menú automáticamente',
+              section: 'PANTALLA · Comportamiento',
+              keywords: 'ocultar menu cabecera navegacion nav vnt power pwr ais anc map',
+              tab: 3,
+            ),
+            (
+              title: 'Modo de brillo',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords:
+                  'brillo luminosidad dia noche automatico tema apariencia',
+              tab: 3,
+            ),
+            (
+              title: 'Estilo de la pantalla NAV',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords: 'nav navegacion clasica premium ambas estilo panel',
+              tab: 3,
+            ),
+            (
+              title: 'Pantalla del motor',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords:
+                  'motor engine ninguno simple completo panel telemetria rpm',
+              tab: 3,
+            ),
+            (
+              title: 'Rejilla NAV clásica',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords: 'rejilla grid nav clasica 3x2 4x2 cartas tarjetas',
+              tab: 3,
+            ),
+            (
+              title: 'Icono del barco',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords:
+                  'icono barco buque velero lancha forma simbolo ais mapa',
+              tab: 3,
+            ),
+            (
+              title: 'AIS mostrado en NAV',
+              section: 'PANTALLA · AIS mostrado en NAV',
+              keywords: 'ais blancos targets nav filtro cpa tcpa maximo mostrado distancia riesgo',
+              tab: 3,
+            ),
+
+            // ALARMAS
+            (
+              title: 'Avisos push mediante ntfy',
+              section: 'ALARMAS · Aviso push',
+              keywords: 'ntfy push notificacion aviso remoto topic intervalo repeticion prueba enviar',
+              tab: 4,
+            ),
+            (
+              title: 'Fuente de alarmas Signal K',
+              section: 'ALARMAS · Fuente',
+              keywords: 'zonas signalk notifications fuente alarmas servidor prioridad',
+              tab: 4,
+            ),
+            (
+              title: 'Alarma de corredera',
+              section: 'ALARMAS · Corredera',
+              keywords: 'corredera sog stw fouled parada sonido umbral',
+              tab: 4,
+            ),
+            (
+              title: 'Alarma de colisión AIS',
+              section: 'ALARMAS · Colisión AIS',
+              keywords:
+                  'ais colision blanco target cpa tcpa riesgo sonido umbral',
+              tab: 4,
+            ),
+            (
+              title: 'Alarmas del motor',
+              section: 'ALARMAS · Motor',
+              keywords: 'motor engine temperatura refrigerante coolant aceite oil presion voltaje tension alternador glow precalentamiento fallo check dm1 sonido minimo maximo',
+              tab: 4,
+            ),
+            (
+              title: 'Alarmas personalizadas',
+              section: 'ALARMAS · Alarmas personalizadas',
+              keywords: 'personalizada custom añadir borrar path ruta valor umbral sonido',
+              tab: 4,
+            ),
+
+            // FONDEO
+            (
+              title: 'Cambio de profundidad',
+              section: 'FONDEO · Cambio de profundidad',
+              keywords:
+                  'fondeo ancla profundidad sonda margen alarma sonido garreo',
+              tab: 5,
+            ),
+            (
+              title: 'Alarma de viento en fondeo',
+              section: 'FONDEO · Viento',
+              keywords: 'fondeo ancla viento aws fuerte umbral alarma sonido',
+              tab: 5,
+            ),
+            (
+              title: 'Pérdida de posición',
+              section: 'FONDEO · Sin posición',
+              keywords:
+                  'sin posicion gps perdida señal fondeo ancla alarma garreo',
+              tab: 5,
+            ),
+            (
+              title: 'Aviso si te llevas el móvil',
+              section: 'FONDEO · ¿Te has llevado el móvil?',
+              keywords: 'movil telefono movimiento patron podometro pasos actividad wifi red barco alejamiento',
+              tab: 5,
+            ),
+            (
+              title: 'Datos eléctricos en ANC',
+              section: 'FONDEO · Pantalla de ANC',
+              keywords:
+                  'anc pantalla electrico bateria voltaje soc corriente fondeo',
+              tab: 5,
+            ),
+            (
+              title: 'Filtrado de falsas alarmas GPS',
+              section: 'FONDEO · Falsas alarmas',
+              keywords: 'falsa alarma salto gps posicion aislado sospechoso filtro garreo',
+              tab: 5,
+            ),
+            (
+              title: 'Geometría fija del barco',
+              section: 'FONDEO · Datos del barco',
+              keywords: 'roller roldana altura agua cadena longitud gps proa distancia geometria barco fondeo radio scope',
+              tab: 5,
+            ),
+            (
+              title: 'Traza propia de fondeo',
+              section: 'FONDEO · Traza propia',
+              keywords: 'traza track puntos borrar limpiar historial fondeo ancla guiñada recolocar',
+              tab: 5,
+            ),
+
+            // DIAGNÓSTICO
+            (
+              title: 'Estado del sistema',
+              section: 'DIAGNÓSTICO · Estado del sistema',
+              keywords: 'diagnostico salud estado signalk servidor ultimo dato sesion escritura conexion',
+              tab: 6,
+            ),
+            (
+              title: 'Modo DEMO y escenarios simulados',
+              section: 'DIAGNÓSTICO · Herramientas',
+              keywords: 'demo simulacion simulado escenario fondeado navegando pruebas datos falsos',
+              tab: 6,
+            ),
+            (
+              title: 'Mostrar u ocultar el modo técnico',
+              section: 'DIAGNÓSTICO · Herramientas',
+              keywords: 'tecnico admin administrador avanzado servidores guardados raspberry paths rutas',
+              tab: 6,
+            ),
+            (
+              title: 'Reconectar Signal K',
+              section: 'DIAGNÓSTICO · Herramientas',
+              keywords: 'reconectar reiniciar conexion signalk servidor',
+              tab: 6,
+            ),
+            (
+              title: 'Copiar diagnóstico JSON',
+              section: 'DIAGNÓSTICO · Herramientas',
+              keywords: 'copiar exportar json soporte informe diagnostico credenciales privacidad',
+              tab: 6,
+            ),
+            (
+              title: 'Último error de la aplicación',
+              section: 'DIAGNÓSTICO · Errores',
+              keywords:
+                  'error fallo crash excepcion borrar depuracion aplicacion',
+              tab: 6,
+            ),
+            (
+              title: 'Eventos recientes',
+              section: 'DIAGNÓSTICO · Eventos recientes',
+              keywords:
+                  'eventos log registro alarmas actividad datos recientes',
+              tab: 6,
+            ),
+            (
+              title: 'Servidores guardados y mapeo técnico',
+              section: 'DIAGNÓSTICO · Modo técnico',
+              keywords: 'tecnico admin servidores barcos guardados energia temperaturas tanques raspberry pi rutas paths mapeo',
+              tab: 6,
+            ),
+          ];
+      String normalize(String value) => value
+          .toLowerCase()
+          .replaceAll('á', 'a')
+          .replaceAll('é', 'e')
+          .replaceAll('í', 'i')
+          .replaceAll('ó', 'o')
+          .replaceAll('ú', 'u')
+          .replaceAll('ü', 'u')
+          .replaceAll('ñ', 'n');
       var query = '';
       final selected = await showDialog<int>(
         context: tabContext,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) {
-            final matches = destinations
-                .where((d) => d.$1.toLowerCase().contains(query.toLowerCase()))
+            final terms = normalize(query)
+                .split(RegExp(r'\s+'))
+                .where((term) => term.isNotEmpty)
                 .toList();
+            final matches = destinations.where((destination) {
+              final searchable = normalize(
+                '${destination.title} ${destination.section} ${destination.keywords}',
+              );
+              return terms.every(searchable.contains);
+            }).toList();
             return AlertDialog(
               title: const Text('Buscar en configuración'),
               content: SizedBox(
                 width: 520,
+                height: math.min(
+                  360,
+                  MediaQuery.sizeOf(dialogContext).height * 0.68,
+                ),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
                   children: [
                     TextField(
-                      controller: controller,
                       autofocus: true,
                       decoration: const InputDecoration(
                         prefixIcon: Icon(Icons.search),
@@ -10977,16 +11306,24 @@ class _DashboardState extends State<Dashboard> {
                       onChanged: (v) => setDialogState(() => query = v.trim()),
                     ),
                     const SizedBox(height: 8),
-                    Flexible(
+                    Expanded(
                       child: ListView(
-                        shrinkWrap: true,
                         children: [
+                          if (matches.isEmpty)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 20),
+                              child: Text(
+                                'No hay ningún ajuste que coincida.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: cMuted),
+                              ),
+                            ),
                           for (final item in matches)
                             ListTile(
-                              title: Text(item.$1.split(',').first),
-                              subtitle: Text(item.$1),
+                              title: Text(item.title),
+                              subtitle: Text(item.section),
                               trailing: const Icon(Icons.chevron_right),
-                              onTap: () => Navigator.pop(context, item.$2),
+                              onTap: () => Navigator.pop(context, item.tab),
                             ),
                         ],
                       ),
@@ -10998,7 +11335,6 @@ class _DashboardState extends State<Dashboard> {
           },
         ),
       );
-      controller.dispose();
       if (selected != null && tabContext.mounted) {
         DefaultTabController.of(tabContext).animateTo(selected);
       }

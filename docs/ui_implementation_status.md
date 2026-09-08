@@ -5,7 +5,7 @@ Este archivo evita dejar recomendaciones a medias durante la revisión previa a 
 Estados: `HECHO`, `PARCIAL`, `PENDIENTE`, `EXCLUIDO`, `NO APLICA`.
 
 - UI-01 HECHO — VMG mantiene la misma referencia de agua o fondo.
-- UI-02 HECHO — Motor ya no se fuerza cuando no está activo.
+- UI-02 HECHO — Motor se muestra según CFG (`Ninguno`, `Simple` o `Completo`) y no se oculta por falta de telemetría.
 - UI-03 HECHO — NAV expone todas las páginas clásicas.
 - UI-04 HECHO — Nombre persistente de subpantalla NAV/VNT.
 - UI-05 HECHO — Caducidad individual también en PWR/TMP/TNK.
@@ -22,13 +22,13 @@ Estados: `HECHO`, `PARCIAL`, `PENDIENTE`, `EXCLUIDO`, `NO APLICA`.
 - UI-16 HECHO — Tiempo restante solo tras corriente estable y capacidad configurada.
 - UI-17 HECHO — TMP ordenada por riesgo.
 - UI-18 HECHO — Cuadro eléctrico sustituye a Sonoff.
-- UI-19 HECHO — Etiquetas y ubicaciones configurables de neveras.
+- UI-19 HECHO — Etiquetas y ubicaciones configurables; Nevera 1 y Nevera 2 comparten fila.
 - UI-20 HECHO — Tendencias y extremos TMP locales de 24 h.
 - UI-21 HECHO — Umbrales configurables por familia de temperatura.
 - UI-22 HECHO — Rejilla TMP adapta la última fila.
 - UI-23 HECHO — Paginación TNK adaptada al ancho disponible.
 - UI-24 HECHO — Umbrales por tanque con validación.
-- UI-25 HECHO — Capacidad configurada/sin calibrar y caducidad por tanque.
+- UI-25 HECHO — Capacidad configurada/sin calibrar, caducidad por tanque y presentación LPG configurable sin alterar el path de Venus.
 - UI-26 HECHO — Diésel.
 - UI-27 HECHO — Desequilibrio también en litros.
 - UI-28 HECHO — Tendencia barométrica de 3 horas.
@@ -46,7 +46,7 @@ Estados: `HECHO`, `PARCIAL`, `PENDIENTE`, `EXCLUIDO`, `NO APLICA`.
 - UI-40 HECHO — Slider MAR por horas discretas.
 - UI-41 HECHO — Convención de dirección explícita.
 - UI-42 HECHO — Estado Douglas.
-- UI-43 HECHO — Mar de viento separado del swell mediante campos propios de Open-Meteo.
+- UI-43 HECHO — MAR usa una rejilla compacta 2×3; mar de viento y swell aparecen separados mediante campos propios de Open-Meteo.
 - UI-44 HECHO — Actualización y proveedor MAR visibles.
 - UI-45 HECHO — Estado de seguridad ANC persistente.
 - UI-46 HECHO — Presets Guardia/Análisis/Limpio.

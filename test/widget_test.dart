@@ -32,6 +32,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('CFG search finds concrete DEMO and motor settings', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.drag(find.text('VNT'), const Offset(-900, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CFG'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Buscar ajuste'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'DEMO');
+    await tester.pump();
+    expect(find.text('Modo DEMO y escenarios simulados'), findsOneWidget);
+    await tester.tap(find.text('Modo DEMO y escenarios simulados'));
+    await tester.pumpAndSettle();
+    expect(find.text('Modo DEMO'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Buscar ajuste'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'motor completo');
+    await tester.pump();
+    expect(find.text('Pantalla del motor'), findsOneWidget);
+    await tester.tap(find.text('Pantalla del motor'));
+    await tester.pumpAndSettle();
+    expect(find.text('ESTILO MOTOR'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('metric cards open zoom', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
