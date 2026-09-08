@@ -203,6 +203,12 @@ class _DashboardState extends State<Dashboard> {
   final signalK = SignalKModel();
   final weather = WeatherModel();
   final settings = SettingsModel();
+  // Source timestamps for slower, configurable Signal K paths. Navigation,
+  // wind and engine keep dedicated timestamps in SignalKModel; this map
+  // gives PWR/TMP/TNK the same honest stale-data treatment.
+  final Map<String, DateTime> _pathUpdatedAt = {};
+  final Map<String, _SlowValueHistory> _slowValueHistories = {};
+  final _houseCurrentStability = _RecentCurrentStability();
   late final _ntfyPush = _NtfyPushService(this);
   late final _closestApproach = _ClosestApproachService(this);
   final _pageController = PageController();
@@ -256,6 +262,7 @@ class _DashboardState extends State<Dashboard> {
   bool get _isCompactPremium => MediaQuery.sizeOf(context).height < 500;
 
   double _marineHorizonHours = 1;
+  bool _forecastThreeDays = false;
   // Each engine gauge goes stale independently. RPM uses a tight 2 s window
   // because EEC1 arrives frequently and drives running/contact detection;
   // slow telemetry and the 3 s alarm heartbeat get 6 s so a normal 2–3 s
@@ -336,11 +343,6 @@ class _DashboardState extends State<Dashboard> {
           ) ==
           true;
 
-  // TEMPORARY: forces the Premium Motor screen into the carousel even with
-  // no engine running, so the simulated panel (SIMUL switch, no real PGNs
-  // yet — see widgets/motor_premium_panel.dart) can be tested. Remove once
-  // that screen reads real engine telemetry.
-  static const _kMotorPanelAlwaysVisible = true;
   bool loadingWeather = false;
   // Manual pick from the PRON map picker overrides the boat's own GPS position
   // for weather queries only — null means "use signalK's position" (default).
@@ -367,6 +369,8 @@ class _DashboardState extends State<Dashboard> {
   TextEditingController? _archiveBucketController;
   TextEditingController? _influxHostController;
   TextEditingController? _influxOrgController;
+  bool _settingsConnectionDirty = false;
+  bool _settingsHistoryDirty = false;
   TextEditingController? _influxTokenController;
 
   // AIS (MAP > swipe down) — subscribed on demand, see _subscribeAis/_unsubscribeAis
@@ -2215,7 +2219,7 @@ class _DashboardState extends State<Dashboard> {
                               _muteAllActiveAlarms();
                               setSt(() {});
                             },
-                            child: const Text('Silenciar todo'),
+                            child: const Text('Reconocer todas'),
                           ),
                         IconButton(
                           icon: const Icon(Icons.close, color: cMuted),
@@ -2223,6 +2227,14 @@ class _DashboardState extends State<Dashboard> {
                         ),
                       ],
                     ),
+                    if (alarms.isNotEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          'Reconocer detiene el aviso sonoro de esta incidencia hasta que desaparezca. El sonido general se configura en CFG · Alarmas.',
+                          style: TextStyle(color: cMuted, fontSize: 11),
+                        ),
+                      ),
                     if (alarms.isEmpty)
                       const Padding(
                         padding: EdgeInsets.symmetric(vertical: 12),
@@ -2261,7 +2273,7 @@ class _DashboardState extends State<Dashboard> {
                                         _muteAlarm(a.key);
                                         setSt(() {});
                                       },
-                                      child: const Text('Silenciar'),
+                                      child: const Text('Reconocer'),
                                     ),
                                   if (a.sound && a.muted)
                                     TextButton(
@@ -2269,7 +2281,9 @@ class _DashboardState extends State<Dashboard> {
                                         _unmuteAlarm(a.key);
                                         setSt(() {});
                                       },
-                                      child: const Text('Reactivar sonido'),
+                                      child: const Text(
+                                        'Reconocida · reactivar',
+                                      ),
                                     ),
                                 ],
                               ),
@@ -2300,7 +2314,7 @@ class _DashboardState extends State<Dashboard> {
   final _twsHistory = _WindHistory();
   final _awsHistory = _WindHistory();
   final _pressureHistory = PressureHistory();
-  bool _pressureTrendFromInflux = false;
+  String _pressureTrendSource = 'en vivo';
   bool _loadingPressureTrend = false;
   final _depthTrend = _DepthTrendTracker();
   // Same top-down artwork/loader as the AIS radar (ais_view.dart), reused
@@ -2642,6 +2656,7 @@ class _DashboardState extends State<Dashboard> {
         ? prefs.getBool('gpsFallbackConsent')
         : settings.gpsFallbackConsent;
     settings.keepAwake = prefs.getBool('keepAwake') ?? settings.keepAwake;
+    _windPageIndex = (prefs.getInt('windPageIndex') ?? 0).clamp(0, 1);
     settings.brightnessMode =
         prefs.getString('brightnessMode') ??
         (kIsWeb ? 'dia' : settings.brightnessMode);
@@ -2902,7 +2917,7 @@ class _DashboardState extends State<Dashboard> {
     unawaited(_refreshPressureTrendFromInflux());
   }
 
-  static const _settingsSchemaVersion = 1;
+  static const _settingsSchemaVersion = 2;
 
   Future<void> _migrateAndValidateSettings(SharedPreferences prefs) async {
     final previousVersion = prefs.getInt('settingsSchemaVersion') ?? 0;
@@ -2932,6 +2947,12 @@ class _DashboardState extends State<Dashboard> {
         .clamp(3, 2000)
         .toDouble();
     settings.ntfyMinIntervalSec = settings.ntfyMinIntervalSec.clamp(10, 86400);
+    if (previousVersion < 2) {
+      for (final tank in settings.sensorConfig.tanks) {
+        if (tank.groupLabel == 'Fuel 1') tank.groupLabel = 'Diésel 1';
+        if (tank.groupLabel == 'Fuel 2') tank.groupLabel = 'Diésel 2';
+      }
+    }
     if (previousVersion < _settingsSchemaVersion) {
       await prefs.setInt('settingsSchemaVersion', _settingsSchemaVersion);
       await _saveSettings();
@@ -3985,6 +4006,23 @@ class _DashboardState extends State<Dashboard> {
           // device's own computed display metrics (see above) always do.
         }
         if (isSelf) {
+          if (item['value'] != null) {
+            _pathUpdatedAt[path] = dataTime ?? DateTime.now();
+            if (path.endsWith('.temperature')) {
+              final rawValue = _num(item['value']);
+              if (rawValue != null) {
+                final celsius = rawValue > 150 ? rawValue - 273.15 : rawValue;
+                _slowValueHistories
+                    .putIfAbsent(path, _SlowValueHistory.new)
+                    .add(celsius, dataTime);
+              }
+            }
+            if (path ==
+                'electrical.batteries.${settings.sensorConfig.batteryHouseId}.current') {
+              final amps = _num(item['value']);
+              if (amps != null) _houseCurrentStability.add(amps, dataTime);
+            }
+          }
           changed = _routeValue(path, item['value'], dataTime) || changed;
         } else if (_aisSubscribed) {
           _routeAisValue(context, path, item['value'], dataTime);
@@ -4304,8 +4342,11 @@ class _DashboardState extends State<Dashboard> {
       case 'environment.outside.humidity':
         signalK.outsideHumidity = n == null ? null : n * 100;
       case 'environment.outside.pressure':
-        // Signal K uses Pa; every pressure label/trend in this app uses hPa.
-        signalK.outsidePressureHpa = n == null ? null : n / 100;
+        // Signal K uses Pa; the marine UI displays the equivalent mbar.
+        // Via normalizePressureHpa rather than a bare /100, because not
+        // every source actually honours the Pa unit it declares — see
+        // that function's own doc comment.
+        signalK.outsidePressureHpa = normalizePressureHpa(n);
         _pressureHistory.add(signalK.outsidePressureHpa);
       case 'environment.interior.temperature':
         signalK.indoorTempK = n;
@@ -4975,12 +5016,10 @@ class _DashboardState extends State<Dashboard> {
   }
 
   Future<void> _refreshPressureTrendFromInflux() async {
-    if (_loadingPressureTrend || settings.demoMode) {
-      return;
-    }
+    if (_loadingPressureTrend) return;
     _loadingPressureTrend = true;
     try {
-      final points = await influxQuery(
+      Future<List<GraphPoint>> fromInflux() => influxQuery(
         host: settings.effectiveInfluxHost,
         org: settings.influxOrg,
         token: settings.influxToken,
@@ -4989,15 +5028,55 @@ class _DashboardState extends State<Dashboard> {
         aggEvery: '10m',
         bucket: settings.influxBucket,
       );
+      Future<List<GraphPoint>> fromSignalK() => skHistoryQuery(
+        host: settings.host,
+        port: settings.port,
+        authBase64: settings.authBase64,
+        def: mPressure,
+        range: const Duration(hours: 24),
+        resolution: const Duration(minutes: 10),
+      );
+      late List<GraphPoint> points;
+      late String source;
+      if (settings.demoMode) {
+        points = demoGraphSeries(mPressure, '-24h', '10m');
+        source = 'histórico demo';
+      } else if (settings.historySource == 'sk') {
+        points = await fromSignalK();
+        source = 'histórico Signal K';
+      } else if (settings.historySource == 'influx') {
+        points = await fromInflux();
+        source = 'histórico InfluxDB';
+      } else {
+        try {
+          points = await fromInflux();
+          if (points.length < 2) throw StateError('Histórico vacío');
+          source = 'histórico InfluxDB';
+        } catch (_) {
+          points = await fromSignalK();
+          source = 'histórico Signal K';
+        }
+      }
       if (!mounted) return;
       if (points.length >= 2) {
         setState(() {
-          _pressureHistory.replaceWithGraphPoints(points);
-          _pressureTrendFromInflux = true;
+          // Same unit coercion as the live path: mPressure's 0.01 scale
+          // assumes the series was stored in Pa, which isn't true on a
+          // boat whose source publishes hPa (see normalizePressureHpa).
+          // Without this the card's history sat around 10 while the live
+          // reading showed ~1010.
+          _pressureHistory.replaceWithGraphPoints([
+            for (final p in points)
+              GraphPoint(
+                time: p.time,
+                value: normalizePressureHpa(p.value) ?? p.value,
+              ),
+          ]);
+          _pressureTrendSource = source;
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _pressureTrendFromInflux = false);
+      if (mounted) setState(() => _pressureTrendSource = 'en vivo');
     } finally {
       _loadingPressureTrend = false;
     }
@@ -5108,8 +5187,8 @@ class _DashboardState extends State<Dashboard> {
       final forecastUri = Uri.https('api.open-meteo.com', '/v1/forecast', {
         'latitude': lat.toStringAsFixed(5),
         'longitude': lon.toStringAsFixed(5),
-        'current': 'temperature_2m,apparent_temperature,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,relative_humidity_2m',
-        'hourly': 'temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m',
+        'current': 'temperature_2m,apparent_temperature,precipitation,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,relative_humidity_2m',
+        'hourly': 'temperature_2m,precipitation,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m',
         'timezone': 'GMT',
         'timeformat': 'unixtime',
         'wind_speed_unit': 'kn',
@@ -5118,8 +5197,8 @@ class _DashboardState extends State<Dashboard> {
       final marineUri = Uri.https('marine-api.open-meteo.com', '/v1/marine', {
         'latitude': lat.toStringAsFixed(5),
         'longitude': lon.toStringAsFixed(5),
-        'current': 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction',
-        'hourly': 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction',
+        'current': 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_direction,wind_wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction',
+        'hourly': 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_direction,wind_wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction',
         'timezone': 'GMT',
         'timeformat': 'unixtime',
         'forecast_hours': '72',
@@ -5168,7 +5247,6 @@ class _DashboardState extends State<Dashboard> {
       if (mounted) {
         setState(() {
           weather.error = _weatherError(e);
-          weather.updated ??= DateTime.now();
         });
       }
     } finally {
@@ -5326,7 +5404,7 @@ class _DashboardState extends State<Dashboard> {
     final now = DateTime.now().toUtc();
     final end = now.add(const Duration(days: 3));
     final out = <ForecastPoint>[];
-    for (var t = now; t.isBefore(end); t = t.add(const Duration(hours: 3))) {
+    for (var t = now; t.isBefore(end); t = t.add(const Duration(hours: 1))) {
       final idx = _closestIndex(times, t);
       if (idx >= 0) out.add(_forecastFromHourly(hourly, idx));
     }
@@ -5337,6 +5415,7 @@ class _DashboardState extends State<Dashboard> {
     time: _epoch(map['time']),
     tempC: _num(map['temperature_2m']),
     rainPct: _num(map['precipitation_probability']),
+    rainMm: _num(map['precipitation']),
     windKn: _num(map['wind_speed_10m']),
     gustKn: _num(map['wind_gusts_10m']),
     windDirDeg: _num(map['wind_direction_10m']),
@@ -5348,6 +5427,7 @@ class _DashboardState extends State<Dashboard> {
         time: _epoch((hourly['time'] as List)[idx]),
         tempC: _at(hourly, 'temperature_2m', idx),
         rainPct: _at(hourly, 'precipitation_probability', idx),
+        rainMm: _at(hourly, 'precipitation', idx),
         windKn: _at(hourly, 'wind_speed_10m', idx),
         gustKn: _at(hourly, 'wind_gusts_10m', idx),
         windDirDeg: _at(hourly, 'wind_direction_10m', idx),
@@ -5380,6 +5460,9 @@ class _DashboardState extends State<Dashboard> {
     swellM: _num(map['swell_wave_height']),
     swellDir: _num(map['swell_wave_direction']),
     swellPeriod: _num(map['swell_wave_period']),
+    windWaveM: _num(map['wind_wave_height']),
+    windWaveDir: _num(map['wind_wave_direction']),
+    windWavePeriod: _num(map['wind_wave_period']),
     seaTempC: _num(map['sea_surface_temperature']),
     currentKmh: _num(map['ocean_current_velocity']),
     currentDir: _num(map['ocean_current_direction']),
@@ -5394,6 +5477,9 @@ class _DashboardState extends State<Dashboard> {
         swellM: _at(hourly, 'swell_wave_height', idx),
         swellDir: _at(hourly, 'swell_wave_direction', idx),
         swellPeriod: _at(hourly, 'swell_wave_period', idx),
+        windWaveM: _at(hourly, 'wind_wave_height', idx),
+        windWaveDir: _at(hourly, 'wind_wave_direction', idx),
+        windWavePeriod: _at(hourly, 'wind_wave_period', idx),
         seaTempC: _at(hourly, 'sea_surface_temperature', idx),
         currentKmh: _at(hourly, 'ocean_current_velocity', idx),
         currentDir: _at(hourly, 'ocean_current_direction', idx),
@@ -5825,6 +5911,12 @@ class _DashboardState extends State<Dashboard> {
   Timer? _windToastTimer;
   final _windScrollController = ScrollController();
 
+  void _persistWindPageIndex() {
+    SharedPreferences.getInstance().then(
+      (prefs) => prefs.setInt('windPageIndex', _windPageIndex),
+    );
+  }
+
   void _flashWindToast(String label) {
     _windToastTimer?.cancel();
     setState(() => _windToast = label);
@@ -5842,14 +5934,20 @@ class _DashboardState extends State<Dashboard> {
       final v => normalize360(v),
     };
     final twdShiftTrail = _twdShiftHistory.trail();
+    final canUseCogForWind = (_freshSog ?? 0) > 2;
+    final trueWindReference =
+        _freshHeading ?? (canUseCogForWind ? _freshCog : null);
+    final derivedTwa = _dTwa == null
+        ? relativeWindAngle(_dTwd, trueWindReference)
+        : null;
     final pages = <Widget>[
-      _windClassicGrid(),
       PremiumWindPanel(
         awaDeg: _freshWind(_dAwa, signalK.awaUpdate),
         twaDeg: _freshWind(
-          _dTwa ?? relativeWindAngle(_dTwd, _freshHeading ?? _freshCog),
+          _dTwa ?? derivedTwa,
           _dTwa != null ? signalK.twaUpdate : signalK.twdUpdate,
         ),
+        twaDerived: _dTwa == null && derivedTwa != null,
         awsKn: _freshWind(_dAws, signalK.awsUpdate),
         twsKn: _freshWind(_dTws, signalK.twsUpdate),
         awsGustKn: _awsHistory.statisticalGustWithAge()?.value,
@@ -5861,8 +5959,9 @@ class _DashboardState extends State<Dashboard> {
         stwKn: _freshStw,
         shipIcon: _shipIcon,
       ),
+      _windClassicGrid(),
     ];
-    const pageLabels = ['TÉCNICA', 'CRUCERO'];
+    const pageLabels = ['CRUCERO', 'TÉCNICA'];
     final totalPages = pages.length;
     if (_windPageIndex >= totalPages) _windPageIndex = 0;
 
@@ -5889,6 +5988,7 @@ class _DashboardState extends State<Dashboard> {
                       ? (_windPageIndex + 1) % totalPages
                       : (_windPageIndex - 1 + totalPages) % totalPages;
                 });
+                _persistWindPageIndex();
                 _flashWindToast(pageLabels[_windPageIndex]);
               }
             }
@@ -5918,9 +6018,11 @@ class _DashboardState extends State<Dashboard> {
                 child: _NavPageIndicator(
                   total: totalPages,
                   current: _windPageIndex,
+                  label: pageLabels[_windPageIndex],
                   onDotTap: (i) {
                     if (i == _windPageIndex) return;
                     setState(() => _windPageIndex = i);
+                    _persistWindPageIndex();
                     _flashWindToast(pageLabels[i]);
                   },
                 ),
@@ -6012,20 +6114,11 @@ class _DashboardState extends State<Dashboard> {
     final showClassicPages =
         settings.navLayoutMode != 'premium' || !premiumEligible;
 
-    // Vela is always available (the default/fallback); Motor and Fondeado
-    // only join the swipeable set while they're actually relevant, so a
-    // screen for a context you're not in never shows up empty.
-    //
-    // TEMPORARY: Motor has no real RPM/alarm telemetry yet (see
-    // widgets/motor_premium_panel.dart), so it's forced visible here to be
-    // able to test the simulated panel. Drop `_kMotorPanelAlwaysVisible`
-    // once that screen reads real engine data and _engineRunning alone
-    // should gate it again. `settings.motorPanelEnabled` (CFG > Pantalla >
-    // ESTILO MOTOR > Ninguno) takes precedence over both — a boat with no
-    // engine telemetry at all can drop the screen entirely.
-    final showMotorPage =
-        settings.motorPanelEnabled &&
-        (_engineRunning || _kMotorPanelAlwaysVisible);
+    // Motor is an explicit display preference, not a telemetry detector.
+    // If the user selects Simple or Completo in CFG, keep the page in the
+    // carousel even with the contact off or missing data: the empty/stale
+    // instruments are themselves useful diagnostics. Only "Ninguno" hides it.
+    final showMotorPage = settings.motorPanelEnabled;
     // settings.anchorConfig.armed, NOT signalK.anchorArmed — the latter is
     // fed only by whatever a foreign source (hoekens etc.) is reporting on
     // navigation.anchor.state (see _onSignalKMessage's routing), which has
@@ -6043,11 +6136,6 @@ class _DashboardState extends State<Dashboard> {
       if (settings.anchorConfig.armed) 'Fondeado',
     ];
 
-    // Exactly two classic pages, fixed: "Clásica 1" is your selected grid,
-    // "Clásica 2" is the first page of everything else. Cards beyond that
-    // first overflow page simply don't appear in the swipe cycle — pick
-    // them into Clásica 1 if you want them on screen.
-    final classica2 = libraryPages.isEmpty ? null : libraryPages.first;
     final pages = <Widget>[
       if (premiumEligible) ...premiumScreens,
       if (showClassicPages)
@@ -6058,26 +6146,28 @@ class _DashboardState extends State<Dashboard> {
               _navMetricCard(selected[i], i),
           ],
         ),
-      if (showClassicPages && classica2 != null)
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          child: _grid3x2(
-            columns: settings.navGridColumns,
-            children: [
-              for (var i = 0; i < classica2.length; i++)
-                _navMetricCard(
-                  classica2[i],
-                  selectedIds.length + i,
-                  selectable: false,
-                ),
-            ],
+      if (showClassicPages)
+        for (var pageIndex = 0; pageIndex < libraryPages.length; pageIndex++)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: _grid3x2(
+              columns: settings.navGridColumns,
+              children: [
+                for (var i = 0; i < libraryPages[pageIndex].length; i++)
+                  _navMetricCard(
+                    libraryPages[pageIndex][i],
+                    selectedIds.length + pageIndex * capacity + i,
+                    selectable: false,
+                  ),
+              ],
+            ),
           ),
-        ),
     ];
     final pageLabels = <String>[
       if (premiumEligible) ...premiumLabels,
       if (showClassicPages) 'Clásica 1',
-      if (showClassicPages && classica2 != null) 'Clásica 2',
+      if (showClassicPages)
+        for (var i = 0; i < libraryPages.length; i++) 'Clásica ${i + 2}',
     ];
 
     final totalPages = pages.length;
@@ -6168,6 +6258,9 @@ class _DashboardState extends State<Dashboard> {
                 child: _NavPageIndicator(
                   total: totalPages,
                   current: _navPageIndex,
+                  label: _navPageIndex < pageLabels.length
+                      ? pageLabels[_navPageIndex]
+                      : null,
                   onDotTap: (i) {
                     if (i == _navPageIndex) return;
                     setState(() => _navPageIndex = i);
@@ -6578,9 +6671,18 @@ class _DashboardState extends State<Dashboard> {
         );
       case 'vmgWind':
         final twaForVmg = _freshWind(_dTwa, signalK.twaUpdate);
-        final speedForVmg = stw ?? sog;
-        final vmgWind = (twaForVmg != null && speedForVmg != null)
-            ? speedForVmg * math.cos(twaForVmg * math.pi / 180)
+        final twdForVmg = _freshWind(_dTwd, signalK.twdUpdate);
+        final cogForVmg = _freshCog;
+        final usesWaterReference = stw != null && twaForVmg != null;
+        // Keep speed and angle in the same reference frame. With STW use
+        // TWA; the fallback uses SOG and the ground angle TWD-COG.
+        final groundWindAngle = twdForVmg != null && cogForVmg != null
+            ? normalizeRelativeAngle(twdForVmg - cogForVmg)
+            : null;
+        final vmgWind = usesWaterReference
+            ? stw * math.cos(twaForVmg * math.pi / 180)
+            : (sog != null && groundWindAngle != null)
+            ? sog * math.cos(groundWindAngle * math.pi / 180)
             : null;
         // Point of sail is named off AWA, not TWA — falls back to TWA only
         // if AWA specifically isn't available, so the label doesn't just
@@ -6591,7 +6693,11 @@ class _DashboardState extends State<Dashboard> {
           title: 'VMG viento',
           value: fmt(vmgWind, 1, ''),
           unit: 'kt',
-          subtitle: vmgWind == null ? 'Sin viento' : _pointOfSail(awaForVmg!),
+          subtitle: vmgWind == null
+              ? 'Sin viento'
+              : usesWaterReference && awaForVmg != null
+              ? _pointOfSail(awaForVmg)
+              : 'Sobre fondo',
           color: vmgWind == null ? cMuted : cGreen,
         );
       case 'vmgRoute':
@@ -6887,7 +6993,11 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Widget _grid3x2({required List<Widget> children, int columns = 3}) {
+  Widget _grid3x2({
+    required List<Widget> children,
+    int columns = 3,
+    bool fillLastRow = false,
+  }) {
     const gap = 8.0;
     final rows = <Widget>[];
     for (var i = 0; i < children.length; i += columns) {
@@ -6896,7 +7006,11 @@ class _DashboardState extends State<Dashboard> {
         Expanded(
           child: Row(
             children: [
-              for (var j = 0; j < columns; j++) ...[
+              for (
+                var j = 0;
+                j < (fillLastRow ? slice.length : columns);
+                j++
+              ) ...[
                 if (j > 0) const SizedBox(width: gap),
                 Expanded(
                   child: j < slice.length ? slice[j] : const SizedBox.shrink(),
@@ -8613,6 +8727,36 @@ class _DashboardState extends State<Dashboard> {
     color: color,
   );
 
+  String _staleSuffix(
+    String path, {
+    Duration staleAfter = const Duration(seconds: 15),
+  }) {
+    if (settings.demoMode) return '';
+    final updated = _pathUpdatedAt[path];
+    if (updated == null) return ' · sin actualizar';
+    final age = DateTime.now().difference(updated);
+    if (age <= staleAfter) return '';
+    final text = age.inMinutes < 1
+        ? '${age.inSeconds}s'
+        : age.inHours < 1
+        ? '${age.inMinutes}min'
+        : '${age.inHours}h';
+    return ' · ANTIGUO $text';
+  }
+
+  String _slowSensorSubtitle(
+    String path, {
+    String prefix = '',
+    Duration staleAfter = const Duration(minutes: 5),
+  }) {
+    final stats = _slowValueHistories[path]?.summary() ?? '';
+    return [
+      if (prefix.isNotEmpty) prefix,
+      if (stats.isNotEmpty) stats,
+      _staleSuffix(path, staleAfter: staleAfter).replaceFirst(' · ', ''),
+    ].where((part) => part.isNotEmpty).join(' · ');
+  }
+
   MetricDef? get _mFridge1 {
     final p = settings.sensorConfig.fridge1Path;
     return (p == null || p.isEmpty)
@@ -8628,6 +8772,13 @@ class _DashboardState extends State<Dashboard> {
   }
 
   Widget _powerPage() {
+    final houseBase =
+        'electrical.batteries.${settings.sensorConfig.batteryHouseId}';
+    final houseSocPath = '$houseBase.capacity.stateOfCharge';
+    final houseCurrentPath = '$houseBase.current';
+    final startPath =
+        'electrical.batteries.${settings.sensorConfig.batteryStartId}.voltage';
+    const bowPath = 'electrical.batteries.bowthruster.voltage';
     final houseColor = socColor(signalK.houseSoc);
     final currentColorValue = currentColor(signalK.houseA);
     final startColor = voltageColor12V(signalK.startV);
@@ -8635,6 +8786,23 @@ class _DashboardState extends State<Dashboard> {
     final currentPrefix = signalK.houseA != null && signalK.houseA! >= 0
         ? '+'
         : '';
+    final stableCurrent = _houseCurrentStability.stableValue;
+    final configuredAh = settings.sensorConfig.batteryHouseCapacityAh;
+    String? remainingText;
+    if (configuredAh > 0 &&
+        signalK.houseSoc != null &&
+        stableCurrent != null &&
+        stableCurrent.abs() >= 1) {
+      final fraction = stableCurrent >= 0
+          ? (100 - signalK.houseSoc!) / 100
+          : signalK.houseSoc! / 100;
+      final hours = configuredAh * fraction / stableCurrent.abs();
+      if (hours.isFinite && hours > 0 && hours <= 240) {
+        remainingText = stableCurrent >= 0
+            ? 'lleno en ~${hours.toStringAsFixed(hours < 10 ? 1 : 0)} h'
+            : 'autonomía ~${hours.toStringAsFixed(hours < 10 ? 1 : 0)} h';
+      }
+    }
     // Battery temperature moved here from its own TEMP-page card — it's
     // this specific battery's own reading, so it reads more naturally
     // alongside its voltage/current than as an unrelated standalone card.
@@ -8643,7 +8811,8 @@ class _DashboardState extends State<Dashboard> {
         : signalK.houseTempK! - 273.15;
     final batterySubtitle =
         '${fmt(signalK.houseV, 2, ' V')}  $currentPrefix${fmt(signalK.houseA, 1, ' A')}'
-        '${houseTempC == null ? '' : '  ${fmt(houseTempC, 0, '°C')}'}';
+        '${houseTempC == null ? '' : '  ${fmt(houseTempC, 0, '°C')}'}'
+        '${_staleSuffix(houseSocPath)}';
     final dcReferenceWatts = ((signalK.houseV ?? 12.5) * 40).clamp(
       420.0,
       620.0,
@@ -8677,7 +8846,8 @@ class _DashboardState extends State<Dashboard> {
             unit: 'W',
             subtitle: hasSolarPanel2
                 ? 'P1 ${fmt(signalK.solarW, 0, 'W')} · P2 ${fmt(signalK.solarW2, 0, 'W')}'
-                : 'solar',
+                      '${_staleSuffix(settings.sensorConfig.solarPath ?? '')}'
+                : 'solar${_staleSuffix(settings.sensorConfig.solarPath ?? '')}',
             color: cYellow,
             icon: Icons.wb_sunny,
             zoom: _showZoom,
@@ -8723,10 +8893,10 @@ class _DashboardState extends State<Dashboard> {
         Expanded(
           flex: 10,
           child: PowerFlowTile(
-            title: 'DC Loads',
+            title: 'Consumos DC',
             value: fmt(signalK.dcW, 0, ''),
             unit: 'W',
-            subtitle: 'Consumos DC',
+            subtitle: 'salida total${_staleSuffix('electrical.venus.dcPower')}',
             color: cOrange,
             icon: Icons.power,
             zoom: _showZoom,
@@ -8752,9 +8922,11 @@ class _DashboardState extends State<Dashboard> {
                     unit: 'V',
                     // Same move as the house battery — its temperature
                     // used to be a separate TEMP-page card.
-                    subtitle: signalK.bowthrusterTempK == null
-                        ? 'batería proa'
-                        : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}',
+                    subtitle:
+                        (signalK.bowthrusterTempK == null
+                            ? 'batería proa'
+                            : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}') +
+                        _staleSuffix(bowPath),
                     color: bowColor,
                     customIcon: BowThrusterGlyph(color: bowColor),
                     zoom: _showZoom,
@@ -8776,7 +8948,8 @@ class _DashboardState extends State<Dashboard> {
                     title: 'Arranque',
                     value: fmt(signalK.startV, 2, ''),
                     unit: 'V',
-                    subtitle: settings.sensorConfig.batteryStartId,
+                    subtitle:
+                        '${settings.sensorConfig.batteryStartId}${_staleSuffix(startPath)}',
                     color: startColor,
                     customIcon: StarterMotorGlyph(color: startColor),
                     zoom: _showZoom,
@@ -8798,11 +8971,14 @@ class _DashboardState extends State<Dashboard> {
                     title: 'Corriente servicio',
                     value: fmt(signalK.houseA, 1, ''),
                     unit: 'A',
-                    subtitle: signalK.houseA == null
-                        ? 'sin datos'
-                        : signalK.houseA! >= 0
-                        ? 'cargando batería'
-                        : 'descargando batería',
+                    subtitle:
+                        (signalK.houseA == null
+                            ? 'sin datos'
+                            : signalK.houseA! >= 0
+                            ? 'cargando batería'
+                            : 'descargando batería') +
+                        (remainingText == null ? '' : ' · $remainingText') +
+                        _staleSuffix(houseCurrentPath),
                     color: currentColorValue,
                     icon: Icons.swap_vert,
                     zoom: _showZoom,
@@ -8823,67 +8999,111 @@ class _DashboardState extends State<Dashboard> {
   Widget _tempPage() {
     final cards = <Widget>[
       MetricCard(
-        title: 'T. Mar',
-        value: tempValue(signalK.waterTempK),
-        unit: tempUnit(signalK.waterTempK),
-        color: seaTempColor(signalK.waterTempK),
-        zoom: _showZoom,
-        graphMetrics: const [mSeaTemp],
-      ),
-      MetricCard(
-        title: 'T. Sonoff',
+        title: 'Cuadro eléctrico',
         value: tempValue(signalK.sonoffTempK),
         unit: tempUnit(signalK.sonoffTempK),
-        color: equipTempColor(signalK.sonoffTempK, warnC: 45, alarmC: 60),
+        color: equipTempColor(
+          signalK.sonoffTempK,
+          warnC: settings.sensorConfig.sonoffWarnC,
+          alarmC: settings.sensorConfig.sonoffAlarmC,
+        ),
+        subtitle: _slowSensorSubtitle(
+          'environment.sonoff.temperature',
+          staleAfter: const Duration(minutes: 5),
+        ),
         zoom: _showZoom,
         graphMetrics: const [mSonoffTemp],
       ),
       MetricCard(
-        title: 'T. Fusibles solar',
+        title: 'Fusibles solares',
         value: tempValue(signalK.solarFusesTempK),
         unit: tempUnit(signalK.solarFusesTempK),
-        color: equipTempColor(signalK.solarFusesTempK, warnC: 45, alarmC: 60),
+        color: equipTempColor(
+          signalK.solarFusesTempK,
+          warnC: settings.sensorConfig.solarFusesWarnC,
+          alarmC: settings.sensorConfig.solarFusesAlarmC,
+        ),
+        subtitle: _slowSensorSubtitle(
+          'environment.solar_fuses.temperature',
+          staleAfter: const Duration(minutes: 5),
+        ),
         zoom: _showZoom,
         graphMetrics: const [mSolarFusesTemp],
       ),
+      MetricCard(
+        title: 'T. mar',
+        value: tempValue(signalK.waterTempK),
+        unit: tempUnit(signalK.waterTempK),
+        color: seaTempColor(signalK.waterTempK),
+        subtitle: _slowSensorSubtitle(
+          'environment.water.temperature',
+          staleAfter: const Duration(minutes: 10),
+        ),
+        zoom: _showZoom,
+        graphMetrics: const [mSeaTemp],
+      ),
       if (_mFridge1 != null)
         PowerAuxTile(
-          title: 'T. Nevera 1',
+          title: 'T. ${settings.sensorConfig.fridge1Label}',
           value: tempValue(signalK.fridge1TempK),
           unit: tempUnit(signalK.fridge1TempK) ?? '°C',
-          subtitle: 'tapa',
-          color: fridgeTempColor(signalK.fridge1TempK),
+          subtitle: _slowSensorSubtitle(
+            settings.sensorConfig.fridge1Path ?? '',
+            prefix: settings.sensorConfig.fridge1Location,
+          ),
+          color: fridgeTempColor(
+            signalK.fridge1TempK,
+            warnC: settings.sensorConfig.fridgeWarnC,
+            alarmC: settings.sensorConfig.fridgeAlarmC,
+          ),
           customIcon: FridgeChestGlyph(
-            color: fridgeTempColor(signalK.fridge1TempK),
+            color: fridgeTempColor(
+              signalK.fridge1TempK,
+              warnC: settings.sensorConfig.fridgeWarnC,
+              alarmC: settings.sensorConfig.fridgeAlarmC,
+            ),
           ),
           zoom: _showZoom,
           graphMetrics: [_mFridge1!],
         ),
       if (_mFridge2 != null)
         PowerAuxTile(
-          title: 'T. Nevera 2',
+          title: 'T. ${settings.sensorConfig.fridge2Label}',
           value: tempValue(signalK.fridge2TempK),
           unit: tempUnit(signalK.fridge2TempK) ?? '°C',
-          subtitle: 'puerta',
-          color: fridgeTempColor(signalK.fridge2TempK),
+          subtitle: _slowSensorSubtitle(
+            settings.sensorConfig.fridge2Path ?? '',
+            prefix: settings.sensorConfig.fridge2Location,
+          ),
+          color: fridgeTempColor(
+            signalK.fridge2TempK,
+            warnC: settings.sensorConfig.fridgeWarnC,
+            alarmC: settings.sensorConfig.fridgeAlarmC,
+          ),
           customIcon: FridgeUprightGlyph(
-            color: fridgeTempColor(signalK.fridge2TempK),
+            color: fridgeTempColor(
+              signalK.fridge2TempK,
+              warnC: settings.sensorConfig.fridgeWarnC,
+              alarmC: settings.sensorConfig.fridgeAlarmC,
+            ),
           ),
           zoom: _showZoom,
           graphMetrics: [_mFridge2!],
         ),
     ];
-    return _grid3x2(children: cards);
+    return _grid3x2(children: cards, fillLastRow: true);
   }
 
   // ─── Tank page ──────────────────────────────────────────────────────────────
   static const _tankIcons = {
     'fuel': Icons.local_gas_station,
+    'lpg': Icons.propane_tank_outlined,
     'freshWater': Icons.water_drop_outlined,
     'blackWater': Icons.opacity,
   };
   static const _tankColors = {
     'fuel': Color(0xffb7d122),
+    'lpg': Color(0xffffa726),
     'freshWater': Color(0xff81c6ef),
     'blackWater': Color(0xff7f42ee),
   };
@@ -8892,15 +9112,19 @@ class _DashboardState extends State<Dashboard> {
   // live 2026-09-03). Any type not in this list (shouldn't happen given
   // _tankIcons/_tankColors only know these three) sorts after, in
   // whatever order it was found.
-  static const _tankTypeOrder = ['fuel', 'freshWater', 'blackWater'];
+  static const _tankTypeOrder = ['fuel', 'lpg', 'freshWater', 'blackWater'];
   // Category name shown on a merged card — see _groupedTankTypes below.
-  static const _tankCategoryNames = {'fuel': 'Fuel', 'freshWater': 'Agua'};
+  static const _tankCategoryNames = {
+    'fuel': 'Diésel',
+    'lpg': 'LPG',
+    'freshWater': 'Agua',
+  };
   // Which types get merged into a single aggregate card. blackWater is
   // deliberately excluded — combining two separate holding tanks into one
   // percentage would hide which one is actually near full, so each keeps
   // its own card. "los tanques se tienen que agrupar por categorias
   // (fuel, agua) excepto los de blackwater" (reported live 2026-09-04).
-  static const _groupedTankTypes = {'fuel', 'freshWater'};
+  static const _groupedTankTypes = {'fuel', 'lpg', 'freshWater'};
 
   List<TankViewData> get tankOverview {
     final groups = <String, List<TankSlot>>{};
@@ -8949,8 +9173,19 @@ class _DashboardState extends State<Dashboard> {
         label: slot.groupLabel,
         percent: signalK.tanks[slot.tankKey],
         capacityL: slot.capacityL,
+        stale: _pathIsStale(slot.skPath, const Duration(minutes: 5)),
+        warningPct: slot.warningPct,
+        alarmPct: slot.alarmPct,
       ),
   ];
+
+  bool _pathIsStale(String path, Duration staleAfter) {
+    if (settings.demoMode) return false;
+    final updated = _pathUpdatedAt[path];
+    return updated == null || DateTime.now().difference(updated) > staleAfter;
+  }
+
+  int _tankPageIndex = 0;
 
   List<MetricDef> _tankHistoryMetrics(TankViewData tank) => [
     for (final slot in tank.slots)
@@ -8987,115 +9222,233 @@ class _DashboardState extends State<Dashboard> {
             ((c.maxWidth - sidePadding * 2 + gap) / (minCardWidth + gap))
                 .floor()
                 .clamp(1, 5);
-        final visible = math.min(tanks.length, maxVisible);
-        final available = c.maxWidth - sidePadding * 2 - gap * (visible - 1);
-        final cardW = (available / visible).clamp(minCardWidth, 340.0);
-        return ListView.separated(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(
-            horizontal: sidePadding,
-            vertical: 12,
-          ),
-          itemCount: tanks.length,
-          separatorBuilder: (_, _) => const SizedBox(width: gap),
-          itemBuilder: (context, index) {
-            final tank = tanks[index];
-            return SizedBox(
-              key: ValueKey('tank-card-${tank.name}'),
-              width: cardW,
-              child: TankCard(
-                name: tank.name,
-                value: tank.percent(signalK.tanks),
-                capacityL: tank.capacityL,
-                color: tank.color,
-                icon: tank.icon,
-                flexible: true,
-                segments: _tankSegments(tank),
-                dangerWhenHigh: tank.slots.first.type == 'blackWater',
-                onTap: () => _showTankGroup(tank),
+        final pageCount = (tanks.length / maxVisible).ceil();
+        if (_tankPageIndex >= pageCount) _tankPageIndex = 0;
+        return Column(
+          children: [
+            Expanded(
+              child: PageView.builder(
+                itemCount: pageCount,
+                onPageChanged: (index) =>
+                    setState(() => _tankPageIndex = index),
+                itemBuilder: (context, pageIndex) {
+                  final first = pageIndex * maxVisible;
+                  final pageTanks = tanks.sublist(
+                    first,
+                    math.min(first + maxVisible, tanks.length),
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: sidePadding,
+                      vertical: 12,
+                    ),
+                    child: Row(
+                      children: [
+                        for (
+                          var index = 0;
+                          index < pageTanks.length;
+                          index++
+                        ) ...[
+                          if (index > 0) const SizedBox(width: gap),
+                          Expanded(
+                            child: Builder(
+                              builder: (context) {
+                                final tank = pageTanks[index];
+                                final firstSlot = tank.slots.first;
+                                return Container(
+                                  key: ValueKey('tank-card-${tank.name}'),
+                                  constraints: const BoxConstraints(
+                                    minWidth: minCardWidth,
+                                  ),
+                                  child: TankCard(
+                                    name: tank.name,
+                                    value: tank.percent(signalK.tanks),
+                                    capacityL: tank.capacityL,
+                                    color: tank.color,
+                                    icon: tank.icon,
+                                    flexible: true,
+                                    segments: _tankSegments(tank),
+                                    dangerWhenHigh:
+                                        firstSlot.type == 'blackWater',
+                                    warningPct: firstSlot.warningPct,
+                                    alarmPct: firstSlot.alarmPct,
+                                    stale: tank.slots.every(
+                                      (slot) => _pathIsStale(
+                                        slot.skPath,
+                                        const Duration(minutes: 5),
+                                      ),
+                                    ),
+                                    calibrated: tank.slots.every(
+                                      (slot) => slot.capacityL > 0,
+                                    ),
+                                    onTap: () => _showTankGroup(tank),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                },
               ),
-            );
-          },
+            ),
+            if (pageCount > 1)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (var i = 0; i < pageCount; i++)
+                      Container(
+                        width: i == _tankPageIndex ? 16 : 7,
+                        height: 7,
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        decoration: BoxDecoration(
+                          color: i == _tankPageIndex ? cCyan : cMuted,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
         );
       },
     );
   }
 
   // ─── MET page ───────────────────────────────────────────────────────────────
+  double? _dewPointC(double? temperatureK, double? humidityPct) {
+    if (temperatureK == null || humidityPct == null || humidityPct <= 0) {
+      return null;
+    }
+    final temperatureC = temperatureK - 273.15;
+    const a = 17.62, b = 243.12;
+    final gamma =
+        math.log(humidityPct.clamp(1, 100) / 100) +
+        a * temperatureC / (b + temperatureC);
+    return b * gamma / (a - gamma);
+  }
+
+  String? _humiditySubtitle(double? temperatureK, double? humidityPct) {
+    if (humidityPct == null) return null;
+    final dewPoint = _dewPointC(temperatureK, humidityPct);
+    if (dewPoint == null) return 'HR ${fmt(humidityPct, 0, '%')}';
+    final margin = temperatureK == null
+        ? null
+        : temperatureK - 273.15 - dewPoint;
+    final risk = margin != null && margin < 3 ? ' · CONDENSACIÓN' : '';
+    return 'HR ${fmt(humidityPct, 0, '%')} · rocío ${dewPoint.round()}°$risk';
+  }
+
   Widget _metPage() {
     final forecast = elementAtOrNull(weather.summary, 0);
+    final freshness = _weatherFreshness;
     return Padding(
       padding: const EdgeInsets.all(8),
-      child: Row(
+      child: Column(
         children: [
-          Expanded(
-            flex: 11,
-            child: PressureTrendCard(
-              value: signalK.outsidePressureHpa,
-              history: _pressureHistory,
-              fromInflux: _pressureTrendFromInflux,
-              zoom: _showZoom,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            flex: 18,
-            child: Column(
+          SizedBox(
+            height: 16,
+            child: Row(
               children: [
+                const Icon(Icons.cloud_outlined, size: 14, color: cMuted),
+                const SizedBox(width: 5),
                 Expanded(
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: MetricCard(
-                          title: 'T. exterior',
-                          value: tempNum(signalK.outsideTempK),
-                          unit: '°C',
-                          subtitle: signalK.outsideHumidity != null
-                              ? 'HR ${fmt(signalK.outsideHumidity, 0, '%')}'
-                              : null,
-                          color: cCyan,
-                          zoom: _showZoom,
-                          graphMetrics: const [mOutdoorTemp],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: MetricCard(
-                          title: 'T. interior',
-                          value: tempNum(signalK.indoorTempK),
-                          unit: '°C',
-                          subtitle: signalK.indoorHumidity != null
-                              ? 'HR ${fmt(signalK.indoorHumidity, 0, '%')}'
-                              : null,
-                          color: cCyan,
-                          zoom: _showZoom,
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    'Observación Signal K · previsión Open-Meteo (modelo automático)',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: cMuted, fontSize: 9),
                   ),
                 ),
-                const SizedBox(height: 8),
+                Text(
+                  forecast == null
+                      ? freshness.text
+                      : '${forecast.time.toLocal().hour.toString().padLeft(2, '0')}:00 · ${freshness.text}',
+                  style: TextStyle(
+                    color: freshness.color,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Row(
+              children: [
                 Expanded(
-                  child: Row(
+                  flex: 11,
+                  child: PressureTrendCard(
+                    value: signalK.outsidePressureHpa,
+                    history: _pressureHistory,
+                    source: _pressureTrendSource,
+                    zoom: _showZoom,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 18,
+                  child: Column(
                     children: [
                       Expanded(
-                        child: ModelWindCompassCard(
-                          forecast: forecast,
-                          tws: _freshWind(_dTws, signalK.twsUpdate),
-                          zoom: _showZoom,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: MetricCard(
+                                title: 'T. exterior',
+                                value: tempNum(signalK.outsideTempK),
+                                unit: '°C',
+                                subtitle: _humiditySubtitle(
+                                  signalK.outsideTempK,
+                                  signalK.outsideHumidity,
+                                ),
+                                color: cCyan,
+                                zoom: _showZoom,
+                                graphMetrics: const [mOutdoorTemp],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: MetricCard(
+                                title: 'T. interior',
+                                value: tempNum(signalK.indoorTempK),
+                                unit: '°C',
+                                subtitle: _humiditySubtitle(
+                                  signalK.indoorTempK,
+                                  signalK.indoorHumidity,
+                                ),
+                                color: cCyan,
+                                zoom: _showZoom,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(height: 8),
                       Expanded(
-                        child: MetricCard(
-                          title: 'Lugar',
-                          value: forecast != null
-                              ? fmt(forecast.tempC, 0, '')
-                              : '--',
-                          unit: '°C',
-                          subtitle: weather.error ?? weather.place,
-                          color: weather.error != null ? cOrange : cYellow,
-                          zoom: _showZoom,
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: ModelWindCompassCard(
+                                forecast: forecast,
+                                tws: _freshWind(_dTws, signalK.twsUpdate),
+                                zoom: _showZoom,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ForecastCard(
+                                title: weather.place.isEmpty
+                                    ? 'Previsión local'
+                                    : weather.place,
+                                point: forecast,
+                                zoom: _showZoom,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -9157,10 +9510,47 @@ class _DashboardState extends State<Dashboard> {
     return (temps.reduce(math.min), temps.reduce(math.max));
   }
 
-  static const _forecastHeaderHeight = 34.0;
+  String _forecastSummaryTitle(int index) {
+    if (index == 0) return 'Ahora';
+    final point = elementAtOrNull(weather.summary, index);
+    if (point == null) return '+${index * 24} h';
+    return '${_marineDate(point.time)} · ${point.time.toLocal().hour.toString().padLeft(2, '0')}h';
+  }
+
+  ({String text, Color color}) get _weatherFreshness {
+    if (weather.updated == null) {
+      return (text: 'Sin actualizar', color: cOrange);
+    }
+    final age = DateTime.now().difference(weather.updated!);
+    final ageText = age.inMinutes < 60
+        ? '${age.inMinutes} min'
+        : '${age.inHours} h';
+    if (weather.error != null) {
+      return (text: 'Caché · $ageText', color: cOrange);
+    }
+    return (
+      text: 'Actualizado · $ageText',
+      color: age > const Duration(hours: 2) ? cOrange : cGreen,
+    );
+  }
+
+  static const _forecastHeaderHeight = 48.0;
+
+  List<ForecastPoint> get _visibleHourlyForecast {
+    final now = DateTime.now().toUtc();
+    final end = now.add(Duration(days: _forecastThreeDays ? 3 : 1));
+    return [
+      for (var i = 0; i < weather.hourly.length; i++)
+        if (!weather.hourly[i].time.isBefore(now) &&
+            weather.hourly[i].time.isBefore(end) &&
+            (!_forecastThreeDays || i % 3 == 0))
+          weather.hourly[i],
+    ];
+  }
 
   Widget _forecastPage() {
     if (weather.hourly.isEmpty) return _weatherEmptyState('predicción');
+    final freshness = _weatherFreshness;
     return LayoutBuilder(
       builder: (ctx, c) {
         final summaryHeight = ((c.maxHeight - _forecastHeaderHeight) * 0.42)
@@ -9181,68 +9571,101 @@ class _DashboardState extends State<Dashboard> {
                         style: const TextStyle(color: cMuted, fontSize: 18),
                       ),
                     ),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () => _pickWeatherLocation(context),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 4,
+                    Container(
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: freshness.color.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(7),
+                        border: Border.all(
+                          color: freshness.color.withValues(alpha: 0.35),
                         ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.edit_location_alt_outlined,
-                              size: 15,
-                              color: _manualWeatherLat != null
-                                  ? cOrange
-                                  : cMuted,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Cambiar ubicación',
-                              style: TextStyle(
+                      ),
+                      child: Text(
+                        freshness.text,
+                        style: TextStyle(
+                          color: freshness.color,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      height: 44,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => _pickWeatherLocation(context),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.edit_location_alt_outlined,
+                                size: 15,
                                 color: _manualWeatherLat != null
                                     ? cOrange
                                     : cMuted,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 4),
+                              Text(
+                                'Cambiar ubicación',
+                                style: TextStyle(
+                                  color: _manualWeatherLat != null
+                                      ? cOrange
+                                      : cMuted,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 4),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () => _showModelComparison(context),
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 2,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.stacked_line_chart,
-                              size: 15,
-                              color: cCyan,
-                            ),
-                            SizedBox(width: 5),
-                            Text(
-                              'Comparar modelos',
-                              style: TextStyle(
+                    SizedBox(
+                      height: 44,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => _showModelComparison(context),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.stacked_line_chart,
+                                size: 15,
                                 color: cCyan,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
                               ),
-                            ),
-                          ],
+                              SizedBox(width: 5),
+                              Text(
+                                'Comparar modelos',
+                                style: TextStyle(
+                                  color: cCyan,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
+                    ),
+                    const SizedBox(width: 6),
+                    SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment(value: false, label: Text('24 h')),
+                        ButtonSegment(value: true, label: Text('3 días')),
+                      ],
+                      selected: {_forecastThreeDays},
+                      showSelectedIcon: false,
+                      onSelectionChanged: (v) =>
+                          setState(() => _forecastThreeDays = v.first),
                     ),
                   ],
                 ),
@@ -9255,7 +9678,7 @@ class _DashboardState extends State<Dashboard> {
                   for (var i = 0; i < 3; i++)
                     Expanded(
                       child: ForecastCard(
-                        title: i == 0 ? 'Ahora' : '+${i * 24} h',
+                        title: _forecastSummaryTitle(i),
                         point: elementAtOrNull(weather.summary, i),
                         minMax: _dayMinMax(i),
                         zoom: _showZoom,
@@ -9264,7 +9687,7 @@ class _DashboardState extends State<Dashboard> {
                 ],
               ),
             ),
-            Expanded(child: ForecastStrip(points: weather.hourly)),
+            Expanded(child: ForecastStrip(points: _visibleHourlyForecast)),
           ],
         );
       },
@@ -9339,6 +9762,13 @@ class _DashboardState extends State<Dashboard> {
       swellM: _lerpNullable(lower.swellM, upper.swellM, t),
       swellDir: _lerpDirection(lower.swellDir, upper.swellDir, t),
       swellPeriod: _lerpNullable(lower.swellPeriod, upper.swellPeriod, t),
+      windWaveM: _lerpNullable(lower.windWaveM, upper.windWaveM, t),
+      windWaveDir: _lerpDirection(lower.windWaveDir, upper.windWaveDir, t),
+      windWavePeriod: _lerpNullable(
+        lower.windWavePeriod,
+        upper.windWavePeriod,
+        t,
+      ),
       seaTempC: _lerpNullable(lower.seaTempC, upper.seaTempC, t),
       currentKmh: _lerpNullable(lower.currentKmh, upper.currentKmh, t),
       currentDir: _lerpDirection(lower.currentDir, upper.currentDir, t),
@@ -9351,6 +9781,16 @@ class _DashboardState extends State<Dashboard> {
     if (wave < 1.0) return ('Cómodo', cGreen);
     if (wave < 2.0) return ('Atención', cOrange);
     return ('Duro', cRed);
+  }
+
+  String _douglasState(double? waveM) {
+    if (waveM == null) return 'sin estado de mar';
+    if (waveM < 0.1) return 'Douglas 0 · calma';
+    if (waveM < 0.5) return 'Douglas 2 · marejadilla';
+    if (waveM < 1.25) return 'Douglas 3 · marejada';
+    if (waveM < 2.5) return 'Douglas 4 · fuerte marejada';
+    if (waveM < 4) return 'Douglas 5 · gruesa';
+    return 'Douglas 6+ · muy gruesa';
   }
 
   Widget _marinePage() => weather.marine.isEmpty
@@ -9392,6 +9832,15 @@ class _DashboardState extends State<Dashboard> {
                           ),
                         ),
                         const SizedBox(width: 16),
+                        Text(
+                          'Open-Meteo Marine · ${_weatherFreshness.text}',
+                          style: TextStyle(
+                            color: _weatherFreshness.color,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
                         Expanded(
                           child: SliderTheme(
                             data: SliderTheme.of(context).copyWith(
@@ -9411,6 +9860,7 @@ class _DashboardState extends State<Dashboard> {
                               value: currentHours,
                               min: _marineMinHour,
                               max: maxHour,
+                              divisions: (maxHour - _marineMinHour).round(),
                               label: _marineHorizonLabel(currentHours),
                               onChanged: maxHour <= _marineMinHour
                                   ? null
@@ -9421,16 +9871,24 @@ class _DashboardState extends State<Dashboard> {
                         ),
                         const SizedBox(width: 16),
                         for (final marker in const [1.0, 6.0, 12.0, 24.0])
-                          Padding(
-                            padding: const EdgeInsets.only(left: 10),
-                            child: Text(
-                              _marineHorizonLabel(marker),
-                              style: TextStyle(
-                                color: (currentHours - marker).abs() < 0.5
-                                    ? cCyan
-                                    : cMuted,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w800,
+                          InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: () =>
+                                setState(() => _marineHorizonHours = marker),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 12,
+                              ),
+                              child: Text(
+                                _marineHorizonLabel(marker),
+                                style: TextStyle(
+                                  color: (currentHours - marker).abs() < 0.5
+                                      ? cCyan
+                                      : cMuted,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                ),
                               ),
                             ),
                           ),
@@ -9438,104 +9896,99 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   ),
                   Expanded(
-                    child: Row(
+                    child: Column(
                       children: [
                         Expanded(
-                          flex: 11,
-                          child: MarineGraphicCard(
-                            title: 'Ola significativa',
-                            value: point.waveM,
-                            unit: 'm',
-                            subtitle:
-                                'Periodo ${fmt(point.wavePeriod, 1, ' s')} · ${dir(point.waveDir)}',
-                            color: cCyan,
-                            directionDeg: point.waveDir,
-                            valueWidthFactor: 0.82,
-                            arrowSize: 68,
-                            arrowGap: 18,
-                            arrowLift: 22,
-                            zoom: _showZoom,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          flex: 18,
-                          child: Column(
+                          child: Row(
                             children: [
                               Expanded(
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: MarineGraphicCard(
-                                        title: 'Swell',
-                                        value: point.swellM,
-                                        unit: 'm',
-                                        subtitle:
-                                            '${dir(point.swellDir)} · ${fmt(point.swellPeriod, 1, ' s')}',
-                                        color: const Color(0xff69bdf7),
-                                        directionDeg: point.swellDir,
-                                        valueFontSize: 154,
-                                        valueWidthFactor: 0.72,
-                                        arrowSize: 56,
-                                        arrowGap: 18,
-                                        arrowLift: 20,
-                                        zoom: _showZoom,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: MetricCard(
-                                        title: 'Corriente',
-                                        value: fmt(currentKn, 1, ''),
-                                        unit: 'kt',
-                                        subtitle: dir(point.currentDir),
-                                        color: cGreen,
-                                        zoom: _showZoom,
-                                      ),
-                                    ),
-                                  ],
+                                child: MarineGraphicCard(
+                                  title: 'Ola significativa',
+                                  value: point.waveM,
+                                  unit: 'm',
+                                  subtitle:
+                                      '${fmt(point.wavePeriod, 1, ' s')} · viene de ${dir(point.waveDir)}',
+                                  color: cCyan,
+                                  directionDeg: point.waveDir,
+                                  zoom: _showZoom,
                                 ),
                               ),
-                              const SizedBox(height: 8),
+                              const SizedBox(width: 8),
                               Expanded(
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Builder(
-                                        builder: (_) {
-                                          final liveSeaTempC =
-                                              signalK.waterTempK == null
-                                              ? null
-                                              : signalK.waterTempK! - 273.15;
-                                          return MetricCard(
-                                            title: 'T. mar',
-                                            value: fmt(
-                                              liveSeaTempC ?? point.seaTempC,
-                                              0,
-                                              '',
-                                            ),
-                                            unit: '°C',
-                                            subtitle: liveSeaTempC != null
-                                                ? 'en vivo'
-                                                : 'superficie (pronóstico)',
-                                            color: cCyan,
-                                            zoom: _showZoom,
-                                          );
-                                        },
+                                child: MarineGraphicCard(
+                                  title: 'Mar de viento',
+                                  value: point.windWaveM,
+                                  unit: 'm',
+                                  subtitle:
+                                      '${fmt(point.windWavePeriod, 1, ' s')} · viene de ${dir(point.windWaveDir)}',
+                                  color: const Color(0xff69bdf7),
+                                  directionDeg: point.windWaveDir,
+                                  zoom: _showZoom,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: MarineGraphicCard(
+                                  title: 'Swell',
+                                  value: point.swellM,
+                                  unit: 'm',
+                                  subtitle:
+                                      '${fmt(point.swellPeriod, 1, ' s')} · viene de ${dir(point.swellDir)}',
+                                  color: const Color(0xff9277ff),
+                                  directionDeg: point.swellDir,
+                                  zoom: _showZoom,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: MetricCard(
+                                  title: 'Corriente',
+                                  value: fmt(currentKn, 1, ''),
+                                  unit: 'kt',
+                                  subtitle: 'hacia ${dir(point.currentDir)}',
+                                  color: cGreen,
+                                  zoom: _showZoom,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Builder(
+                                  builder: (_) {
+                                    final liveSeaTempC =
+                                        signalK.waterTempK == null
+                                        ? null
+                                        : signalK.waterTempK! - 273.15;
+                                    return MetricCard(
+                                      title: 'Temperatura del mar',
+                                      value: fmt(
+                                        liveSeaTempC ?? point.seaTempC,
+                                        0,
+                                        '',
                                       ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: MetricCard(
-                                        title: 'Resumen',
-                                        value: comfort,
-                                        subtitle:
-                                            'Ola ${fmt(point.waveM, 1, ' m')} · swell ${fmt(point.swellM, 1, ' m')}',
-                                        color: comfortColor,
-                                        zoom: _showZoom,
-                                      ),
-                                    ),
-                                  ],
+                                      unit: '°C',
+                                      subtitle: liveSeaTempC != null
+                                          ? 'Signal K · en vivo'
+                                          : 'Open-Meteo · superficie',
+                                      color: cCyan,
+                                      zoom: _showZoom,
+                                    );
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: MetricCard(
+                                  title: 'Estado de mar',
+                                  value: comfort,
+                                  subtitle: _douglasState(point.waveM),
+                                  color: comfortColor,
+                                  zoom: _showZoom,
                                 ),
                               ),
                             ],
@@ -9631,8 +10084,7 @@ class _DashboardState extends State<Dashboard> {
       // Server-stored peak first (survives restarts, looks back hours —
       // see _refreshHistoricGust), falling back to this install's own live
       // buffer when there's no history source reachable.
-      gustKn:
-          _historicGust?.kn ?? _awsHistory.statisticalGustWithAge()?.value,
+      gustKn: _historicGust?.kn ?? _awsHistory.statisticalGustWithAge()?.value,
       gustAgeMin:
           _historicGust?.ageMin ??
           _awsHistory.statisticalGustWithAge()?.age.inMinutes,
@@ -9933,6 +10385,8 @@ class _DashboardState extends State<Dashboard> {
           ? settings.influxBucket
           : archiveBucketController.text.trim();
       await _saveSettings();
+      _settingsConnectionDirty = false;
+      _settingsHistoryDirty = false;
       _connectSignalK();
       Timer(const Duration(seconds: 12), _maybePromptDemoMode);
       if (mounted) {
@@ -10076,28 +10530,137 @@ class _DashboardState extends State<Dashboard> {
       );
     }
 
+    Future<void> showSettingsSearch(BuildContext tabContext) async {
+      const destinations = <(String, int)>[
+        ('Signal K, servidor, host, puerto, credenciales', 0),
+        ('Sensores, baterías, solar, motor, neveras, tanques', 1),
+        ('Histórico, InfluxDB, KIP, gráficas, bucket', 2),
+        ('Pantalla, brillo, navegación, AIS, icono del barco', 3),
+        ('Alarmas, sonido, voltaje, temperatura, CPA', 4),
+        ('Fondeo, ancla, cadena, guiñada, garreo', 5),
+        ('Diagnóstico, estado, errores, datos recibidos', 6),
+      ];
+      final controller = TextEditingController();
+      var query = '';
+      final selected = await showDialog<int>(
+        context: tabContext,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            final matches = destinations
+                .where((d) => d.$1.toLowerCase().contains(query.toLowerCase()))
+                .toList();
+            return AlertDialog(
+              title: const Text('Buscar en configuración'),
+              content: SizedBox(
+                width: 520,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: 'Ej.: tanque, histórico, alarma…',
+                      ),
+                      onChanged: (v) => setDialogState(() => query = v.trim()),
+                    ),
+                    const SizedBox(height: 8),
+                    Flexible(
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final item in matches)
+                            ListTile(
+                              title: Text(item.$1.split(',').first),
+                              subtitle: Text(item.$1),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => Navigator.pop(context, item.$2),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+      controller.dispose();
+      if (selected != null && tabContext.mounted) {
+        DefaultTabController.of(tabContext).animateTo(selected);
+      }
+    }
+
     return DefaultTabController(
       length: _adminRevealed ? 8 : 7,
       child: Column(
         children: [
           Material(
             color: cBg,
-            child: TabBar(
-              isScrollable: true,
-              labelColor: cCyan,
-              unselectedLabelColor: cMuted,
-              indicatorColor: cCyan,
-              tabAlignment: TabAlignment.start,
-              tabs: [
-                const Tab(text: 'CONEXIÓN'),
-                const Tab(text: 'SENSORES'),
-                const Tab(text: 'HISTÓRICO'),
-                const Tab(text: 'PANTALLA'),
-                const Tab(text: 'ALARMAS'),
-                const Tab(text: 'FONDEO'),
-                const Tab(text: 'DIAGNÓSTICO'),
-                if (_adminRevealed) const Tab(text: 'TÉCNICO'),
-              ],
+            child: Builder(
+              builder: (tabContext) => Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 4, 8, 0),
+                    child: Row(
+                      children: [
+                        Icon(
+                          signalK.connected ? Icons.check_circle : Icons.error,
+                          size: 14,
+                          color: signalK.connected ? cGreen : cRed,
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            'Signal K ${signalK.connected ? 'conectado' : 'desconectado'} · ${settings.historySource == 'auto' ? 'histórico automático' : settings.historySource} · ${_activeAlarms.length} alarmas',
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: cMuted, fontSize: 10),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Flexible(
+                          child: Text(
+                            'INSTALACIÓN: conexión/sensores/histórico · USO: pantalla/alarmas/fondeo',
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(color: cMuted, fontSize: 9),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TabBar(
+                          isScrollable: true,
+                          labelColor: cCyan,
+                          unselectedLabelColor: cMuted,
+                          indicatorColor: cCyan,
+                          tabAlignment: TabAlignment.start,
+                          tabs: [
+                            const Tab(text: 'CONEXIÓN'),
+                            const Tab(text: 'SENSORES'),
+                            const Tab(text: 'HISTÓRICO'),
+                            const Tab(text: 'PANTALLA'),
+                            const Tab(text: 'ALARMAS'),
+                            const Tab(text: 'FONDEO'),
+                            const Tab(text: 'DIAGNÓSTICO'),
+                            if (_adminRevealed) const Tab(text: 'TÉCNICO'),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Buscar ajuste',
+                        onPressed: () => showSettingsSearch(tabContext),
+                        icon: const Icon(Icons.search, color: cCyan),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
           Expanded(
@@ -10168,19 +10731,39 @@ class _DashboardState extends State<Dashboard> {
                                 gap,
                                 TextField(
                                   controller: hostController,
-                                  decoration: const InputDecoration(
+                                  decoration: InputDecoration(
                                     labelText: 'Host (o IP)',
                                     isDense: true,
+                                    errorText:
+                                        hostController.text.trim().isEmpty
+                                        ? 'El host es obligatorio'
+                                        : null,
                                   ),
-                                  onChanged: (_) => setSt(() {}),
+                                  onChanged: (_) => setSt(
+                                    () => _settingsConnectionDirty = true,
+                                  ),
                                 ),
                                 gap,
                                 TextField(
                                   controller: portController,
                                   keyboardType: TextInputType.number,
-                                  decoration: const InputDecoration(
+                                  decoration: InputDecoration(
                                     labelText: 'Puerto',
                                     isDense: true,
+                                    errorText:
+                                        (int.tryParse(portController.text) ??
+                                                    0) <
+                                                1 ||
+                                            (int.tryParse(
+                                                      portController.text,
+                                                    ) ??
+                                                    65536) >
+                                                65535
+                                        ? 'Debe estar entre 1 y 65535'
+                                        : null,
+                                  ),
+                                  onChanged: (_) => setSt(
+                                    () => _settingsConnectionDirty = true,
                                   ),
                                 ),
                                 gap,
@@ -10191,6 +10774,18 @@ class _DashboardState extends State<Dashboard> {
                                       label: const Text('Guardar y reconectar'),
                                       onPressed: () => doSave(),
                                     ),
+                                    if (_settingsConnectionDirty)
+                                      const Padding(
+                                        padding: EdgeInsets.only(left: 8),
+                                        child: Text(
+                                          'Cambios sin guardar',
+                                          style: TextStyle(
+                                            color: cOrange,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
                                     const SizedBox(width: 8),
                                     OutlinedButton.icon(
                                       icon: const Icon(
@@ -10275,12 +10870,18 @@ class _DashboardState extends State<Dashboard> {
                                 // needs to type its own Signal K IP here, or use the scan below.
                                 TextField(
                                   controller: hostController,
-                                  decoration: const InputDecoration(
+                                  decoration: InputDecoration(
                                     labelText:
                                         'Host (o escribe una IP manualmente)',
                                     isDense: true,
+                                    errorText:
+                                        hostController.text.trim().isEmpty
+                                        ? 'El host es obligatorio'
+                                        : null,
                                   ),
-                                  onChanged: (_) => setSt(() {}),
+                                  onChanged: (_) => setSt(
+                                    () => _settingsConnectionDirty = true,
+                                  ),
                                 ),
                                 gap,
                                 OutlinedButton.icon(
@@ -10392,11 +10993,25 @@ class _DashboardState extends State<Dashboard> {
                                 gap,
                                 TextField(
                                   controller: portController,
-                                  decoration: const InputDecoration(
+                                  decoration: InputDecoration(
                                     labelText: 'Puerto',
                                     isDense: true,
+                                    errorText:
+                                        (int.tryParse(portController.text) ??
+                                                    0) <
+                                                1 ||
+                                            (int.tryParse(
+                                                      portController.text,
+                                                    ) ??
+                                                    65536) >
+                                                65535
+                                        ? 'Debe estar entre 1 y 65535'
+                                        : null,
                                   ),
                                   keyboardType: TextInputType.number,
+                                  onChanged: (_) => setSt(
+                                    () => _settingsConnectionDirty = true,
+                                  ),
                                 ),
                                 TextField(
                                   controller: authController,
@@ -10450,6 +11065,9 @@ class _DashboardState extends State<Dashboard> {
                                     isDense: true,
                                   ),
                                   obscureText: true,
+                                  onChanged: (_) => setSt(
+                                    () => _settingsConnectionDirty = true,
+                                  ),
                                 ),
                                 const SizedBox(height: 10),
                                 Row(
@@ -10730,7 +11348,8 @@ class _DashboardState extends State<Dashboard> {
                                       'Host (vacío = el mismo que Signal K)',
                                   isDense: true,
                                 ),
-                                onChanged: (_) => setSt(() {}),
+                                onChanged: (_) =>
+                                    setSt(() => _settingsHistoryDirty = true),
                               ),
                               gap,
                               TextField(
@@ -10739,7 +11358,8 @@ class _DashboardState extends State<Dashboard> {
                                   labelText: 'Org',
                                   isDense: true,
                                 ),
-                                onChanged: (_) => setSt(() {}),
+                                onChanged: (_) =>
+                                    setSt(() => _settingsHistoryDirty = true),
                               ),
                               gap,
                               TextField(
@@ -10753,7 +11373,8 @@ class _DashboardState extends State<Dashboard> {
                                   isDense: true,
                                 ),
                                 obscureText: true,
-                                onChanged: (_) => setSt(() {}),
+                                onChanged: (_) =>
+                                    setSt(() => _settingsHistoryDirty = true),
                               ),
                               gap,
                               TextField(
@@ -10763,7 +11384,8 @@ class _DashboardState extends State<Dashboard> {
                                   hintText: 'enjoy_raw',
                                   isDense: true,
                                 ),
-                                onChanged: (_) => setSt(() {}),
+                                onChanged: (_) =>
+                                    setSt(() => _settingsHistoryDirty = true),
                               ),
                               gap,
                               TextField(
@@ -10775,7 +11397,8 @@ class _DashboardState extends State<Dashboard> {
                                   helperMaxLines: 2,
                                   isDense: true,
                                 ),
-                                onChanged: (_) => setSt(() {}),
+                                onChanged: (_) =>
+                                    setSt(() => _settingsHistoryDirty = true),
                               ),
                             ],
                             const SizedBox(height: 12),
@@ -10788,6 +11411,30 @@ class _DashboardState extends State<Dashboard> {
                                   label: const Text('Guardar configuración'),
                                   onPressed: () => doSave(),
                                 ),
+                                if (_settingsHistoryDirty)
+                                  const Padding(
+                                    padding: EdgeInsets.only(left: 8),
+                                    child: Text(
+                                      'Cambios sin guardar',
+                                      style: TextStyle(
+                                        color: cOrange,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                if (_settingsConnectionDirty)
+                                  const Padding(
+                                    padding: EdgeInsets.only(left: 8),
+                                    child: Text(
+                                      'Cambios sin guardar',
+                                      style: TextStyle(
+                                        color: cOrange,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
                                 OutlinedButton.icon(
                                   icon: const Icon(Icons.query_stats, size: 18),
                                   label: const Text('Probar fuente'),
@@ -12136,22 +12783,55 @@ class _DashboardState extends State<Dashboard> {
                                     ),
                                     OutlinedButton.icon(
                                       onPressed: () async {
-                                        final report = [
-                                          'REWIND Panel $_pkgVersion (build $_pkgBuild)',
-                                          'Instalación: $_installSourceLabel',
-                                          'Signal K: ${signalK.connected ? 'conectado' : 'desconectado'}',
-                                          'Servidor: ${settings.host}:${settings.port}',
-                                          'Último dato: ${signalK.lastUpdate == null ? 'sin datos' : signalK.lastUpdate!.toIso8601String()}',
-                                          'Sesión escritura: ${_skLoginOk == true
-                                              ? 'autenticada'
-                                              : _skLoginOk == false
-                                              ? 'fallida'
-                                              : 'sin comprobar'}',
-                                          if (lastCrashInfo != null)
-                                            'Último error:\n$lastCrashInfo',
-                                          if (_eventLog.isNotEmpty)
-                                            'Eventos recientes:\n${_eventLog.reversed.take(25).join('\n')}',
-                                        ].join('\n');
+                                        final sc = settings.sensorConfig;
+                                        final report =
+                                            const JsonEncoder.withIndent(
+                                              '  ',
+                                            ).convert({
+                                              'application': {
+                                                'name': 'REWIND Panel',
+                                                'version': _pkgVersion,
+                                                'build': _pkgBuild,
+                                                'installSource':
+                                                    _installSourceLabel,
+                                              },
+                                              'generatedAt': DateTime.now()
+                                                  .toIso8601String(),
+                                              'signalK': {
+                                                'connected': signalK.connected,
+                                                // No host, usuario, contraseña,
+                                                // token ni cabecera Basic.
+                                                'serverConfigured':
+                                                    settings.host.isNotEmpty,
+                                                'lastDataAt': signalK.lastUpdate
+                                                    ?.toIso8601String(),
+                                                'writeSession': _skLoginOk,
+                                              },
+                                              'configuration': {
+                                                'historySource':
+                                                    settings.historySource,
+                                                'demoMode': settings.demoMode,
+                                                'activeTankCount': sc.tanks
+                                                    .where((t) => t.enabled)
+                                                    .length,
+                                                'solarConfigured':
+                                                    sc.solarPath != null,
+                                                'depthConfigured':
+                                                    sc.depthPath != null,
+                                                'engineConfigured':
+                                                    sc.enginePath != null,
+                                                'anchorArmed':
+                                                    settings.anchorConfig.armed,
+                                              },
+                                              'health': {
+                                                'activeAlarmCount':
+                                                    _activeAlarms.length,
+                                                'recentEventCount':
+                                                    _eventLog.length,
+                                                'hasRecordedCrash':
+                                                    lastCrashInfo != null,
+                                              },
+                                            });
                                         await Clipboard.setData(
                                           ClipboardData(text: report),
                                         );
@@ -12170,7 +12850,9 @@ class _DashboardState extends State<Dashboard> {
                                         Icons.copy_all_outlined,
                                         size: 17,
                                       ),
-                                      label: const Text('Copiar diagnóstico'),
+                                      label: const Text(
+                                        'Copiar diagnóstico JSON',
+                                      ),
                                     ),
                                   ],
                                 ),

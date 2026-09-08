@@ -56,7 +56,7 @@ void main() {
     await tester.pumpWidget(const RewindApp());
     await tester.tap(find.text('TNK'));
     await tester.pumpAndSettle();
-    expect(find.text('Fuel'), findsOneWidget);
+    expect(find.text('Diésel'), findsOneWidget);
     expect(find.text('Agua'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
@@ -72,12 +72,12 @@ void main() {
       expect(rect.right, lessThanOrEqualTo(tester.view.physicalSize.width));
     }
 
-    await tester.tap(find.text('Fuel'));
+    await tester.tap(find.text('Diésel'));
     await tester.pumpAndSettle();
     // The summary card remains mounted behind the fullscreen dialog, so the
     // individual names can legitimately exist in both layers.
-    expect(find.text('Fuel 1'), findsWidgets);
-    expect(find.text('Fuel 2'), findsWidgets);
+    expect(find.text('Diésel 1'), findsWidgets);
+    expect(find.text('Diésel 2'), findsWidgets);
     expect(find.text('HISTÓRICO'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -102,6 +102,25 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('MET overview fits the XCover landscape viewport', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.tap(find.text('MET'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('PRESIÓN ATMOSFÉRICA'), findsOneWidget);
+    expect(find.text('T. exterior'), findsOneWidget);
+    expect(find.text('T. interior'), findsOneWidget);
+    expect(find.text('Viento previsto'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('VNT page shows all wind cards', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
@@ -112,11 +131,11 @@ void main() {
     await tester.tap(find.text('VNT'));
     await tester.pumpAndSettle();
 
-    expect(find.text('AWA'), findsOneWidget);
-    expect(find.text('AWS'), findsOneWidget);
-    expect(find.text('TWA'), findsOneWidget);
-    expect(find.text('TWS'), findsOneWidget);
-    expect(find.text('TWD'), findsOneWidget);
+    expect(find.text('AWA'), findsWidgets);
+    expect(find.text('AWS'), findsWidgets);
+    expect(find.text('TWA'), findsWidgets);
+    expect(find.text('TWS'), findsWidgets);
+    expect(find.text('TWD'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
@@ -134,7 +153,7 @@ void main() {
     await tester.tap(find.text('INFORMES'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Navegación'), findsOneWidget);
+    expect(find.text('Rendimiento del barco'), findsOneWidget);
     expect(find.text('Viento y vela'), findsOneWidget);
     expect(find.text('Informe completo'), findsOneWidget);
     expect(find.text('24h'), findsOneWidget);

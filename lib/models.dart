@@ -189,6 +189,34 @@ class GraphPoint {
   final double value;
 }
 
+/// Coerces a barometric reading to millibars/hPa whatever unit it arrived
+/// in, so the card can't end up showing "10.1 mbar".
+///
+/// Signal K specifies environment.*.pressure in PASCALS, and the app
+/// divides by 100 accordingly. But sources exist that publish hPa while
+/// still declaring "units": "Pa" — REWIND's own signalk-node-red flow
+/// does exactly that (verified live 2026-09-08: value 1010.7 with Pa
+/// metadata), so the spec-correct division produced 10.1. The same
+/// mismatch also shows up from the other end, when a history query
+/// applies the metric's 0.01 scale to a series that was already stored
+/// in hPa.
+///
+/// A range test is safe here precisely because the two scales cannot
+/// overlap for real weather: sea-level pressure has never been recorded
+/// outside roughly 870–1085 hPa (87,000–108,500 Pa). Anything under ~500
+/// can only be an over-divided value; anything over ~10,000 can only be
+/// Pascals. Neither branch can misfire on a plausible reading.
+double? normalizePressureHpa(double? raw) {
+  if (raw == null) return null;
+  if (raw > 10000) return raw / 100; // Pascals, as the spec intends
+  if (raw > 0 && raw < 500) return raw * 100; // already divided once too often
+  return raw; // already hPa/mbar
+}
+
+/// Non-null wrapper, so it can be referenced from a const [MetricDef].
+double normalizePressureHpaValue(double raw) =>
+    normalizePressureHpa(raw) ?? raw;
+
 /// A noisy series reduced to what's actually readable: the rolling mean
 /// ("sostenido") plus the min/max envelope of the same window.
 typedef SmoothedBand = ({
@@ -440,12 +468,19 @@ class MetricDef {
     this.color = cCyan,
     this.tankCapacityL,
     this.tankDangerWhenHigh = false,
+    this.normalize,
   });
   final String skPath;
   final String label;
   final String unit;
   final double offset;
   final double scale;
+  // Applied AFTER scale/offset, for paths where the fixed factor alone
+  // can't be trusted because sources disagree about the unit they send
+  // (see normalizePressureHpa). Runs in every history path — Influx, the
+  // Signal K API and the demo series — so a graph can't disagree with the
+  // live card.
+  final double Function(double)? normalize;
   final Color color;
   // Optional tank metadata lets the generic history screen translate a
   // trustworthy level trend into litres/day and estimated time remaining.
@@ -456,8 +491,12 @@ class MetricDef {
 const mPressure = MetricDef(
   'environment.outside.pressure',
   'Presión',
-  'hPa',
+  'mbar',
   scale: 0.01,
+  // Guards the history/graph path against a source that publishes hPa
+  // while declaring Pa — without it the graph read ~10 mbar while the
+  // live card read ~1010. See normalizePressureHpa.
+  normalize: normalizePressureHpaValue,
   color: cPurple,
 );
 const mOutdoorTemp = MetricDef(
@@ -476,7 +515,7 @@ const mSeaTemp = MetricDef(
 );
 const mSonoffTemp = MetricDef(
   'environment.sonoff.temperature',
-  'T. Sonoff',
+  'Cuadro eléctrico',
   'C',
   offset: -273.15,
   color: cOrange,
@@ -490,7 +529,7 @@ const mSolarFusesTemp = MetricDef(
 );
 const mDcLoads = MetricDef(
   'electrical.venus.dcPower',
-  'DC Loads',
+  'Consumos DC',
   'W',
   color: cOrange,
 );
@@ -1099,12 +1138,18 @@ class TankSlot {
     required this.groupLabel,
     required this.capacityL,
     this.enabled = true,
+    this.warningPct,
+    this.alarmPct,
+    this.calibrated = false,
   });
   String type; // 'freshWater' | 'fuel' | 'blackWater' | ...
   String id; // Signal K instance id
   String groupLabel; // tanks sharing the same label are averaged into one card
   int capacityL;
   bool enabled;
+  double? warningPct;
+  double? alarmPct;
+  bool calibrated;
   String get skPath => 'tanks.$type.$id.currentLevel';
   String get tankKey => '$type.$id';
 
@@ -1114,6 +1159,9 @@ class TankSlot {
     'groupLabel': groupLabel,
     'capacityL': capacityL,
     'enabled': enabled,
+    'warningPct': warningPct,
+    'alarmPct': alarmPct,
+    'calibrated': calibrated,
   };
   factory TankSlot.fromJson(Map<String, dynamic> j) => TankSlot(
     type: j['type'] as String,
@@ -1121,6 +1169,9 @@ class TankSlot {
     groupLabel: j['groupLabel'] as String,
     capacityL: j['capacityL'] as int,
     enabled: j['enabled'] as bool? ?? true,
+    warningPct: (j['warningPct'] as num?)?.toDouble(),
+    alarmPct: (j['alarmPct'] as num?)?.toDouble(),
+    calibrated: j['calibrated'] as bool? ?? false,
   );
 }
 
@@ -1147,6 +1198,7 @@ class SensorConfig {
 
   String batteryHouseId = '278';
   String batteryStartId = '278-second';
+  double batteryHouseCapacityAh = 0;
   String? solarPath = 'electrical.venus.totalPanelPower';
   // Optional second solar controller — when set, the PWR card shows both
   // panels' individual output plus the sum as "total"; with just the one
@@ -1155,6 +1207,16 @@ class SensorConfig {
   String? solarPath2;
   String? fridge1Path = 'environment.fridge_1.temperature';
   String? fridge2Path = 'environment.fridge_2.temperature';
+  String fridge1Label = 'Nevera 1';
+  String fridge1Location = 'tapa';
+  String fridge2Label = 'Nevera 2';
+  String fridge2Location = 'puerta';
+  double sonoffWarnC = 45;
+  double sonoffAlarmC = 60;
+  double solarFusesWarnC = 45;
+  double solarFusesAlarmC = 60;
+  double fridgeWarnC = 6;
+  double fridgeAlarmC = 10;
   String? depthPath = 'environment.depth.belowKeel';
   // Signal K's standard cumulative engine run time, e.g.
   // "propulsion.main.runTime" — seconds since the engine's counter started.
@@ -1162,8 +1224,8 @@ class SensorConfig {
   bool hasOutsideTemp = true;
   bool hasOutsidePressure = true;
   List<TankSlot> tanks = [
-    TankSlot(type: 'fuel', id: '27', groupLabel: 'Fuel 1', capacityL: 180),
-    TankSlot(type: 'fuel', id: '26', groupLabel: 'Fuel 2', capacityL: 180),
+    TankSlot(type: 'fuel', id: '27', groupLabel: 'Diésel 1', capacityL: 180),
+    TankSlot(type: 'fuel', id: '26', groupLabel: 'Diésel 2', capacityL: 180),
     TankSlot(
       type: 'freshWater',
       id: '24',
@@ -1193,10 +1255,21 @@ class SensorConfig {
   Map<String, dynamic> toJson() => {
     'batteryHouseId': batteryHouseId,
     'batteryStartId': batteryStartId,
+    'batteryHouseCapacityAh': batteryHouseCapacityAh,
     'solarPath': solarPath,
     'solarPath2': solarPath2,
     'fridge1Path': fridge1Path,
     'fridge2Path': fridge2Path,
+    'fridge1Label': fridge1Label,
+    'fridge1Location': fridge1Location,
+    'fridge2Label': fridge2Label,
+    'fridge2Location': fridge2Location,
+    'sonoffWarnC': sonoffWarnC,
+    'sonoffAlarmC': sonoffAlarmC,
+    'solarFusesWarnC': solarFusesWarnC,
+    'solarFusesAlarmC': solarFusesAlarmC,
+    'fridgeWarnC': fridgeWarnC,
+    'fridgeAlarmC': fridgeAlarmC,
     'depthPath': depthPath,
     'enginePath': enginePath,
     'hasOutsideTemp': hasOutsideTemp,
@@ -1208,10 +1281,25 @@ class SensorConfig {
     final c = SensorConfig();
     c.batteryHouseId = j['batteryHouseId'] as String? ?? c.batteryHouseId;
     c.batteryStartId = j['batteryStartId'] as String? ?? c.batteryStartId;
+    c.batteryHouseCapacityAh =
+        (j['batteryHouseCapacityAh'] as num?)?.toDouble() ??
+        c.batteryHouseCapacityAh;
     c.solarPath = j['solarPath'] as String?;
     c.solarPath2 = j['solarPath2'] as String?;
     c.fridge1Path = j['fridge1Path'] as String?;
     c.fridge2Path = j['fridge2Path'] as String?;
+    c.fridge1Label = j['fridge1Label'] as String? ?? c.fridge1Label;
+    c.fridge1Location = j['fridge1Location'] as String? ?? c.fridge1Location;
+    c.fridge2Label = j['fridge2Label'] as String? ?? c.fridge2Label;
+    c.fridge2Location = j['fridge2Location'] as String? ?? c.fridge2Location;
+    c.sonoffWarnC = (j['sonoffWarnC'] as num?)?.toDouble() ?? c.sonoffWarnC;
+    c.sonoffAlarmC = (j['sonoffAlarmC'] as num?)?.toDouble() ?? c.sonoffAlarmC;
+    c.solarFusesWarnC =
+        (j['solarFusesWarnC'] as num?)?.toDouble() ?? c.solarFusesWarnC;
+    c.solarFusesAlarmC =
+        (j['solarFusesAlarmC'] as num?)?.toDouble() ?? c.solarFusesAlarmC;
+    c.fridgeWarnC = (j['fridgeWarnC'] as num?)?.toDouble() ?? c.fridgeWarnC;
+    c.fridgeAlarmC = (j['fridgeAlarmC'] as num?)?.toDouble() ?? c.fridgeAlarmC;
     c.depthPath = j['depthPath'] as String?;
     c.enginePath = j['enginePath'] as String?;
     c.hasOutsideTemp = j['hasOutsideTemp'] as bool? ?? true;
@@ -1459,19 +1547,21 @@ class ForecastPoint {
     required this.time,
     this.tempC,
     this.rainPct,
+    this.rainMm,
     this.windKn,
     this.gustKn,
     this.windDirDeg,
     this.weatherCode,
   });
   final DateTime time;
-  final double? tempC, rainPct, windKn, gustKn, windDirDeg;
+  final double? tempC, rainPct, rainMm, windKn, gustKn, windDirDeg;
   final int? weatherCode;
 
   Map<String, dynamic> toJson() => {
     't': time.toIso8601String(),
     'temp': tempC,
     'rain': rainPct,
+    'rainMm': rainMm,
     'wind': windKn,
     'gust': gustKn,
     'dir': windDirDeg,
@@ -1481,6 +1571,7 @@ class ForecastPoint {
     time: DateTime.parse(j['t'] as String),
     tempC: (j['temp'] as num?)?.toDouble(),
     rainPct: (j['rain'] as num?)?.toDouble(),
+    rainMm: (j['rainMm'] as num?)?.toDouble(),
     windKn: (j['wind'] as num?)?.toDouble(),
     gustKn: (j['gust'] as num?)?.toDouble(),
     windDirDeg: (j['dir'] as num?)?.toDouble(),
@@ -1497,6 +1588,9 @@ class MarinePoint {
     this.swellM,
     this.swellDir,
     this.swellPeriod,
+    this.windWaveM,
+    this.windWaveDir,
+    this.windWavePeriod,
     this.seaTempC,
     this.currentKmh,
     this.currentDir,
@@ -1508,6 +1602,9 @@ class MarinePoint {
       swellM,
       swellDir,
       swellPeriod,
+      windWaveM,
+      windWaveDir,
+      windWavePeriod,
       seaTempC,
       currentKmh,
       currentDir;
@@ -1520,6 +1617,9 @@ class MarinePoint {
     'swell': swellM,
     'swellDir': swellDir,
     'swellPeriod': swellPeriod,
+    'windWave': windWaveM,
+    'windWaveDir': windWaveDir,
+    'windWavePeriod': windWavePeriod,
     'seaTemp': seaTempC,
     'current': currentKmh,
     'currentDir': currentDir,
@@ -1532,6 +1632,9 @@ class MarinePoint {
     swellM: (j['swell'] as num?)?.toDouble(),
     swellDir: (j['swellDir'] as num?)?.toDouble(),
     swellPeriod: (j['swellPeriod'] as num?)?.toDouble(),
+    windWaveM: (j['windWave'] as num?)?.toDouble(),
+    windWaveDir: (j['windWaveDir'] as num?)?.toDouble(),
+    windWavePeriod: (j['windWavePeriod'] as num?)?.toDouble(),
     seaTempC: (j['seaTemp'] as num?)?.toDouble(),
     currentKmh: (j['current'] as num?)?.toDouble(),
     currentDir: (j['currentDir'] as num?)?.toDouble(),

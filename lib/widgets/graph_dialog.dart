@@ -980,7 +980,15 @@ class _LineGraphPainter extends CustomPainter {
         for (final p in bandHigh) p.value,
       ],
     ];
-    var yMin = vals.reduce(math.min), yMax = vals.reduce(math.max);
+    final sortedVals = List<double>.of(vals)..sort();
+    // A single corrupt/spurious sample must not flatten the remaining 99%
+    // of a 48 h trace. For sufficiently populated series, scale to the
+    // 2nd–98th percentile and clip only the exceptional points at the edge.
+    final robust = sortedVals.length >= 20;
+    double percentile(double p) =>
+        sortedVals[((sortedVals.length - 1) * p).round()];
+    var yMin = robust ? percentile(0.02) : sortedVals.first;
+    var yMax = robust ? percentile(0.98) : sortedVals.last;
     final ySpan0 = yMax - yMin;
     final pad = ySpan0 < 0.5 ? 0.5 : ySpan0 * 0.08;
     yMin -= pad;
@@ -995,7 +1003,7 @@ class _LineGraphPainter extends CustomPainter {
     final gapThresholdMs = expectedStepMs * 1.8;
 
     double toX(double t) => pL + (t - tFirst) / tSpan * pW;
-    double toY(double v) => pB - (v - yMin) / ySpan * pH;
+    double toY(double v) => pB - (v.clamp(yMin, yMax) - yMin) / ySpan * pH;
 
     if (hasWindBarbs) {
       final range = windowEnd.difference(windowStart);

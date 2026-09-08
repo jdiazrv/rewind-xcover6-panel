@@ -245,6 +245,25 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   bool _loading = false;
   String? _error;
 
+  Widget _numberField(
+    String label,
+    double value,
+    ValueChanged<double> onChanged,
+  ) => SizedBox(
+    width: 126,
+    child: TextFormField(
+      initialValue: value.toStringAsFixed(
+        value == value.roundToDouble() ? 0 : 1,
+      ),
+      decoration: InputDecoration(labelText: label, isDense: true),
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      onChanged: (raw) {
+        final parsed = double.tryParse(raw.replaceAll(',', '.'));
+        if (parsed != null) onChanged(parsed);
+      },
+    ),
+  );
+
   @override
   void initState() {
     super.initState();
@@ -278,16 +297,23 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
           (t) => t.type == tc.type && t.id == tc.id,
         );
         if (idx < 0) {
+          final isLpg = tc.type.toLowerCase() == 'lpg';
           _cfg.tanks.add(
             TankSlot(
               type: tc.type,
               id: tc.id,
               groupLabel: tc.name ?? '${tc.type} ${tc.id}',
               capacityL: tc.capacityL ?? 0,
-              enabled: false,
+              // Venus/Cerbo LPG is a first-class tank source. Previous
+              // discovery added it disabled, which made it appear to be
+              // missing even though Signal K was publishing it correctly.
+              enabled: isLpg,
             ),
           );
         } else {
+          if (tc.type.toLowerCase() == 'lpg') {
+            _cfg.tanks[idx].enabled = true;
+          }
           if (tc.capacityL != null && _cfg.tanks[idx].capacityL == 0) {
             _cfg.tanks[idx].capacityL = tc.capacityL!;
           }
@@ -560,6 +586,17 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     if (_cfg.fridge1Path != null && _cfg.fridge1Path == _cfg.fridge2Path) {
       duplicates.add('El mismo path está asignado a Nevera 1 y Nevera 2.');
     }
+    if (_cfg.batteryHouseCapacityAh < 0) {
+      duplicates.add('La capacidad de servicio no puede ser negativa.');
+    }
+    if (_cfg.fridge1Label.trim().isEmpty || _cfg.fridge2Label.trim().isEmpty) {
+      duplicates.add('Las neveras deben tener un nombre.');
+    }
+    if (_cfg.sonoffWarnC >= _cfg.sonoffAlarmC ||
+        _cfg.solarFusesWarnC >= _cfg.solarFusesAlarmC ||
+        _cfg.fridgeWarnC >= _cfg.fridgeAlarmC) {
+      duplicates.add('Cada aviso de temperatura debe ser menor que su alarma.');
+    }
     final tankKeys = <String>{};
     for (final tank in _cfg.tanks.where((tank) => tank.enabled)) {
       if (!tankKeys.add(tank.tankKey)) {
@@ -575,7 +612,40 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   }
 
   void _saveIfValid() {
-    final errors = _duplicateAssignments;
+    final errors = <String>[..._duplicateAssignments];
+    for (final tank in _cfg.tanks.where((t) => t.enabled)) {
+      final warning = tank.warningPct ?? (tank.type == 'blackWater' ? 75 : 30);
+      final alarm = tank.alarmPct ?? (tank.type == 'blackWater' ? 90 : 15);
+      if (warning < 0 || warning > 100 || alarm < 0 || alarm > 100) {
+        errors.add(
+          '${tank.groupLabel}: los umbrales deben estar entre 0 y 100%.',
+        );
+      } else if (tank.type == 'blackWater' && warning >= alarm) {
+        errors.add(
+          '${tank.groupLabel}: el aviso debe ser menor que la alarma de llenado.',
+        );
+      } else if (tank.type != 'blackWater' && alarm >= warning) {
+        errors.add(
+          '${tank.groupLabel}: la alarma de nivel bajo debe ser menor que el aviso.',
+        );
+      }
+      if (tank.capacityL < 0) {
+        errors.add('${tank.groupLabel}: la capacidad no puede ser negativa.');
+      }
+    }
+    if (_cfg.batteryHouseCapacityAh < 0) {
+      errors.add(
+        'La capacidad de la batería de servicio no puede ser negativa.',
+      );
+    }
+    if (_cfg.fridge1Label.trim().isEmpty || _cfg.fridge2Label.trim().isEmpty) {
+      errors.add('Las neveras necesitan un nombre visible.');
+    }
+    if (_cfg.sonoffWarnC >= _cfg.sonoffAlarmC ||
+        _cfg.solarFusesWarnC >= _cfg.solarFusesAlarmC ||
+        _cfg.fridgeWarnC >= _cfg.fridgeAlarmC) {
+      errors.add('Cada temperatura de aviso debe ser menor que su alarma.');
+    }
     if (errors.isEmpty) {
       Navigator.of(context).pop(_cfg);
       return;
@@ -965,6 +1035,26 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                     v ?? _cfg.batteryStartId,
                               ),
                             ),
+                            const SizedBox(height: 8),
+                            TextFormField(
+                              initialValue: _cfg.batteryHouseCapacityAh == 0
+                                  ? ''
+                                  : _cfg.batteryHouseCapacityAh.toStringAsFixed(
+                                      0,
+                                    ),
+                              decoration: const InputDecoration(
+                                labelText: 'Capacidad servicio (Ah, opcional)',
+                                helperText: 'Permite estimar autonomía solo con corriente reciente.',
+                                isDense: true,
+                              ),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              onChanged: (raw) => _cfg.batteryHouseCapacityAh =
+                                  double.tryParse(raw.replaceAll(',', '.')) ??
+                                  0,
+                            ),
                             const SizedBox(height: 12),
                             const Text('SOLAR', style: lbl),
                             const SizedBox(height: 4),
@@ -1060,6 +1150,32 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                             const SizedBox(height: 12),
                             const Text('NEVERAS', style: lbl),
                             const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    initialValue: _cfg.fridge1Label,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Nombre nevera 1',
+                                      isDense: true,
+                                    ),
+                                    onChanged: (v) => _cfg.fridge1Label = v,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextFormField(
+                                    initialValue: _cfg.fridge1Location,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Ubicación',
+                                      isDense: true,
+                                    ),
+                                    onChanged: (v) => _cfg.fridge1Location = v,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
                             DropdownButtonFormField<String?>(
                               initialValue: _cfg.fridge1Path,
                               decoration: const InputDecoration(
@@ -1078,6 +1194,32 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               ],
                               onChanged: (v) =>
                                   setState(() => _cfg.fridge1Path = v),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    initialValue: _cfg.fridge2Label,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Nombre nevera 2',
+                                      isDense: true,
+                                    ),
+                                    onChanged: (v) => _cfg.fridge2Label = v,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextFormField(
+                                    initialValue: _cfg.fridge2Location,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Ubicación',
+                                      isDense: true,
+                                    ),
+                                    onChanged: (v) => _cfg.fridge2Location = v,
+                                  ),
+                                ),
+                              ],
                             ),
                             const SizedBox(height: 8),
                             DropdownButtonFormField<String?>(
@@ -1100,6 +1242,48 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                   setState(() => _cfg.fridge2Path = v),
                             ),
                             const SizedBox(height: 12),
+                            const Text(
+                              'UMBRALES DE TEMPERATURA (°C)',
+                              style: lbl,
+                            ),
+                            const SizedBox(height: 4),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _numberField(
+                                  'Cuadro aviso',
+                                  _cfg.sonoffWarnC,
+                                  (v) => _cfg.sonoffWarnC = v,
+                                ),
+                                _numberField(
+                                  'Cuadro alarma',
+                                  _cfg.sonoffAlarmC,
+                                  (v) => _cfg.sonoffAlarmC = v,
+                                ),
+                                _numberField(
+                                  'Fusibles aviso',
+                                  _cfg.solarFusesWarnC,
+                                  (v) => _cfg.solarFusesWarnC = v,
+                                ),
+                                _numberField(
+                                  'Fusibles alarma',
+                                  _cfg.solarFusesAlarmC,
+                                  (v) => _cfg.solarFusesAlarmC = v,
+                                ),
+                                _numberField(
+                                  'Neveras aviso',
+                                  _cfg.fridgeWarnC,
+                                  (v) => _cfg.fridgeWarnC = v,
+                                ),
+                                _numberField(
+                                  'Neveras alarma',
+                                  _cfg.fridgeAlarmC,
+                                  (v) => _cfg.fridgeAlarmC = v,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
                             const Text('TANQUES', style: lbl),
                             const SizedBox(height: 4),
                             if (_cfg.tanks.isEmpty)
@@ -1112,45 +1296,111 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                 padding: const EdgeInsets.symmetric(
                                   vertical: 2,
                                 ),
-                                child: Row(
+                                child: Column(
                                   children: [
-                                    Checkbox(
-                                      value: t.enabled,
-                                      onChanged: (v) => setState(
-                                        () => t.enabled = v ?? false,
-                                      ),
-                                    ),
-                                    Expanded(
-                                      flex: 2,
-                                      child: TextFormField(
-                                        initialValue: t.groupLabel,
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Nombre',
+                                    Row(
+                                      children: [
+                                        Checkbox(
+                                          value: t.enabled,
+                                          onChanged: (v) => setState(
+                                            () => t.enabled = v ?? false,
+                                          ),
                                         ),
-                                        onChanged: (v) => t.groupLabel = v,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      '${t.type}.${t.id}',
-                                      style: const TextStyle(
-                                        color: cMuted,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    SizedBox(
-                                      width: 80,
-                                      child: TextFormField(
-                                        initialValue: '${t.capacityL}',
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Litros',
+                                        Expanded(
+                                          flex: 2,
+                                          child: TextFormField(
+                                            initialValue: t.groupLabel,
+                                            decoration: const InputDecoration(
+                                              isDense: true,
+                                              labelText: 'Nombre',
+                                            ),
+                                            onChanged: (v) => t.groupLabel = v,
+                                          ),
                                         ),
-                                        keyboardType: TextInputType.number,
-                                        onChanged: (v) => t.capacityL =
-                                            int.tryParse(v) ?? t.capacityL,
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          '${t.type}.${t.id}',
+                                          style: const TextStyle(
+                                            color: cMuted,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        SizedBox(
+                                          width: 80,
+                                          child: TextFormField(
+                                            initialValue: '${t.capacityL}',
+                                            decoration: const InputDecoration(
+                                              isDense: true,
+                                              labelText: 'Litros',
+                                            ),
+                                            keyboardType: TextInputType.number,
+                                            onChanged: (v) => t.capacityL =
+                                                int.tryParse(v) ?? t.capacityL,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(
+                                        left: 48,
+                                        top: 4,
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              t.capacityL > 0
+                                                  ? 'Capacidad configurada'
+                                                  : 'Sin calibrar capacidad',
+                                              style: TextStyle(
+                                                color: t.capacityL > 0
+                                                    ? cGreen
+                                                    : cOrange,
+                                                fontSize: 10,
+                                              ),
+                                            ),
+                                          ),
+                                          SizedBox(
+                                            width: 94,
+                                            child: TextFormField(
+                                              initialValue:
+                                                  '${t.warningPct ?? (t.type == 'blackWater' ? 75 : 30)}',
+                                              decoration: const InputDecoration(
+                                                isDense: true,
+                                                labelText: 'Aviso %',
+                                              ),
+                                              keyboardType:
+                                                  const TextInputType.numberWithOptions(
+                                                    decimal: true,
+                                                  ),
+                                              onChanged: (raw) => t.warningPct =
+                                                  double.tryParse(
+                                                    raw.replaceAll(',', '.'),
+                                                  ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          SizedBox(
+                                            width: 94,
+                                            child: TextFormField(
+                                              initialValue:
+                                                  '${t.alarmPct ?? (t.type == 'blackWater' ? 90 : 15)}',
+                                              decoration: const InputDecoration(
+                                                isDense: true,
+                                                labelText: 'Alarma %',
+                                              ),
+                                              keyboardType:
+                                                  const TextInputType.numberWithOptions(
+                                                    decimal: true,
+                                                  ),
+                                              onChanged: (raw) =>
+                                                  t.alarmPct = double.tryParse(
+                                                    raw.replaceAll(',', '.'),
+                                                  ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ],

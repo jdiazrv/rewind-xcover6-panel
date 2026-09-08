@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:latlong2/latlong.dart' as ll;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
 import 'theme.dart';
@@ -808,6 +809,9 @@ class _AisRelativeViewState extends State<AisRelativeView>
   bool get wantKeepAlive => true;
 
   bool _showList = false;
+  bool _priorityOnly = false;
+  bool _movingOnly = false;
+  double _maxDistanceNm = 0; // 0 = sin límite
   // Which column the AIS list is sorted by, tap-to-change on the header —
   // always ascending (soonest/closest/slowest first), matching the request
   // literally rather than adding a toggle-descending affordance nobody
@@ -862,6 +866,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
   @override
   void initState() {
     super.initState();
+    _loadFilters();
     _loadShipIconAsset();
     _listOrderTimer = Timer.periodic(_listReorderPeriod, (_) {
       if (!mounted || !_showList || _listInteracting) return;
@@ -869,6 +874,32 @@ class _AisRelativeViewState extends State<AisRelativeView>
       setState(() => _forceListReorder = true);
     });
   }
+
+  Future<void> _loadFilters() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _priorityOnly = prefs.getBool('aisFilterPriority') ?? false;
+      _movingOnly = prefs.getBool('aisFilterMoving') ?? false;
+      _maxDistanceNm = prefs.getDouble('aisFilterDistanceNm') ?? 0;
+    });
+  }
+
+  void _saveFilters() {
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('aisFilterPriority', _priorityOnly);
+      prefs.setBool('aisFilterMoving', _movingOnly);
+      prefs.setDouble('aisFilterDistanceNm', _maxDistanceNm);
+    });
+  }
+
+  List<_AisPlot> _applyQuickFilters(List<_AisPlot> plots) => [
+    for (final plot in plots)
+      if ((!_priorityOnly || _meetsPriorityThreshold(plot, exiting: false)) &&
+          (!_movingOnly || (plot.target.sogKn ?? 0) > 0.5) &&
+          (_maxDistanceNm <= 0 || plot.distNm <= _maxDistanceNm))
+        plot,
+  ];
 
   @override
   void didUpdateWidget(AisRelativeView oldWidget) {
@@ -927,7 +958,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
           final ownHeading =
               widget.ownHeadingDeg ??
               (cogFallbackActive ? widget.ownCogDeg! : 0);
-          final plots = _computeAisPlots(
+          final allPlots = _computeAisPlots(
             widget.targets.values.toList(),
             widget.ownLat,
             widget.ownLon,
@@ -941,6 +972,7 @@ class _AisRelativeViewState extends State<AisRelativeView>
             relativeMotion: _relativeMotion,
             vectorMinutes: _vectorMinutes,
           );
+          final plots = _applyQuickFilters(allPlots);
           final viewRotDeg = _headingUp ? ownHeading : 0.0;
           final ownScreenHeadingDeg = normalize360(ownHeading - viewRotDeg);
           final northScreenAngleDeg = normalize360(0 - viewRotDeg);
@@ -1082,6 +1114,51 @@ class _AisRelativeViewState extends State<AisRelativeView>
                   ],
                 ),
               ),
+              if (_showList)
+                Positioned(
+                  top: 70,
+                  right: 8,
+                  child: Wrap(
+                    spacing: 6,
+                    children: [
+                      FilterChip(
+                        label: const Text('RIESGO'),
+                        selected: _priorityOnly,
+                        onSelected: (v) {
+                          setState(() => _priorityOnly = v);
+                          _saveFilters();
+                        },
+                      ),
+                      FilterChip(
+                        label: const Text('EN MOVIMIENTO'),
+                        selected: _movingOnly,
+                        onSelected: (v) {
+                          setState(() => _movingOnly = v);
+                          _saveFilters();
+                        },
+                      ),
+                      ChoiceChip(
+                        label: Text(
+                          _maxDistanceNm <= 0
+                              ? 'TODAS'
+                              : '≤ ${_maxDistanceNm.round()} NM',
+                        ),
+                        selected: _maxDistanceNm > 0,
+                        onSelected: (_) {
+                          setState(() {
+                            _maxDistanceNm = switch (_maxDistanceNm.round()) {
+                              0 => 3,
+                              3 => 6,
+                              6 => 12,
+                              _ => 0,
+                            };
+                          });
+                          _saveFilters();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
               Positioned(
                 top: 6,
                 right: 6,

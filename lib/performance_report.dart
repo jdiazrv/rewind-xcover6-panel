@@ -26,7 +26,7 @@ enum PerformanceReportKind { navigation, windAndSailing, complete }
 
 extension PerformanceReportKindLabel on PerformanceReportKind {
   String get label => switch (this) {
-    PerformanceReportKind.navigation => 'Navegación',
+    PerformanceReportKind.navigation => 'Rendimiento del barco',
     PerformanceReportKind.windAndSailing => 'Viento y vela',
     PerformanceReportKind.complete => 'Informe completo',
   };
@@ -52,8 +52,11 @@ Future<void> showPerformanceReportPicker(
   required SettingsModel settings,
 }) async {
   var selectedRange = appRanges[3]; // 24 h: useful default, explicit in UI.
+  Duration? selectedBarbInterval;
   final selection =
-      await showDialog<({PerformanceReportKind kind, AppRange range})>(
+      await showDialog<
+        ({PerformanceReportKind kind, AppRange range, Duration? barbInterval})
+      >(
         context: context,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
@@ -99,6 +102,42 @@ Future<void> showPerformanceReportPicker(
                       ),
                     ),
                     const SizedBox(height: 16),
+                    const Text(
+                      'BARBAS DE VIENTO',
+                      style: TextStyle(
+                        color: cMuted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SegmentedButton<Duration?>(
+                        showSelectedIcon: false,
+                        segments: const [
+                          ButtonSegment(value: null, label: Text('Auto')),
+                          ButtonSegment(
+                            value: Duration(minutes: 30),
+                            label: Text('30 min'),
+                          ),
+                          ButtonSegment(
+                            value: Duration(hours: 1),
+                            label: Text('1 h'),
+                          ),
+                          ButtonSegment(
+                            value: Duration(hours: 3),
+                            label: Text('3 h'),
+                          ),
+                        ],
+                        selected: {selectedBarbInterval},
+                        onSelectionChanged: (value) => setDialogState(
+                          () => selectedBarbInterval = value.first,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     for (final kind in PerformanceReportKind.values) ...[
                       Material(
                         color: cPanel2,
@@ -123,9 +162,11 @@ Future<void> showPerformanceReportPicker(
                             Icons.chevron_right,
                             color: cMuted,
                           ),
-                          onTap: () =>
-                              Navigator.of(dialogContext)
-                                  .pop((kind: kind, range: selectedRange)),
+                          onTap: () => Navigator.of(dialogContext).pop((
+                            kind: kind,
+                            range: selectedRange,
+                            barbInterval: selectedBarbInterval,
+                          )),
                         ),
                       ),
                       if (kind != PerformanceReportKind.values.last)
@@ -150,6 +191,7 @@ Future<void> showPerformanceReportPicker(
     settings: settings,
     range: selection.range,
     kind: selection.kind,
+    barbInterval: selection.barbInterval,
   );
 }
 
@@ -161,12 +203,17 @@ Future<void> openPerformanceReport(
   required SettingsModel settings,
   required AppRange range,
   PerformanceReportKind kind = PerformanceReportKind.complete,
+  Duration? barbInterval,
 }) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
-      builder: (_) =>
-          PerformanceReportPage(settings: settings, range: range, kind: kind),
+      builder: (_) => PerformanceReportPage(
+        settings: settings,
+        range: range,
+        kind: kind,
+        barbInterval: barbInterval,
+      ),
     ),
   );
 }
@@ -177,10 +224,12 @@ class PerformanceReportPage extends StatefulWidget {
     required this.settings,
     required this.range,
     required this.kind,
+    this.barbInterval,
   });
   final SettingsModel settings;
   final AppRange range;
   final PerformanceReportKind kind;
+  final Duration? barbInterval;
 
   @override
   State<PerformanceReportPage> createState() => _PerformanceReportPageState();
@@ -408,7 +457,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           final sogP = nearest(sog, lp.time);
           moving = sogP != null && sogP.value > 0.5;
         }
-        raw.add((lat: lp.value, lon: lonP.value, time: lp.time, moving: moving));
+        raw.add((
+          lat: lp.value,
+          lon: lonP.value,
+          time: lp.time,
+          moving: moving,
+        ));
       }
 
       final out = <({double lat, double lon, DateTime time})>[];
@@ -496,6 +550,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   double _underwayFraction(List<GraphPoint> sog) {
     if (sog.isEmpty) return 0;
     return sog.where((p) => p.value > 0.5).length / sog.length;
+  }
+
+  int _coveragePct(List<GraphPoint> points, Duration range, Duration step) {
+    if (points.isEmpty || step.inSeconds <= 0) return 0;
+    final expected = math.max(1, range.inSeconds / step.inSeconds);
+    return (points.length / expected * 100).round().clamp(0, 100);
   }
 
   // "Polar de datos reales": average STW by TWA (30° bands, port/starboard
@@ -630,6 +690,14 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final underwayDur = Duration(
       seconds: (rangeDur.inSeconds * underwayFrac).round(),
     );
+    final coverageParts = <String>[
+      if (showNavigation) 'SOG ${_coveragePct(sog, rangeDur, interval)}%',
+      if (showNavigation) 'STW ${_coveragePct(stw, rangeDur, interval)}%',
+      if (showWind) 'TWS ${_coveragePct(tws, rangeDur, interval)}%',
+      if (showWind) 'TWD ${_coveragePct(twd, rangeDur, interval)}%',
+      if (showWind) 'TWA ${_coveragePct(twa, rangeDur, interval)}%',
+      if (showWind) 'escora ${_coveragePct(heel, rangeDur, interval)}%',
+    ];
 
     const margin = 24.0;
     const pageFormat = PdfPageFormat.a4;
@@ -669,6 +737,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         ),
         pw.Text(
           'Generado ${fmtDateTime(now)}',
+          style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+        ),
+        pw.Text(
+          'Cobertura de muestras: ${coverageParts.join(' · ')}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
         ),
         pw.SizedBox(height: 6),
@@ -861,6 +933,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               start: periodStart,
               end: now,
               width: contentWidth,
+              barbInterval: widget.barbInterval,
             ),
           ],
         ),
@@ -899,6 +972,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               width: contentWidth,
               tws: tws,
               twd: twd,
+              barbInterval: widget.barbInterval,
             ),
           ],
           if (showWind) ...[
@@ -1097,6 +1171,7 @@ pw.Widget pdfWindTimeline({
   required DateTime start,
   required DateTime end,
   required double width,
+  Duration? barbInterval,
   double height = 190,
 }) {
   if (tws.isEmpty || twd.isEmpty) {
@@ -1115,10 +1190,12 @@ pw.Widget pdfWindTimeline({
     );
   }
 
-  final interval = windBarbInterval(
-    end.difference(start),
-    targetCount: math.max(1, (width / 30).floor()),
-  );
+  final interval =
+      barbInterval ??
+      windBarbInterval(
+        end.difference(start),
+        targetCount: math.max(1, (width / 30).floor()),
+      );
   final barbs = sampleWindBarbs(
     tws: tws,
     twd: twd,
@@ -1129,9 +1206,12 @@ pw.Widget pdfWindTimeline({
   final visibleTws = tws
       .where((p) => !p.time.isBefore(start) && !p.time.isAfter(end))
       .toList();
-  final maxSpeed = visibleTws.isEmpty
+  final speedValues = visibleTws.map((p) => p.value).toList()..sort();
+  final maxSpeed = speedValues.isEmpty
       ? 5.0
-      : visibleTws.map((p) => p.value).reduce(math.max);
+      : speedValues.length < 20
+      ? speedValues.last
+      : speedValues[((speedValues.length - 1) * 0.98).round()];
   final yMax = math.max(5.0, (maxSpeed / 5).ceil() * 5.0);
   final rangeMs = math.max(1, end.difference(start).inMilliseconds);
 
@@ -1430,6 +1510,7 @@ pw.Widget pdfTrackMap({
   // wind history just gets the plain route/markers, same as before.
   List<GraphPoint> tws = const [],
   List<GraphPoint> twd = const [],
+  Duration? barbInterval,
 }) {
   if (map == null || points.length < 2) {
     return pw.Container(
@@ -1549,16 +1630,9 @@ pw.Widget pdfTrackMap({
   // Barbs ON the route, like MarineTraffic's own track view — "los barbs
   // son en la ruta" (reported live 2026-09-07).
   //
-  // Spaced by DISTANCE ALONG THE ROUTE, not by clock time. Time slots were
-  // wrong twice over: an anchored stretch stacks many slots onto the same
-  // spot, and — worse — a slot only produces a barb when BOTH TWS and TWD
-  // happen to have data within tolerance of it, so on a boat whose two
-  // series only overlap for part of the period (verified on REWIND: TWD
-  // ends 15:10, TWS starts 04:25 the same day, ~11h of overlap in 48h)
-  // almost every slot came up empty and the map showed a single barb
-  // ("no veo las barbas del viento"). Walking the drawn route instead
-  // puts barbs where there IS a route, and each one independently takes
-  // the nearest TWS/TWD sample it can find.
+  // Spaced by CLOCK TIME so the report answers "qué viento había cada X".
+  // Repeated positions (for example while fondeado) are suppressed visually
+  // so several slots do not paint an unreadable pile of glyphs.
   final windBarbs = <({double x, double y, WindBarbSample barb})>[];
   if (tws.isNotEmpty && twd.isNotEmpty && projected.length > 1) {
     GraphPoint? nearestIn(List<GraphPoint> s, DateTime t, Duration tol) {
@@ -1590,41 +1664,58 @@ pw.Widget pdfTrackMap({
     }
 
     final twsTol = tolFor(tws), twdTol = tolFor(twd);
-    // Cumulative on-page length of the route, so spacing is what the eye
-    // actually sees rather than what the clock did.
     final canvasPts = [for (final f in projected) toCanvas(f)];
-    final cum = <double>[0];
-    for (var i = 1; i < canvasPts.length; i++) {
-      final dx = canvasPts[i].$1 - canvasPts[i - 1].$1;
-      final dy = canvasPts[i].$2 - canvasPts[i - 1].$2;
-      cum.add(cum[i - 1] + math.sqrt(dx * dx + dy * dy));
-    }
-    final total = cum.last;
-    if (total > 1) {
-      final target = math.max(3, (width / 78).floor());
-      final stepLen = total / target;
-      var nextAt = stepLen / 2; // offset so the first isn't on the start marker
+    final interval =
+        barbInterval ??
+        windBarbInterval(
+          points.last.time.difference(points.first.time),
+          targetCount: math.max(3, (width / 78).floor()),
+        );
+    final trackTolerance = tolFor([
+      for (final p in points) GraphPoint(time: p.time, value: 0),
+    ]);
+    var slot = points.first.time;
+    (double, double)? previousCanvas;
+    while (!slot.isAfter(points.last.time)) {
       var idx = 0;
-      while (nextAt < total && idx < cum.length) {
-        while (idx < cum.length - 1 && cum[idx] < nextAt) {
-          idx++;
+      Duration? bestTrackDiff;
+      for (var i = 0; i < points.length; i++) {
+        final diff = points[i].time.difference(slot).abs();
+        if (bestTrackDiff == null || diff < bestTrackDiff) {
+          idx = i;
+          bestTrackDiff = diff;
         }
+      }
+      if (bestTrackDiff != null && bestTrackDiff <= trackTolerance) {
         final t = points[idx].time;
         final sp = nearestIn(tws, t, twsTol);
         final dir = nearestIn(twd, t, twdTol);
-        if (sp != null && dir != null && sp.value >= 0 && dir.value.isFinite) {
+        final here = canvasPts[idx];
+        final sufficientlySeparate =
+            previousCanvas == null ||
+            math.sqrt(
+                  math.pow(here.$1 - previousCanvas.$1, 2) +
+                      math.pow(here.$2 - previousCanvas.$2, 2),
+                ) >=
+                18;
+        if (sufficientlySeparate &&
+            sp != null &&
+            dir != null &&
+            sp.value >= 0 &&
+            dir.value.isFinite) {
           windBarbs.add((
-            x: canvasPts[idx].$1,
-            y: canvasPts[idx].$2,
+            x: here.$1,
+            y: here.$2,
             barb: WindBarbSample(
               time: t,
               speedKnots: sp.value,
               directionDeg: (dir.value % 360 + 360) % 360,
             ),
           ));
+          previousCanvas = here;
         }
-        nextAt += stepLen;
       }
+      slot = slot.add(interval);
     }
   }
 

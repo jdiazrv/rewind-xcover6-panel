@@ -1573,7 +1573,7 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
                     ),
                   ),
                   pw.Text(
-                    'Presión media (hPa, líneas, izq.) y altura de ola (m, área, dcha.)',
+                    'Presión media (mbar, líneas, izq.) y altura de ola (m, área, dcha.)',
                     style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
                   ),
                   pw.SizedBox(height: 6),
@@ -2604,7 +2604,7 @@ class _ModelComparisonDialogState extends State<ModelComparisonDialog> {
     final waveValues = [for (final h in hours) _nearestWave(h)?.value];
     return _chartCard(
       'Presión y oleaje combinados',
-      'Presión media (hPa, líneas, izq.) y altura de ola (m, área, dcha.)',
+      'Presión media (mbar, líneas, izq.) y altura de ola (m, área, dcha.)',
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

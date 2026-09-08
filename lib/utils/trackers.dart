@@ -1,5 +1,55 @@
 part of '../main.dart';
 
+class _SlowValueHistory {
+  final List<(DateTime, double)> _samples = [];
+
+  void add(double value, [DateTime? time]) {
+    final now = time?.toLocal() ?? DateTime.now();
+    _samples.add((now, value));
+    final cutoff = now.subtract(const Duration(hours: 24));
+    _samples.removeWhere((sample) => sample.$1.isBefore(cutoff));
+  }
+
+  String summary({String unit = '°'}) {
+    if (_samples.length < 2) return '';
+    final values = _samples.map((sample) => sample.$2).toList();
+    final min = values.reduce(math.min);
+    final max = values.reduce(math.max);
+    final delta = _samples.last.$2 - _samples.first.$2;
+    final arrow = delta > 0.3
+        ? '↗'
+        : delta < -0.3
+        ? '↘'
+        : '→';
+    return '$arrow ${min.toStringAsFixed(1)}–${max.toStringAsFixed(1)}$unit';
+  }
+}
+
+class _RecentCurrentStability {
+  final List<(DateTime, double)> _samples = [];
+
+  void add(double value, [DateTime? time]) {
+    final now = time?.toLocal() ?? DateTime.now();
+    _samples.add((now, value));
+    _samples.removeWhere(
+      (sample) => sample.$1.isBefore(now.subtract(const Duration(minutes: 2))),
+    );
+  }
+
+  double? get stableValue {
+    if (_samples.length < 4 ||
+        _samples.last.$1.difference(_samples.first.$1) <
+            const Duration(seconds: 30)) {
+      return null;
+    }
+    final values = _samples.map((sample) => sample.$2).toList();
+    final mean = values.reduce((a, b) => a + b) / values.length;
+    final spread = values.reduce(math.max) - values.reduce(math.min);
+    if (spread > math.max(1.0, mean.abs() * 0.20)) return null;
+    return mean;
+  }
+}
+
 /// forth — the direction only updates once the smoothed value has moved
 /// by [_thresholdM] from the last confirmed point, and re-anchors there.
 class _DepthTrendTracker {
@@ -176,7 +226,6 @@ class _WindHistory {
     if (diff < -threshold) return -1;
     return 0;
   }
-
 }
 
 class PressureHistory {
@@ -226,6 +275,32 @@ class PressureHistory {
     return (last.$2 - first.$2) / hours;
   }
 
+  /// Meteorological pressure tendency over a fixed observation window.
+  /// Returns null rather than pretending a shorter span is a 3-hour trend.
+  double? changeOver(Duration window) {
+    if (_samples.length < 2) return null;
+    final latest = _samples.last;
+    final cutoff = latest.$1.subtract(window);
+    final tolerance = Duration(microseconds: window.inMicroseconds ~/ 6);
+    if (_samples.first.$1.isAfter(cutoff.add(tolerance))) return null;
+    var baseline = _samples.first;
+    var bestDistance = baseline.$1.difference(cutoff).abs();
+    for (final sample in _samples) {
+      final distance = sample.$1.difference(cutoff).abs();
+      if (distance < bestDistance) {
+        baseline = sample;
+        bestDistance = distance;
+      }
+      if (sample.$1.isAfter(cutoff) && distance > bestDistance) break;
+    }
+    return latest.$2 - baseline.$2;
+  }
+
+  double? rateOver(Duration window) {
+    final change = changeOver(window);
+    return change == null ? null : change / (window.inSeconds / 3600.0);
+  }
+
   int trend({double threshold = 0.15}) {
     final rate = ratePerHour;
     if (rate == null) return 0;
@@ -239,7 +314,7 @@ class PressureHistory {
     if (rate == null) return 'Tendencia pendiente';
     if (rate.abs() < 0.15) return 'Estable';
     final verb = rate > 0 ? 'Subiendo' : 'Bajando';
-    return '$verb ${rate.abs().toStringAsFixed(1)} hPa/h';
+    return '$verb ${rate.abs().toStringAsFixed(1)} mbar/h';
   }
 }
 

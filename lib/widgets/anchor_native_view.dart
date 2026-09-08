@@ -48,6 +48,25 @@ Color _trackAgeColor(double t) => t >= 0.5
     ? (Color.lerp(_kTrackMid, _kTrackRecent, (t - 0.5) * 2) ?? _kTrackRecent)
     : (Color.lerp(_kTrackOld, _kTrackMid, t * 2) ?? _kTrackMid);
 
+class _ToolbarSectionLabel extends StatelessWidget {
+  const _ToolbarSectionLabel(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => RotatedBox(
+    quarterTurns: 3,
+    child: Text(
+      label,
+      style: const TextStyle(
+        color: cMuted,
+        fontSize: 8,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 0.8,
+      ),
+    ),
+  );
+}
+
 class NativeAnchorView extends StatefulWidget {
   const NativeAnchorView({
     super.key,
@@ -1068,6 +1087,14 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     final n = _trackSinceDrop.length;
     if (n < kAnchorRefitMinPoints) {
       return 'Acumulando traza\n($n/$kAnchorRefitMinPoints puntos)';
+    }
+    final dropLat = widget.config.dropLat;
+    final dropLon = widget.config.dropLon;
+    if (dropLat != null && dropLon != null) {
+      final arc = _swingArcDeg(dropLat, dropLon);
+      if (arc < 15) {
+        return 'Arco insuficiente\n(${arc.round()}°/15°)';
+      }
     }
     return null;
   }
@@ -2606,25 +2633,22 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 // 30 min — shown with its own age, since a 24kt gust from 18
                 // min ago reads very differently from one that just happened.
                 if (gust != null)
-                  Text(
-                    () {
-                      final age = widget.gustAgeMin;
-                      final when = age == null || age <= 0
-                          ? 'ahora'
-                          : age >= 60
-                          ? 'hace ${(age / 60).toStringAsFixed(age % 60 == 0 ? 0 : 1)} h'
-                          : 'hace $age min';
-                      // Naming the window matters: a peak from the server's
-                      // stored history covers hours of real weather, while
-                      // the live buffer only knows what this app has seen
-                      // since it opened.
-                      final scope = widget.gustFromHistory
-                          ? ' · ${widget.gustWindowHours} h'
-                          : '';
-                      return 'Racha ${gust.toStringAsFixed(0)} kt · $when$scope';
-                    }(),
-                    style: const TextStyle(color: cMuted, fontSize: 11),
-                  ),
+                  Text(() {
+                    final age = widget.gustAgeMin;
+                    final when = age == null || age <= 0
+                        ? 'ahora'
+                        : age >= 60
+                        ? 'hace ${(age / 60).toStringAsFixed(age % 60 == 0 ? 0 : 1)} h'
+                        : 'hace $age min';
+                    // Naming the window matters: a peak from the server's
+                    // stored history covers hours of real weather, while
+                    // the live buffer only knows what this app has seen
+                    // since it opened.
+                    final scope = widget.gustFromHistory
+                        ? ' · ${widget.gustWindowHours} h'
+                        : '';
+                    return 'Racha ${gust.toStringAsFixed(0)} kt · $when$scope';
+                  }(), style: const TextStyle(color: cMuted, fontSize: 11)),
               ],
             ),
             if (awa != null) ...[
@@ -2894,6 +2918,8 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     child: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        const _ToolbarSectionLabel('OPERACIÓN'),
+        const SizedBox(width: 6),
         _toolBtn(
           widget.config.shape == 'circle'
               ? Icons.circle_outlined
@@ -2944,8 +2970,6 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
         const SizedBox(width: 8),
         _toolBtn(Icons.straighten, 'Cadena', _openChainDialog),
         const SizedBox(width: 8),
-        _toolBtn(Icons.history, 'Historial', _openHistoryDialog),
-        const SizedBox(width: 8),
         _toolBtn(
           Icons.open_with,
           'Mover ancla',
@@ -2992,6 +3016,10 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 },
           active: _editMode == 'radius',
         ),
+        const SizedBox(width: 14),
+        const _ToolbarSectionLabel('ANÁLISIS'),
+        const SizedBox(width: 6),
+        _toolBtn(Icons.history, 'Historial', _openHistoryDialog),
         const SizedBox(width: 8),
         _toolBtn(
           Icons.center_focus_strong,
@@ -3010,6 +3038,17 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
           disabledReason: _yawAnalysisDisabledReason,
         ),
         const SizedBox(width: 14),
+        const _ToolbarSectionLabel('ALARMA'),
+        const SizedBox(width: 6),
+        _toolBtn(
+          widget.alarmsMuted ? Icons.volume_off : Icons.volume_up,
+          widget.alarmsMuted ? 'Silenciada' : 'Sonido',
+          widget.onToggleAlarmsMuted,
+          active: widget.alarmsMuted,
+        ),
+        const SizedBox(width: 14),
+        const _ToolbarSectionLabel('FONDEO'),
+        const SizedBox(width: 6),
         FilledButton.icon(
           onPressed: widget.config.armed ? _raiseAnchor : _dropAnchor,
           style: FilledButton.styleFrom(
@@ -3357,6 +3396,51 @@ class _LayersSheetState extends State<_LayersSheet> {
     if (mounted) setState(() {});
   }
 
+  void _applyPreset(String preset) {
+    widget.onChanged((c) {
+      switch (preset) {
+        case 'guardia':
+          c
+            ..showWind = true
+            ..showDepth = true
+            ..showScope = true
+            ..showAisNearby = true
+            ..showOwnTrack = true
+            ..showSatelliteLayer = false
+            ..showSeamarkLayer = true;
+          break;
+        case 'analisis':
+          c
+            ..showWind = true
+            ..showDepth = true
+            ..showScope = true
+            ..showAisNearby = true
+            ..showOwnTrack = true
+            ..showSatelliteLayer = true
+            ..showSeamarkLayer = true;
+          break;
+        case 'limpio':
+          c
+            ..showWind = false
+            ..showDepth = false
+            ..showScope = false
+            ..showAisNearby = false
+            ..showOwnTrack = false
+            ..showSatelliteLayer = false
+            ..showSeamarkLayer = true;
+          break;
+      }
+    });
+    if (mounted) setState(() {});
+  }
+
+  Widget _presetButton(String label, String preset, IconData icon) =>
+      OutlinedButton.icon(
+        onPressed: () => _applyPreset(preset),
+        icon: Icon(icon, size: 17),
+        label: Text(label),
+      );
+
   Widget _sectionTitle(String text) => Padding(
     padding: const EdgeInsets.only(top: 8, bottom: 6),
     child: Text(
@@ -3438,6 +3522,28 @@ class _LayersSheetState extends State<_LayersSheet> {
                         builder: (context, constraints) => Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
+                            _sectionTitle('VISTAS RÁPIDAS'),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _presetButton(
+                                  'Guardia',
+                                  'guardia',
+                                  Icons.shield_outlined,
+                                ),
+                                _presetButton(
+                                  'Análisis',
+                                  'analisis',
+                                  Icons.analytics_outlined,
+                                ),
+                                _presetButton(
+                                  'Limpio',
+                                  'limpio',
+                                  Icons.layers_clear_outlined,
+                                ),
+                              ],
+                            ),
                             _sectionTitle('INFORMACIÓN Y SEGUIMIENTO'),
                             _grid([
                               _toggle(

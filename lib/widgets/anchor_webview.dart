@@ -18,6 +18,7 @@ class _AnchorWebView extends StatefulWidget {
     this.authBase64 = '',
     this.skUsername = '',
     this.skPassword = '',
+    this.fullscreen = false,
   });
   final String host;
   final int port;
@@ -39,6 +40,7 @@ class _AnchorWebView extends StatefulWidget {
   // across app restarts and updates.
   final String skUsername;
   final String skPassword;
+  final bool fullscreen;
   @override
   State<_AnchorWebView> createState() => _AnchorWebViewState();
 }
@@ -163,6 +165,11 @@ class _AnchorWebViewState extends State<_AnchorWebView>
                   _url,
                   style: const TextStyle(color: cOrange, fontSize: 12),
                 ),
+                const SizedBox(height: 4),
+                const Text(
+                  'HTTP sin cifrar · sin certificado TLS',
+                  style: TextStyle(color: cOrange, fontSize: 11),
+                ),
                 const SizedBox(height: 12),
                 FilledButton.icon(
                   icon: const Icon(Icons.refresh),
@@ -185,6 +192,63 @@ class _AnchorWebViewState extends State<_AnchorWebView>
               ),
               child: const Icon(Icons.refresh, color: cMuted, size: 20),
             ),
+          ),
+        ),
+        Positioned(
+          top: 28,
+          right: 8,
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '${widget.host}:${widget.port} · HTTP',
+                  style: const TextStyle(color: cOrange, fontSize: 10),
+                ),
+              ),
+              if (!widget.fullscreen) ...[
+                const SizedBox(width: 6),
+                IconButton.filledTonal(
+                  tooltip: 'Mapa a pantalla completa',
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (_) => Dialog.fullscreen(
+                      backgroundColor: cBg,
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: _AnchorWebView(
+                              host: widget.host,
+                              port: widget.port,
+                              path: widget.path,
+                              label: widget.label,
+                              authBase64: widget.authBase64,
+                              skUsername: widget.skUsername,
+                              skPassword: widget.skPassword,
+                              fullscreen: true,
+                            ),
+                          ),
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: IconButton.filled(
+                              tooltip: 'Cerrar pantalla completa',
+                              onPressed: () => Navigator.of(context).pop(),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  icon: const Icon(Icons.fullscreen, size: 20),
+                ),
+              ],
+            ],
           ),
         ),
       ],

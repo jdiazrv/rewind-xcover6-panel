@@ -1,0 +1,86 @@
+# Seguimiento de mejoras UI
+
+Este archivo evita dejar recomendaciones a medias durante la revisión previa a producción.
+
+Estados: `HECHO`, `PARCIAL`, `PENDIENTE`, `EXCLUIDO`, `NO APLICA`.
+
+- UI-01 HECHO — VMG mantiene la misma referencia de agua o fondo.
+- UI-02 HECHO — Motor ya no se fuerza cuando no está activo.
+- UI-03 HECHO — NAV expone todas las páginas clásicas.
+- UI-04 HECHO — Nombre persistente de subpantalla NAV/VNT.
+- UI-05 HECHO — Caducidad individual también en PWR/TMP/TNK.
+- UI-06 HECHO — TWA derivado identificado.
+- UI-07 HECHO — No usar COG para TWA a baja velocidad.
+- UI-08 HECHO — Subpantalla VNT persistida.
+- UI-09 HECHO — Crucero es la vista VNT principal.
+- UI-10 HECHO — Rombo para TWA/TWD.
+- UI-11 EXCLUIDO — Flujo eléctrico direccional, descartado por el usuario.
+- UI-12 HECHO — Consumos DC en español.
+- UI-13 EXCLUIDO — Balance energético, descartado porque ya existe corriente neta.
+- UI-14 HECHO — SOC por voltaje se identifica como aproximado y contextualiza reposo/carga.
+- UI-15 HECHO — Antigüedad por bloque PWR.
+- UI-16 HECHO — Tiempo restante solo tras corriente estable y capacidad configurada.
+- UI-17 HECHO — TMP ordenada por riesgo.
+- UI-18 HECHO — Cuadro eléctrico sustituye a Sonoff.
+- UI-19 HECHO — Etiquetas y ubicaciones configurables de neveras.
+- UI-20 HECHO — Tendencias y extremos TMP locales de 24 h.
+- UI-21 HECHO — Umbrales configurables por familia de temperatura.
+- UI-22 HECHO — Rejilla TMP adapta la última fila.
+- UI-23 HECHO — Paginación TNK adaptada al ancho disponible.
+- UI-24 HECHO — Umbrales por tanque con validación.
+- UI-25 HECHO — Capacidad configurada/sin calibrar y caducidad por tanque.
+- UI-26 HECHO — Diésel.
+- UI-27 HECHO — Desequilibrio también en litros.
+- UI-28 HECHO — Tendencia barométrica de 3 horas.
+- UI-29 HECHO — Punto de rocío y condensación.
+- UI-30 HECHO — Actual/previsto, hora y proveedor visibles en MET.
+- UI-31 HECHO — Actualización/caché visible en MET y PRON.
+- UI-32 NO APLICA — Se mantiene Interior en MET por decisión de diseño.
+- UI-33 HECHO — Selector 24 h / 3 días en PRON.
+- UI-34 HECHO — Precipitación en mm y porcentaje.
+- UI-35 HECHO — Día y hora en resúmenes.
+- UI-36 HECHO — Antigüedad, caché y proveedor/modelo automático visibles.
+- UI-37 HECHO — Conservar pronóstico cacheado con aviso.
+- UI-38 HECHO — Áreas táctiles de acciones PRON de al menos 44 px.
+- UI-39 HECHO — Marcadores horarios MAR pulsables.
+- UI-40 HECHO — Slider MAR por horas discretas.
+- UI-41 HECHO — Convención de dirección explícita.
+- UI-42 HECHO — Estado Douglas.
+- UI-43 HECHO — Mar de viento separado del swell mediante campos propios de Open-Meteo.
+- UI-44 HECHO — Actualización y proveedor MAR visibles.
+- UI-45 HECHO — Estado de seguridad ANC persistente.
+- UI-46 HECHO — Presets Guardia/Análisis/Limpio.
+- UI-47 HECHO — Barra ANC separada en Operación, Análisis, Alarmas y Fondeo.
+- UI-48 HECHO — Motivo por puntos y arco/geometría insuficiente.
+- UI-49 HECHO — Reconocer incidencia se diferencia del sonido general.
+- UI-50 HECHO — Traza ANC coloreada por edad.
+- UI-51 HECHO — Orientación ANC coherente con NAV.
+- UI-52 HECHO — Controles ANC adaptados al XCover.
+- UI-53 HECHO — Estados de carga/error MAP.
+- UI-54 HECHO — Recarga y pantalla completa explícita.
+- UI-55 HECHO — Gestos de MAP aislados.
+- UI-56 HECHO — El perfil persistente de WebView conserva el estado que Freeboard guarda localmente.
+- UI-57 HECHO — MAP y ANC tienen responsabilidades distintas.
+- UI-58 HECHO — Servidor, transporte HTTP y ausencia de TLS visibles en MAP.
+- UI-59 HECHO — Ficha AIS seleccionada continúa actualizándose.
+- UI-60 HECHO — Edad, desvanecido y retirada AIS.
+- UI-61 HECHO — Orientación AIS explícita.
+- UI-62 NO APLICA — La tabla cabe completa en el XCover.
+- UI-63 HECHO — Filtros AIS persistentes de riesgo, movimiento y distancia.
+- UI-64 HECHO — Riesgo AIS asciende inmediatamente sin agitar el resto.
+- UI-65 HECHO — Cruce solo con solución válida.
+- UI-66 HECHO — Búsqueda por conceptos en CFG con salto a sección.
+- UI-67 HECHO — Instalación/Uso identificados y Técnico ocultable.
+- UI-68 HECHO — Guardado automático para ajustes inmediatos y manual para conexiones editables.
+- UI-69 HECHO — Aviso de cambios sin guardar en Conexión e Histórico.
+- UI-70 HECHO — Resumen superior de salud y diagnóstico detallado.
+- UI-71 HECHO — Validación local de host/puerto, sensores, capacidades y umbrales.
+- UI-72 HECHO — Paquete diagnóstico JSON estructurado y sin credenciales/servidor.
+- UI-73 NO APLICA — Perfil automático se conserva sin selector manual.
+- UI-74 HECHO — Credenciales ocultas y excluidas del diagnóstico.
+- UI-75 HECHO — Rendimiento del barco se distingue del informe de viento.
+- UI-76 HECHO — Intervalo temporal Auto/30 min/1 h/3 h para barbas, también sobre la derrota.
+- UI-77 HECHO — Cobertura porcentual por señal en los informes.
+- UI-78 HECHO — Escalas robustas 2–98 percentil frente a valores aislados.
+- UI-79 HECHO — Huecos respetados en mapa y series temporales.
+- UI-80 HECHO — El mapa encaja toda la derrota.

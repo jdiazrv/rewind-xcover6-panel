@@ -175,11 +175,11 @@ Color equipTempColor(double? kelvin, {double warnC = 40, double alarmC = 55}) {
 }
 
 // Fridge temp: cyan=perfect, green=ok, orange=too warm, red=alarm
-Color fridgeTempColor(double? kelvin) {
+Color fridgeTempColor(double? kelvin, {double warnC = 6, double alarmC = 10}) {
   if (kelvin == null) return cMuted;
   final c = kelvin - 273.15;
-  if (c > 10) return cRed;
-  if (c > 6) return cOrange;
+  if (c > alarmC) return cRed;
+  if (c > warnC) return cOrange;
   if (c > 2) return cGreen;
   return cCyan;
 }

@@ -775,24 +775,74 @@ class _PressureSparklinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    const left = 34.0;
+    const right = 4.0;
+    const top = 4.0;
+    const bottom = 16.0;
+    final plot = Rect.fromLTRB(
+      left,
+      top,
+      size.width - right,
+      size.height - bottom,
+    );
+    void label(String text, Offset at, {TextAlign align = TextAlign.left}) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: text,
+          style: const TextStyle(color: cMuted, fontSize: 9),
+        ),
+        textDirection: TextDirection.ltr,
+        textAlign: align,
+      )..layout();
+      tp.paint(canvas, at);
+    }
+
     if (samples.length < 2) {
-      final y = size.height * 0.55;
+      final y = plot.center.dy;
       canvas.drawLine(
-        Offset(0, y),
-        Offset(size.width, y),
+        Offset(plot.left, y),
+        Offset(plot.right, y),
         Paint()
           ..color = cMuted.withValues(alpha: 0.24)
-          ..strokeWidth = 2,
+          ..strokeWidth = 1,
       );
+      label('Esperando histórico', Offset(plot.left + 6, y - 14));
       return;
     }
 
     final values = [for (final s in samples) s.$2];
-    var minV = values.reduce(math.min);
-    var maxV = values.reduce(math.max);
-    if ((maxV - minV).abs() < 0.2) {
-      minV -= 0.1;
-      maxV += 0.1;
+    final rawMin = values.reduce(math.min);
+    final rawMax = values.reduce(math.max);
+    // Never magnify a few tenths of a mbar into a dramatic full-height
+    // movement. Four mbar is the minimum honest visual window; larger real
+    // changes expand it automatically.
+    final rawSpan = rawMax - rawMin;
+    final wantedSpan = math.max(4.0, rawSpan * 1.2);
+    final step = wantedSpan <= 5
+        ? 1.0
+        : wantedSpan <= 10
+        ? 2.0
+        : 5.0;
+    var minV = (rawMin / step).floorToDouble() * step;
+    var maxV = (rawMax / step).ceilToDouble() * step;
+    while (maxV - minV < 4) {
+      minV -= step;
+      maxV += step;
+    }
+
+    final gridPaint = Paint()
+      ..color = cMuted.withValues(alpha: 0.13)
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 2; i++) {
+      final fraction = i / 2;
+      final y = plot.bottom - fraction * plot.height;
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
+      final gridValue = minV + fraction * (maxV - minV);
+      label(
+        gridValue.toStringAsFixed(0),
+        Offset(0, y - 5),
+        align: TextAlign.right,
+      );
     }
 
     final firstMs = samples.first.$1.millisecondsSinceEpoch;
@@ -800,41 +850,68 @@ class _PressureSparklinePainter extends CustomPainter {
     final spanMs = math.max(1, lastMs - firstMs);
     Offset point((DateTime, double) sample) {
       final x =
-          (sample.$1.millisecondsSinceEpoch - firstMs) / spanMs * size.width;
+          plot.left +
+          (sample.$1.millisecondsSinceEpoch - firstMs) / spanMs * plot.width;
       final y =
-          size.height -
-          ((sample.$2 - minV) / (maxV - minV)).clamp(0.0, 1.0) * size.height;
+          plot.bottom -
+          ((sample.$2 - minV) / (maxV - minV)).clamp(0.0, 1.0) * plot.height;
       return Offset(x, y);
     }
 
-    final path = Path()
-      ..moveTo(point(samples.first).dx, point(samples.first).dy);
+    final gaps = <int>[];
     for (var i = 1; i < samples.length; i++) {
-      final p = point(samples[i]);
-      final prev = point(samples[i - 1]);
-      path.cubicTo(
-        prev.dx + (p.dx - prev.dx) * 0.42,
-        prev.dy,
-        prev.dx + (p.dx - prev.dx) * 0.58,
-        p.dy,
-        p.dx,
-        p.dy,
+      final gap = samples[i].$1.difference(samples[i - 1].$1).inMilliseconds;
+      if (gap > 0) gaps.add(gap);
+    }
+    gaps.sort();
+    final medianGap = gaps.isEmpty ? spanMs : gaps[gaps.length ~/ 2];
+    final gapLimit = math.max(medianGap * 4, 60000);
+    final segments = <List<(DateTime, double)>>[];
+    var segment = <(DateTime, double)>[samples.first];
+    for (var i = 1; i < samples.length; i++) {
+      if (samples[i].$1.difference(samples[i - 1].$1).inMilliseconds >
+          gapLimit) {
+        segments.add(segment);
+        segment = [];
+      }
+      segment.add(samples[i]);
+    }
+    segments.add(segment);
+
+    for (final points in segments) {
+      if (points.length < 2) continue;
+      final path = Path()
+        ..moveTo(point(points.first).dx, point(points.first).dy);
+      for (final sample in points.skip(1)) {
+        final p = point(sample);
+        path.lineTo(p.dx, p.dy);
+      }
+      final fill = Path.from(path)
+        ..lineTo(point(points.last).dx, plot.bottom)
+        ..lineTo(point(points.first).dx, plot.bottom)
+        ..close();
+      canvas.drawPath(fill, Paint()..color = color.withValues(alpha: 0.10));
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = color
+          ..strokeWidth = 2.5
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..style = PaintingStyle.stroke,
       );
     }
-
-    final fill = Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(fill, Paint()..color = color.withValues(alpha: 0.10));
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..strokeWidth = 4
-        ..strokeCap = StrokeCap.round
-        ..style = PaintingStyle.stroke,
-    );
+    final latest = point(samples.last);
+    canvas.drawCircle(latest, 3.5, Paint()..color = color);
+    label('inicio', Offset(plot.left, plot.bottom + 3));
+    final nowTp = TextPainter(
+      text: const TextSpan(
+        text: 'ahora',
+        style: TextStyle(color: cMuted, fontSize: 9),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    nowTp.paint(canvas, Offset(plot.right - nowTp.width, plot.bottom + 3));
   }
 
   @override
@@ -868,7 +945,7 @@ class _MarineWavePainter extends CustomPainter {
         path,
         Paint()
           ..color = color.withValues(alpha: row == 0 ? 0.34 : 0.58)
-          ..strokeWidth = row == 0 ? 9 : 18
+          ..strokeWidth = row == 0 ? 2.0 : 3.5
           ..strokeCap = StrokeCap.round
           ..style = PaintingStyle.stroke,
       );

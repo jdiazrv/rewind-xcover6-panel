@@ -233,10 +233,32 @@ class ForecastCard extends StatelessWidget {
               fmt(p.tempC, 0, ' C'),
               cYellow,
               subtitle:
-                  'Lluvia ${fmt(p.rainPct, 0, '%')} · Viento ${fmt(p.windKn, 0, ' kt')} · Racha ${fmt(p.gustKn, 0, ' kt')}',
+                  'Lluvia ${fmt(p.rainPct, 0, '%')} · ${fmt(p.rainMm, 1, ' mm')} · Viento ${fmt(p.windKn, 0, ' kt')} · Racha ${fmt(p.gustKn, 0, ' kt')}',
             ),
       child: p == null
-          ? const Center(child: Text('--', style: TextStyle(fontSize: 40)))
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.cloud_off, color: cMuted, size: 28),
+                  const SizedBox(height: 5),
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: cText,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const Text(
+                    'Sin previsión',
+                    style: TextStyle(color: cMuted, fontSize: 11),
+                  ),
+                ],
+              ),
+            )
           : FittedBox(
               fit: BoxFit.contain,
               child: SizedBox(
@@ -285,7 +307,7 @@ class ForecastCard extends StatelessWidget {
                                 ),
                               ),
                             Text(
-                              'Lluvia ${fmt(p.rainPct, 0, '%')}',
+                              'Lluvia ${fmt(p.rainPct, 0, '%')} · ${fmt(p.rainMm, 1, ' mm')}',
                               style: const TextStyle(
                                 color: cCyan,
                                 fontSize: 13,
@@ -390,7 +412,7 @@ class HourForecast extends StatelessWidget {
                 ),
               ),
               Text(
-                fmt(point.rainPct, 0, '%'),
+                '${fmt(point.rainPct, 0, '%')} · ${fmt(point.rainMm, 1, ' mm')}',
                 style: const TextStyle(color: cCyan, fontSize: 13),
               ),
               Row(
@@ -437,12 +459,12 @@ class PressureTrendCard extends StatelessWidget {
     super.key,
     required this.value,
     required this.history,
-    required this.fromInflux,
+    required this.source,
     required this.zoom,
   });
   final double? value;
   final PressureHistory history;
-  final bool fromInflux;
+  final String source;
   final void Function(
     String title,
     String value,
@@ -454,9 +476,22 @@ class PressureTrendCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final trend = history.trend();
-    final trendText = history.trendText();
-    final source = fromInflux ? 'InfluxDB' : 'en vivo';
+    final samples = history.samples;
+    const tendencyWindow = Duration(hours: 3);
+    final change3h = history.changeOver(tendencyWindow);
+    final rate = history.rateOver(tendencyWindow);
+    final trend = rate == null
+        ? 0
+        : rate > 0.15
+        ? 1
+        : rate < -0.15
+        ? -1
+        : 0;
+    final trendText = rate == null
+        ? 'Tendencia 3 h pendiente'
+        : rate.abs() < 0.15
+        ? 'Estable en 3 h'
+        : '${rate > 0 ? 'Subiendo' : 'Bajando'} ${rate.abs().toStringAsFixed(1)} mbar/h';
     // The sparkline used to have no scale at all — "no se sabe de cuánto
     // tiempo atrás es". span is the *actual* coverage of history.samples
     // (up to 24h once InfluxDB has backfilled it, honestly shorter right
@@ -467,19 +502,25 @@ class PressureTrendCard extends StatelessWidget {
         : span.inHours >= 1
         ? '${span.inHours} h'
         : '${span.inMinutes} min';
-    final trendLine = spanLabel == null
-        ? trendText
-        : '$trendText · últ. $spanLabel';
+    final trendLine = spanLabel == null ? trendText : '$trendText · $spanLabel';
+    final values = [for (final sample in samples) sample.$2];
+    final minValue = values.isEmpty ? null : values.reduce(math.min);
+    final maxValue = values.isEmpty ? null : values.reduce(math.max);
+    final trendColor = trend > 0
+        ? cCyan
+        : trend < 0
+        ? cOrange
+        : cMuted;
     return CardShell(
       onTap: () => zoom?.call(
         'Presión',
-        fmt(value, 0, ''),
+        fmt(value, 1, ''),
         cPurple,
         subtitle: '$trendLine · $source',
         graphMetrics: const [mPressure],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        padding: const EdgeInsets.fromLTRB(12, 9, 12, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -487,78 +528,133 @@ class PressureTrendCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const Text(
-                  'Presión',
+                  'PRESIÓN ATMOSFÉRICA',
                   style: TextStyle(
                     color: cMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
                     letterSpacing: 0.8,
                   ),
                 ),
-                if (trend != 0) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    trend > 0 ? Icons.arrow_upward : Icons.arrow_downward,
-                    size: 15,
-                    color: cPurple,
-                  ),
-                ],
                 const Spacer(),
-                const Text(
-                  'hPa',
-                  style: TextStyle(
-                    color: cPurple,
-                    fontSize: 26,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(width: 4),
                 Icon(
                   Icons.show_chart,
-                  size: 13,
+                  size: 15,
                   color: cPurple.withValues(alpha: 0.5),
                 ),
               ],
             ),
-            Expanded(
-              flex: 5,
-              child: Center(
-                child: FittedBox(
-                  fit: BoxFit.contain,
-                  child: Text(
-                    fmt(value, 0, ''),
-                    style: const TextStyle(
-                      fontSize: 300,
-                      fontWeight: FontWeight.w900,
-                      color: cPurple,
-                      height: 1.0,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          fmt(value, 1, ''),
+                          style: const TextStyle(
+                            fontSize: 62,
+                            fontWeight: FontWeight.w900,
+                            color: cPurple,
+                            height: 1,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Text(
+                          'mbar',
+                          style: TextStyle(
+                            color: cPurple,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: trendColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(
+                      color: trendColor.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Icon(
+                        trend > 0
+                            ? Icons.north_east
+                            : trend < 0
+                            ? Icons.south_east
+                            : Icons.east,
+                        size: 17,
+                        color: trendColor,
+                      ),
+                      Text(
+                        rate == null
+                            ? '--'
+                            : '${rate.abs().toStringAsFixed(1)}/h',
+                        style: TextStyle(
+                          color: trendColor,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            SizedBox(
-              height: 82,
-              width: double.infinity,
+            const SizedBox(height: 4),
+            Expanded(
               child: CustomPaint(
                 painter: _PressureSparklinePainter(
-                  samples: history.samples,
+                  samples: samples,
                   color: cPurple,
                 ),
                 child: const SizedBox.expand(),
               ),
             ),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Text(
+                  'Mín ${minValue?.toStringAsFixed(1) ?? '--'}',
+                  style: const TextStyle(color: cMuted, fontSize: 10),
+                ),
+                const Spacer(),
+                Text(
+                  'Δ3h ${change3h == null ? '--' : '${change3h >= 0 ? '+' : ''}${change3h.toStringAsFixed(1)}'}',
+                  style: TextStyle(
+                    color: change3h == null ? cMuted : trendColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  'Máx ${maxValue?.toStringAsFixed(1) ?? '--'}',
+                  style: const TextStyle(color: cMuted, fontSize: 10),
+                ),
+              ],
+            ),
             Center(
               child: Text(
-                trendLine,
-                textAlign: TextAlign.center,
+                '$trendLine · $source',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: cMuted,
-                  fontSize: 28,
-                  fontWeight: FontWeight.w600,
-                ),
+                style: const TextStyle(color: cMuted, fontSize: 10),
               ),
             ),
           ],
@@ -591,7 +687,7 @@ class ModelWindCompassCard extends StatelessWidget {
     final color = windColor(forecast?.windKn);
     return CardShell(
       onTap: () => zoom?.call(
-        'Viento modelo',
+        'Viento previsto',
         fmt(forecast?.windKn, 0, ''),
         color,
         subtitle:
@@ -605,16 +701,19 @@ class ModelWindCompassCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                const Text(
-                  'Viento modelo',
-                  style: TextStyle(
-                    color: cMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.8,
+                const Expanded(
+                  child: Text(
+                    'Viento previsto',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: cMuted,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
-                const Spacer(),
                 Text(
                   'kt',
                   style: TextStyle(
@@ -739,11 +838,11 @@ class MarineGraphicCard extends StatelessWidget {
     required this.color,
     required this.directionDeg,
     required this.zoom,
-    this.valueFontSize = 206,
-    this.valueWidthFactor = 0.66,
-    this.arrowSize = 68,
-    this.arrowGap = 16,
-    this.arrowLift = 16,
+    this.valueFontSize = 76,
+    this.valueWidthFactor = 0.78,
+    this.arrowSize = 30,
+    this.arrowGap = 8,
+    this.arrowLift = 6,
   });
   final String title;
   final double? value;
@@ -780,7 +879,7 @@ class MarineGraphicCard extends StatelessWidget {
       onTap: () =>
           zoom?.call(title, fmt(value, 1, ' $unit'), color, subtitle: subtitle),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -791,7 +890,7 @@ class MarineGraphicCard extends StatelessWidget {
                   title,
                   style: const TextStyle(
                     color: cMuted,
-                    fontSize: 13,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600,
                     letterSpacing: 0.8,
                   ),
@@ -801,7 +900,7 @@ class MarineGraphicCard extends StatelessWidget {
                   unit,
                   style: TextStyle(
                     color: color,
-                    fontSize: 26,
+                    fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -812,7 +911,7 @@ class MarineGraphicCard extends StatelessWidget {
                 children: [
                   Positioned.fill(
                     child: Padding(
-                      padding: const EdgeInsets.only(top: 34),
+                      padding: const EdgeInsets.only(top: 20),
                       child: CustomPaint(
                         painter: _MarineWavePainter(
                           directionDeg: directionDeg,
@@ -860,11 +959,11 @@ class MarineGraphicCard extends StatelessWidget {
               child: Text(
                 subtitle,
                 textAlign: TextAlign.center,
-                maxLines: 2,
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: cMuted,
-                  fontSize: 28,
+                  fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -1855,11 +1954,17 @@ class TankSegmentData {
     required this.label,
     required this.percent,
     required this.capacityL,
+    this.stale = false,
+    this.warningPct,
+    this.alarmPct,
   });
 
   final String label;
   final double? percent;
   final int capacityL;
+  final bool stale;
+  final double? warningPct;
+  final double? alarmPct;
 
   int? get liters => percent == null || capacityL <= 0
       ? null
@@ -1878,6 +1983,10 @@ class TankCard extends StatelessWidget {
     this.flexible = false,
     this.segments = const [],
     this.dangerWhenHigh = false,
+    this.warningPct,
+    this.alarmPct,
+    this.stale = false,
+    this.calibrated = true,
     this.onTap,
   });
   final String name;
@@ -1891,35 +2000,51 @@ class TankCard extends StatelessWidget {
   // Fuel/fresh water warn as they empty. Holding/black-water tanks use the
   // inverse thresholds because danger increases as they fill.
   final bool dangerWhenHigh;
+  final double? warningPct;
+  final double? alarmPct;
+  final bool stale;
+  final bool calibrated;
   final VoidCallback? onTap;
 
-  Color _levelColor(double percent, bool hasData) {
+  Color _levelColor(
+    double percent,
+    bool hasData, {
+    double? warning,
+    double? alarm,
+  }) {
     if (!hasData) return cMuted;
     if (dangerWhenHigh) {
-      if (percent >= 90) return cRed;
-      if (percent >= 75) return cOrange;
+      if (percent >= (alarm ?? alarmPct ?? 90)) return cRed;
+      if (percent >= (warning ?? warningPct ?? 75)) return cOrange;
     } else {
-      if (percent <= 15) return cRed;
-      if (percent <= 30) return cOrange;
+      if (percent <= (alarm ?? alarmPct ?? 15)) return cRed;
+      if (percent <= (warning ?? warningPct ?? 30)) return cOrange;
     }
     return color;
   }
 
   String _levelStatus(double percent, bool hasData) {
     if (!hasData) return 'SIN DATOS';
+    if (stale) return 'DATO ANTIGUO';
+    if (!calibrated) return 'CAPACIDAD SIN CONFIGURAR';
     if (dangerWhenHigh) {
-      if (percent >= 90) return 'VACIAR AHORA';
-      if (percent >= 75) return 'CASI LLENO';
+      if (percent >= (alarmPct ?? 90)) return 'VACIAR AHORA';
+      if (percent >= (warningPct ?? 75)) return 'CASI LLENO';
     } else {
-      if (percent <= 15) return 'NIVEL CRÍTICO';
-      if (percent <= 30) return 'NIVEL BAJO';
+      if (percent <= (alarmPct ?? 15)) return 'NIVEL CRÍTICO';
+      if (percent <= (warningPct ?? 30)) return 'NIVEL BAJO';
     }
     return 'NIVEL NORMAL';
   }
 
   Widget _segmentRow(TankSegmentData segment) {
     final pct = segment.percent?.clamp(0, 100).toDouble();
-    final segmentColor = _levelColor(pct ?? 0, pct != null);
+    final segmentColor = _levelColor(
+      pct ?? 0,
+      pct != null,
+      warning: segment.warningPct,
+      alarm: segment.alarmPct,
+    );
     return Padding(
       padding: const EdgeInsets.only(top: 5),
       child: Row(
@@ -1931,7 +2056,7 @@ class TankCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: cText,
+                color: segment.stale ? cOrange : cText,
                 fontSize: large ? 13 : 11,
                 fontWeight: FontWeight.w700,
               ),
@@ -1988,6 +2113,13 @@ class TankCard extends StatelessWidget {
     final imbalance = segmentValues.length < 2
         ? null
         : segmentValues.reduce(math.max) - segmentValues.reduce(math.min);
+    final segmentLiters = segments
+        .map((s) => s.liters)
+        .whereType<int>()
+        .toList();
+    final imbalanceLiters = segmentLiters.length < 2
+        ? null
+        : segmentLiters.reduce(math.max) - segmentLiters.reduce(math.min);
     return Container(
       width: cardWidth,
       margin: flexible ? null : EdgeInsets.only(right: large ? 18 : 10),
@@ -2149,7 +2281,7 @@ class TankCard extends StatelessWidget {
                                   ),
                                   const SizedBox(width: 5),
                                   Text(
-                                    'DESBALANCE ${imbalance.round()}%',
+                                    'DESBALANCE ${imbalance.round()}%${imbalanceLiters == null ? '' : ' · $imbalanceLiters L'}',
                                     style: const TextStyle(
                                       color: cOrange,
                                       fontSize: 10,
@@ -2312,10 +2444,12 @@ class _NavPageIndicator extends StatelessWidget {
   const _NavPageIndicator({
     required this.total,
     required this.current,
+    this.label,
     this.onDotTap,
   });
   final int total;
   final int current;
+  final String? label;
   // Web has no touch swipe and mouse-drag on a nested ListView is
   // unreliable ("no se puede deslizar" — click-and-drag scrolling here
   // fights the overscroll-distance page-change detection above). Tapping a
@@ -2335,6 +2469,24 @@ class _NavPageIndicator extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (label != null) ...[
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 72),
+              child: Text(
+                label!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: cText,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            const SizedBox(height: 3),
+          ],
           for (var i = 0; i < total; i++) ...[
             if (i > 0) const SizedBox(height: 5),
             GestureDetector(

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The NAV/VNT carousels page by listening for [OverscrollNotification]
@@ -52,7 +51,8 @@ void main() {
     expect(
       total,
       0.0,
-      reason: 'bouncing physics rubber-bands instead of overscrolling, so '
+      reason:
+          'bouncing physics rubber-bands instead of overscrolling, so '
           'the paging listener never fires — this is the reported bug',
     );
   });
@@ -77,9 +77,7 @@ void main() {
     expect(total, greaterThan(60));
   });
 
-  testWidgets('clamping physics overscrolls the other way too', (
-    tester,
-  ) async {
+  testWidgets('clamping physics overscrolls the other way too', (tester) async {
     var total = 0.0;
     await tester.pumpWidget(
       _harness(

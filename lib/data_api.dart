@@ -120,7 +120,13 @@ Future<List<GraphPoint>> influxQuery({
     final dt = DateTime.tryParse(ts);
     final v = double.tryParse(vs);
     if (dt == null || v == null || !v.isFinite) continue;
-    points.add(GraphPoint(time: dt, value: v * def.scale + def.offset));
+    final scaled = v * def.scale + def.offset;
+    points.add(
+      GraphPoint(
+        time: dt,
+        value: def.normalize?.call(scaled) ?? scaled,
+      ),
+    );
   }
   return _sortAndDedupe(points);
 }
@@ -250,7 +256,13 @@ Future<List<GraphPoint>> skHistoryQuery({
     final raw = row[1];
     final v = raw is num ? raw.toDouble() : null;
     if (dt == null || v == null || !v.isFinite) continue;
-    points.add(GraphPoint(time: dt, value: v * def.scale + def.offset));
+    final scaled = v * def.scale + def.offset;
+    points.add(
+      GraphPoint(
+        time: dt,
+        value: def.normalize?.call(scaled) ?? scaled,
+      ),
+    );
   }
   return _sortAndDedupe(points);
 }

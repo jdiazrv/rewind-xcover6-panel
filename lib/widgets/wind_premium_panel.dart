@@ -258,6 +258,7 @@ class PremiumWindPanel extends StatefulWidget {
     super.key,
     this.awaDeg,
     this.twaDeg,
+    this.twaDerived = false,
     this.awsKn,
     this.twsKn,
     this.awsGustKn,
@@ -273,6 +274,7 @@ class PremiumWindPanel extends StatefulWidget {
 
   final double? awaDeg;
   final double? twaDeg;
+  final bool twaDerived;
   final double? awsKn;
   final double? twsKn;
   final double? awsGustKn;
@@ -354,6 +356,7 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
     if (n == null || n == 0 || n.abs() == 180) return '°';
     return n < 0 ? '° Br' : '° Er';
   }
+
   static String _kt(double? v) => v == null ? '--' : v.toStringAsFixed(1);
 
   @override
@@ -445,7 +448,8 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
                         _readout(
                           label: 'TWA',
                           value: _degSideValue(twaDeg),
-                          unit: _degSideUnit(twaDeg),
+                          unit:
+                              '${_degSideUnit(twaDeg)}${widget.twaDerived ? ' · DER.' : ''}',
                         ),
                       ],
                       painter: _WindCompassPainter(
@@ -963,8 +967,8 @@ class _WindCompassPainter extends CustomPainter {
       _paintNeedle(canvas, center, r, s, a, tickInner * 0.92, color1);
     }
 
-    // TWA: a small arrowhead riding the tick ring, tip pointing outward
-    // (toward the ring) — deliberately not connected to the hub, so it
+    // TWA: a small diamond riding the tick ring — deliberately not
+    // connected to the hub, so it
     // reads as a distinct marker rather than a second clock hand sharing
     // the same pivot.
     if (angle2 != null) {
@@ -973,23 +977,26 @@ class _WindCompassPainter extends CustomPainter {
       final perp = Offset(-math.sin(a), math.cos(a));
       final outR = tickInner * 0.95;
       final inR = tickInner * 0.72;
-      final tip = center + dir * outR;
-      final baseL = center + dir * inR + perp * (s * 0.028);
-      final baseR = center + dir * inR - perp * (s * 0.028);
-      final arrow = Path()
-        ..moveTo(tip.dx, tip.dy)
-        ..lineTo(baseL.dx, baseL.dy)
-        ..lineTo(baseR.dx, baseR.dy)
+      final outer = center + dir * outR;
+      final inner = center + dir * inR;
+      final middle = center + dir * ((outR + inR) / 2);
+      final sideL = middle + perp * (s * 0.028);
+      final sideR = middle - perp * (s * 0.028);
+      final marker = Path()
+        ..moveTo(outer.dx, outer.dy)
+        ..lineTo(sideL.dx, sideL.dy)
+        ..lineTo(inner.dx, inner.dy)
+        ..lineTo(sideR.dx, sideR.dy)
         ..close();
       canvas.drawPath(
-        arrow,
+        marker,
         Paint()
           ..color = Colors.black.withValues(alpha: 0.4)
           ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.008),
       );
-      canvas.drawPath(arrow, Paint()..color = color2);
+      canvas.drawPath(marker, Paint()..color = color2);
       canvas.drawPath(
-        arrow,
+        marker,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = s * 0.004
@@ -1076,7 +1083,11 @@ class _HeadingTwdPainter extends CustomPainter {
         final startRad = _screenRad(fromDeg - pad);
         final sweepRad = (delta + pad * 2) * math.pi / 180;
         final wedge = Path()
-          ..addArc(Rect.fromCircle(center: center, radius: bandOuter), startRad, sweepRad)
+          ..addArc(
+            Rect.fromCircle(center: center, radius: bandOuter),
+            startRad,
+            sweepRad,
+          )
           ..arcTo(
             Rect.fromCircle(center: center, radius: bandInner),
             startRad + sweepRad,
@@ -1130,8 +1141,7 @@ class _HeadingTwdPainter extends CustomPainter {
       }
     }
 
-    // TWD arrow — an arrowhead riding just inside the tick ring, tip
-    // pointing outward (toward the ring), showing where the wind is
+    // TWD diamond — riding just inside the tick ring, showing where the wind is
     // coming from, same visual language as the wind compass's TWA marker.
     if (twdDeg != null) {
       final a = _screenRad(twdDeg!);
@@ -1139,23 +1149,26 @@ class _HeadingTwdPainter extends CustomPainter {
       final perp = Offset(-math.sin(a), math.cos(a));
       final outR = tickInner * 0.98;
       final inR = tickInner * 0.62;
-      final tip = center + dir * outR;
-      final baseL = center + dir * inR + perp * (s * 0.03);
-      final baseR = center + dir * inR - perp * (s * 0.03);
-      final arrow = Path()
-        ..moveTo(tip.dx, tip.dy)
-        ..lineTo(baseL.dx, baseL.dy)
-        ..lineTo(baseR.dx, baseR.dy)
+      final outer = center + dir * outR;
+      final inner = center + dir * inR;
+      final middle = center + dir * ((outR + inR) / 2);
+      final sideL = middle + perp * (s * 0.03);
+      final sideR = middle - perp * (s * 0.03);
+      final marker = Path()
+        ..moveTo(outer.dx, outer.dy)
+        ..lineTo(sideL.dx, sideL.dy)
+        ..lineTo(inner.dx, inner.dy)
+        ..lineTo(sideR.dx, sideR.dy)
         ..close();
       canvas.drawPath(
-        arrow,
+        marker,
         Paint()
           ..color = Colors.black.withValues(alpha: 0.4)
           ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.008),
       );
-      canvas.drawPath(arrow, Paint()..color = twdColor);
+      canvas.drawPath(marker, Paint()..color = twdColor);
       canvas.drawPath(
-        arrow,
+        marker,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = s * 0.004
