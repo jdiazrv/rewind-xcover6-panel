@@ -13,6 +13,14 @@
 # Flutter isn't preinstalled on Netlify images, hence the shallow clone.
 # Pinned to a tag rather than tracking `stable` so a future Flutter
 # release can't silently change what this site builds.
+#
+# --no-web-resources-cdn: by default Flutter loads CanvasKit from
+# www.gstatic.com, which the Content-Security-Policy in web/_headers
+# rightly refuses ("Refused to load ... canvaskit.js because it does not
+# appear in the script-src directive"), leaving a blank page. Serving
+# CanvasKit from our own origin fixes that without loosening the CSP —
+# and matters beyond Netlify: this is a boat app that has to start with
+# no internet at all, which a CDN dependency would prevent.
 
 [build]
   command = """
@@ -20,7 +28,7 @@
     export PATH="$HOME/flutter/bin:$PATH" &&
     flutter config --no-analytics &&
     flutter pub get &&
-    flutter build web --release
+    flutter build web --release --no-web-resources-cdn
   """
   publish = "build/web"
 
