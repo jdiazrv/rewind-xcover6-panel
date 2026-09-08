@@ -71,13 +71,17 @@ Future<List<GraphPoint>> influxQuery({
   String bucket = influxBucketDefault,
   String org = influxOrgDefault,
   String token = influxTokenDefault,
+  // Flux aggregate applied per window. 'mean' for anything being plotted
+  // as a trend; 'max' for a genuine peak — a gust averaged over its
+  // window isn't a gust any more, it's just a slightly high mean.
+  String aggFn = 'mean',
 }) async {
   final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
   final query =
       'from(bucket:"${_fluxString(bucket)}")'
       '|>range(start:$fluxRange,stop:now())'
       '|>filter(fn:(r)=>r._measurement=="${_fluxString(def.skPath)}")'
-      '|>aggregateWindow(every:$aggEvery,fn:mean,createEmpty:true)'
+      '|>aggregateWindow(every:$aggEvery,fn:${_fluxString(aggFn)},createEmpty:true)'
       '|>keep(columns:["_time","_value"])';
   final response = await http
       .post(
@@ -209,12 +213,16 @@ Future<List<GraphPoint>> skHistoryQuery({
   required MetricDef def,
   required Duration range,
   required Duration resolution,
+  // Signal K's own per-path aggregate, appended as "path:method" — the
+  // API defaults to `average`. Same reasoning as influxQuery's aggFn: a
+  // gust has to come back as `max`, never averaged away.
+  String aggFn = 'average',
 }) async {
   final now = DateTime.now().toUtc();
   final from = now.subtract(range);
   final url = Uri.http('$host:$port', '/signalk/v2/api/history/values', {
     'context': 'vessels.self',
-    'paths': def.skPath,
+    'paths': aggFn == 'average' ? def.skPath : '${def.skPath}:$aggFn',
     'from': from.toIso8601String(),
     'to': now.toIso8601String(),
     'resolution': resolution.inSeconds.clamp(1, 1 << 30).toString(),

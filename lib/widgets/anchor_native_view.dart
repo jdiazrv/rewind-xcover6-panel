@@ -66,6 +66,8 @@ class NativeAnchorView extends StatefulWidget {
     required this.awsKn,
     required this.gustKn,
     required this.gustAgeMin,
+    this.gustFromHistory = false,
+    this.gustWindowHours = 6,
     required this.aisTargets,
     required this.ownTrack,
     required this.skUsername,
@@ -139,6 +141,12 @@ class NativeAnchorView extends StatefulWidget {
   final VoidCallback onOpenYawAnalysis;
   final double? gustKn;
   final int? gustAgeMin;
+  // True when [gustKn] came from the server's stored history rather than
+  // this install's own in-memory buffer — the label says which, since a
+  // peak "de las últimas 6 h" and one "desde que abrí la app" are very
+  // different claims.
+  final bool gustFromHistory;
+  final int gustWindowHours;
   final List<AisTarget> aisTargets;
   final List<AnchorTrackPoint> ownTrack;
   final String skUsername;
@@ -2555,13 +2563,22 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                         fontSize: 16,
                       ),
                     ),
-                    if (widget.twdDeg != null) ...[
-                      const SizedBox(width: 6),
-                      Text(
-                        'TWD ${widget.twdDeg!.round()}°',
-                        style: const TextStyle(color: cText, fontSize: 13),
+                    // Always rendered, "--" included: at anchor the wind's
+                    // true direction is the number that tells you which way
+                    // the boat will lie, so it having quietly disappeared
+                    // whenever the source went stale was worse than showing
+                    // that it's missing. Reported live 2026-09-07.
+                    const SizedBox(width: 6),
+                    Text(
+                      widget.twdDeg != null
+                          ? 'TWD ${widget.twdDeg!.round()}°'
+                          : 'TWD --',
+                      style: TextStyle(
+                        color: widget.twdDeg != null ? cText : cMuted,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
                       ),
-                    ],
+                    ),
                     if (awa != null) ...[
                       const SizedBox(width: 6),
                       Text(
@@ -2590,9 +2607,22 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 // min ago reads very differently from one that just happened.
                 if (gust != null)
                   Text(
-                    widget.gustAgeMin != null && widget.gustAgeMin! > 0
-                        ? 'Racha ${gust.toStringAsFixed(0)} kt · hace ${widget.gustAgeMin} min'
-                        : 'Racha ${gust.toStringAsFixed(0)} kt · ahora',
+                    () {
+                      final age = widget.gustAgeMin;
+                      final when = age == null || age <= 0
+                          ? 'ahora'
+                          : age >= 60
+                          ? 'hace ${(age / 60).toStringAsFixed(age % 60 == 0 ? 0 : 1)} h'
+                          : 'hace $age min';
+                      // Naming the window matters: a peak from the server's
+                      // stored history covers hours of real weather, while
+                      // the live buffer only knows what this app has seen
+                      // since it opened.
+                      final scope = widget.gustFromHistory
+                          ? ' · ${widget.gustWindowHours} h'
+                          : '';
+                      return 'Racha ${gust.toStringAsFixed(0)} kt · $when$scope';
+                    }(),
                     style: const TextStyle(color: cMuted, fontSize: 11),
                   ),
               ],

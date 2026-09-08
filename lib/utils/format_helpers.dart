@@ -201,3 +201,12 @@ double? relativeWindAngle(double? directionDeg, double? referenceDeg) {
   if (directionDeg == null || referenceDeg == null) return null;
   return normalizeRelativeAngle(directionDeg - referenceDeg);
 }
+
+/// Inverse of [relativeWindAngle]: TWD (true bearing the wind comes FROM)
+/// rebuilt from TWA plus the boat's own heading. Boats whose instruments
+/// publish only the relative angle never send TWD at all, so without this
+/// the anchor screen simply had no wind direction to show.
+double? trueWindDirection(double? twaDeg, double? referenceDeg) {
+  if (twaDeg == null || referenceDeg == null) return null;
+  return normalize360(referenceDeg + twaDeg);
+}

@@ -5003,6 +5003,85 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
+  // Peak AWS over the last few hours, taken from the SERVER's stored
+  // history rather than this app's own in-memory buffer.
+  //
+  // _awsHistory only holds what this install has personally witnessed
+  // since it started, so the anchor screen's "Racha" reset to nothing on
+  // every app restart and could never look back further than its own
+  // 30-minute window — useless for the actual question at anchor, which
+  // is "how hard has it been blowing tonight". Reported live 2026-09-07
+  // ("en racha tiene que usar datos de histórico").
+  //
+  // Queried with a MAX aggregate, not the usual mean — averaging a gust
+  // over its window is exactly how you lose it. Signal K takes it as
+  // "path:max"; InfluxDB as aggregateWindow(fn:max). Verified against
+  // REWIND live: same window returns 13.95 m/s peak vs 9.08 mean.
+  // TWD rebuilt from TWA + heading, for boats whose instruments only ever
+  // publish the relative angle. Uses the same heading/COG fallback chain
+  // the VNT dial uses for the mirror-image derivation.
+  double? get _derivedTwdDeg => trueWindDirection(
+    _freshWind(_dTwa, signalK.twaUpdate) ?? _dTwa,
+    _freshHeading ?? _freshCog,
+  );
+
+  ({double kn, int ageMin})? _historicGust;
+  bool _loadingHistoricGust = false;
+  DateTime? _historicGustFetchedAt;
+  static const _historicGustWindow = Duration(hours: 6);
+
+  Future<void> _refreshHistoricGust() async {
+    if (_loadingHistoricGust || settings.demoMode) return;
+    // The anchor screen rebuilds constantly; only actually re-query every
+    // few minutes.
+    final last = _historicGustFetchedAt;
+    if (last != null && DateTime.now().difference(last).inMinutes < 5) return;
+    _loadingHistoricGust = true;
+    try {
+      List<GraphPoint> pts;
+      try {
+        pts = await influxQuery(
+          host: settings.effectiveInfluxHost,
+          org: settings.influxOrg,
+          token: settings.influxToken,
+          def: mAws,
+          fluxRange: '-${_historicGustWindow.inHours}h',
+          aggEvery: '1m',
+          bucket: settings.influxBucket,
+          aggFn: 'max',
+        );
+      } catch (_) {
+        pts = await skHistoryQuery(
+          host: settings.host,
+          port: settings.port,
+          authBase64: settings.authBase64,
+          def: mAws,
+          range: _historicGustWindow,
+          resolution: const Duration(minutes: 1),
+          aggFn: 'max',
+        );
+      }
+      _historicGustFetchedAt = DateTime.now();
+      GraphPoint? peak;
+      for (final p in pts) {
+        if (peak == null || p.value > peak.value) peak = p;
+      }
+      if (!mounted) return;
+      setState(() {
+        _historicGust = peak == null
+            ? null
+            : (
+                kn: peak.value,
+                ageMin: DateTime.now().difference(peak.time).inMinutes.abs(),
+              );
+      });
+    } catch (_) {
+      _historicGustFetchedAt = DateTime.now(); // don't hammer a dead source
+    } finally {
+      _loadingHistoricGust = false;
+    }
+  }
+
   Future<void> _loadWeather({bool force = false}) async {
     if (loadingWeather) return;
     final lat = _weatherLat ?? (kIsWeb ? kDefaultWeatherLat : null);
@@ -8645,20 +8724,27 @@ class _DashboardState extends State<Dashboard> {
               children: [
                 Expanded(
                   child: PowerAuxTile(
-                    title: 'Corriente servicio',
-                    value: fmt(signalK.houseA, 1, ''),
-                    unit: 'A',
-                    subtitle: signalK.houseA == null
-                        ? 'sin datos'
-                        : signalK.houseA! >= 0
-                        ? 'cargando batería'
-                        : 'descargando batería',
-                    color: currentColorValue,
-                    icon: Icons.swap_vert,
+                    title: 'Bow thruster',
+                    value: fmt(signalK.bowthrusterV, 2, ''),
+                    unit: 'V',
+                    // Same move as the house battery — its temperature
+                    // used to be a separate TEMP-page card.
+                    subtitle: signalK.bowthrusterTempK == null
+                        ? 'batería proa'
+                        : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}',
+                    color: bowColor,
+                    customIcon: BowThrusterGlyph(color: bowColor),
                     zoom: _showZoom,
-                    graphMetrics: [
-                      _metricColor(_mHouseCurrent, currentColorValue),
-                    ],
+                    graphMetrics: [_metricColor(mBowV, bowColor)],
+                    onShowCurve: signalK.bowthrusterV == null
+                        ? null
+                        : () => _openBatteryCurveDialog(
+                            title: 'Bow thruster',
+                            voltage: signalK.bowthrusterV,
+                            trend: _bowVTrend.direction,
+                            color: bowColor,
+                            chemistry: settings.batteryChemistryBow,
+                          ),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -8686,27 +8772,20 @@ class _DashboardState extends State<Dashboard> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: PowerAuxTile(
-                    title: 'Bow thruster',
-                    value: fmt(signalK.bowthrusterV, 2, ''),
-                    unit: 'V',
-                    // Same move as the house battery — its temperature
-                    // used to be a separate TEMP-page card.
-                    subtitle: signalK.bowthrusterTempK == null
-                        ? 'batería proa'
-                        : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}',
-                    color: bowColor,
-                    customIcon: BowThrusterGlyph(color: bowColor),
+                    title: 'Corriente servicio',
+                    value: fmt(signalK.houseA, 1, ''),
+                    unit: 'A',
+                    subtitle: signalK.houseA == null
+                        ? 'sin datos'
+                        : signalK.houseA! >= 0
+                        ? 'cargando batería'
+                        : 'descargando batería',
+                    color: currentColorValue,
+                    icon: Icons.swap_vert,
                     zoom: _showZoom,
-                    graphMetrics: [_metricColor(mBowV, bowColor)],
-                    onShowCurve: signalK.bowthrusterV == null
-                        ? null
-                        : () => _openBatteryCurveDialog(
-                            title: 'Bow thruster',
-                            voltage: signalK.bowthrusterV,
-                            trend: _bowVTrend.direction,
-                            color: bowColor,
-                            chemistry: settings.batteryChemistryBow,
-                          ),
+                    graphMetrics: [
+                      _metricColor(_mHouseCurrent, currentColorValue),
+                    ],
                   ),
                 ),
               ],
@@ -9458,6 +9537,10 @@ class _DashboardState extends State<Dashboard> {
   // they would hoekens'.
   Widget _nativeAnchorPage() {
     final windDebug = _awsHistory.gustDebugSnapshot();
+    // Self-throttled to one real query every 5 min (see the method), so
+    // calling it from build — which the anchor screen does constantly — is
+    // safe and keeps the peak current without its own timer.
+    unawaited(_refreshHistoricGust());
     return NativeAnchorView(
       config: settings.anchorConfig,
       onConfigChanged: (cfg) {
@@ -9504,13 +9587,34 @@ class _DashboardState extends State<Dashboard> {
       gpsToBowM: settings.anchorGpsToBowM,
       awaDeg: _freshWind(_dAwa, signalK.awaUpdate),
       awsKn: _freshWind(_dAws, signalK.awsUpdate),
-      twdDeg: _freshWind(_dTwd, signalK.twdUpdate),
+      // Same normalize360 the VNT dial applies — TWD is a true bearing and
+      // must never render as a negative number if the source ever emits a
+      // signed delta. Falls back to deriving it from TWA + heading, and
+      // then to the last raw value, so the anchor screen keeps showing
+      // which way the wind is coming from (the single most useful number
+      // when lying to an anchor) instead of the field vanishing whenever
+      // the direct path goes briefly stale. Reported live 2026-09-07 ("en
+      // anc tiene que mostrar TWD").
+      twdDeg: switch (_freshWind(_dTwd, signalK.twdUpdate) ??
+          _derivedTwdDeg ??
+          _dTwd) {
+        null => null,
+        final v => normalize360(v),
+      },
       windMeanKn: windDebug.meanKn,
       windStddevKn: windDebug.stddevKn,
       windPeak3sKn: windDebug.peak3sKn,
       windGustFloorKn: windDebug.floorKn,
-      gustKn: _awsHistory.statisticalGustWithAge()?.value,
-      gustAgeMin: _awsHistory.statisticalGustWithAge()?.age.inMinutes,
+      // Server-stored peak first (survives restarts, looks back hours —
+      // see _refreshHistoricGust), falling back to this install's own live
+      // buffer when there's no history source reachable.
+      gustKn:
+          _historicGust?.kn ?? _awsHistory.statisticalGustWithAge()?.value,
+      gustAgeMin:
+          _historicGust?.ageMin ??
+          _awsHistory.statisticalGustWithAge()?.age.inMinutes,
+      gustFromHistory: _historicGust != null,
+      gustWindowHours: _historicGustWindow.inHours,
       isGusting: _awsHistory.isGusting(),
       aisTargets: _visibleAisTargets.values.toList(),
       ownTrack: _ownTrack.points,

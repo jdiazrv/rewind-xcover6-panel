@@ -82,6 +82,26 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('PWR puts bow left and service current right', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.tap(find.text('PWR'));
+    await tester.pumpAndSettle();
+
+    final bowX = tester.getCenter(find.text('Bow thruster')).dx;
+    final startX = tester.getCenter(find.text('Arranque')).dx;
+    final serviceX = tester.getCenter(find.text('Corriente servicio')).dx;
+    expect(bowX, lessThan(startX));
+    expect(startX, lessThan(serviceX));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('VNT page shows all wind cards', (WidgetTester tester) async {
     tester.view.physicalSize = const Size(915, 412);
     tester.view.devicePixelRatio = 1;
