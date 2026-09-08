@@ -637,16 +637,16 @@ class PressureTrendCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             // Con Expanded a secas la chispa se quedaba con TODO el alto
-            // sobrante de la tarjeta, y una sparkline no gana nada por ser
-            // más alta: su trabajo es enseñar la forma de la tendencia, no
-            // llenar hueco ("demasiado espacio vertical para la gráfica",
-            // 2026-09-08). Se le pone un techo y el resto del espacio se
-            // reparte alrededor, así el número y la fila de mín/máx quedan
-            // más aireados en vez de aplastados contra los bordes.
+            // sobrante de la tarjeta y aplastaba el número contra los
+            // bordes, así que lleva un techo y el resto del espacio se
+            // reparte alrededor. El techo se subió de 46 a 138 ("la has
+            // dejado con una altura ridícula, triplica la altura",
+            // 2026-09-08): a esa altura la pendiente de la presión, que es
+            // lo único que importa aquí, sí se lee.
             Expanded(
               child: Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 46),
+                  constraints: const BoxConstraints(maxHeight: 138),
                   child: CustomPaint(
                     painter: _PressureSparklinePainter(
                       samples: samples,
