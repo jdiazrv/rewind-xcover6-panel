@@ -874,6 +874,7 @@ class MarineGraphicCard extends StatelessWidget {
     this.arrowSize = 30,
     this.arrowGap = 8,
     this.arrowLift = 6,
+    this.onHelp,
   });
   final String title;
   final double? value;
@@ -886,6 +887,7 @@ class MarineGraphicCard extends StatelessWidget {
   final double arrowSize;
   final double arrowGap;
   final double arrowLift;
+  final VoidCallback? onHelp;
   final void Function(
     String title,
     String value,
@@ -935,6 +937,7 @@ class MarineGraphicCard extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
+                if (onHelp != null) HelpDot(onTap: onHelp!, color: color),
               ],
             ),
             Expanded(

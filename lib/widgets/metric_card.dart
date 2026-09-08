@@ -17,6 +17,7 @@ class MetricCard extends StatelessWidget {
     this.trend,
     this.bigLines,
     this.subtitleFontSize = 28,
+    this.onHelp,
   });
 
   final String title;
@@ -40,6 +41,9 @@ class MetricCard extends StatelessWidget {
   final VoidCallback? onDoubleTap;
   final VoidCallback? onSecondaryTap;
   final List<MetricDef>? graphMetrics;
+  // Interrogación en la esquina para las tarjetas que necesitan explicar
+  // de dónde sale el número, no solo enseñarlo.
+  final VoidCallback? onHelp;
 
   @override
   Widget build(BuildContext context) {
@@ -103,6 +107,7 @@ class MetricCard extends StatelessWidget {
                     color: color,
                   ),
                 ],
+                if (onHelp != null) HelpDot(onTap: onHelp!, color: color),
               ],
             ),
             Expanded(

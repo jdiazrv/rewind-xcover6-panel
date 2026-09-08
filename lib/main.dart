@@ -59,6 +59,7 @@ part 'widgets/painters.dart';
 part 'widgets/metric_card.dart';
 part 'widgets/graph_dialog.dart';
 part 'widgets/misc_cards.dart';
+part 'widgets/marine_help.dart';
 part 'widgets/alarm_and_shell.dart';
 part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
@@ -9917,6 +9918,11 @@ class _DashboardState extends State<Dashboard> {
     return ('Duro', cRed);
   }
 
+  void _showWaveTheory(MarinePoint point) => showDialog<void>(
+    context: context,
+    builder: (_) => WaveTheoryDialog(point: point),
+  );
+
   String _douglasState(double? waveM) {
     if (waveM == null) return 'sin estado de mar';
     if (waveM < 0.1) return 'Douglas 0 · calma';
@@ -9957,13 +9963,68 @@ class _DashboardState extends State<Dashboard> {
                     height: 58,
                     child: Row(
                       children: [
-                        Text(
-                          '${_marineHorizonLabel(currentHours)} · ${_marineDate(point.time)}',
-                          style: const TextStyle(
-                            color: cMuted,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                          ),
+                        // La previsión de mar sale de las mismas
+                        // coordenadas que PRON, así que la pantalla enseña
+                        // igual de qué sitio habla y deja cambiarlo desde
+                        // aquí ("en la pantalla de mar hacer geo loc inversa
+                        // como en PRON y permitir cambiar de ubicación",
+                        // 2026-09-08). Comparte _manualWeatherLat, así que
+                        // cambiarlo en una pantalla lo cambia en la otra.
+                        Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${_marineHorizonLabel(currentHours)} · ${_marineDate(point.time)}',
+                              style: const TextStyle(
+                                color: cMuted,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(6),
+                              onTap: () => _pickWeatherLocation(context),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 2,
+                                  horizontal: 2,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.edit_location_alt_outlined,
+                                      size: 14,
+                                      color: _manualWeatherLat != null
+                                          ? cOrange
+                                          : cMuted,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 260,
+                                      ),
+                                      child: Text(
+                                        weather.place.isEmpty
+                                            ? 'Cambiar ubicación'
+                                            : weather.place,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: _manualWeatherLat != null
+                                              ? cOrange
+                                              : cMuted,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                         const SizedBox(width: 16),
                         Text(
@@ -10045,6 +10106,7 @@ class _DashboardState extends State<Dashboard> {
                                   color: cCyan,
                                   directionDeg: point.waveDir,
                                   zoom: _showZoom,
+                                  onHelp: () => _showWaveTheory(point),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -10058,6 +10120,7 @@ class _DashboardState extends State<Dashboard> {
                                   color: const Color(0xff69bdf7),
                                   directionDeg: point.windWaveDir,
                                   zoom: _showZoom,
+                                  onHelp: () => _showWaveTheory(point),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -10071,6 +10134,7 @@ class _DashboardState extends State<Dashboard> {
                                   color: const Color(0xff9277ff),
                                   directionDeg: point.swellDir,
                                   zoom: _showZoom,
+                                  onHelp: () => _showWaveTheory(point),
                                 ),
                               ),
                             ],
@@ -10121,8 +10185,19 @@ class _DashboardState extends State<Dashboard> {
                                   title: 'Estado de mar',
                                   value: comfort,
                                   subtitle: _douglasState(point.waveM),
+                                  // A 28 px el Douglas se iba a dos líneas
+                                  // y se comía la tarjeta entera: la palabra
+                                  // del semáforo, que es la que da el color
+                                  // y lo que se mira de un vistazo, no se
+                                  // llegaba a ver.
+                                  subtitleFontSize: 18,
                                   color: comfortColor,
                                   zoom: _showZoom,
+                                  onHelp: () => showDialog<void>(
+                                    context: context,
+                                    builder: (_) =>
+                                        SeaStateHelpDialog(waveM: point.waveM),
+                                  ),
                                 ),
                               ),
                             ],
