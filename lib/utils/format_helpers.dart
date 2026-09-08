@@ -210,3 +210,4 @@ double? trueWindDirection(double? twaDeg, double? referenceDeg) {
   if (twaDeg == null || referenceDeg == null) return null;
   return normalize360(referenceDeg + twaDeg);
 }
+

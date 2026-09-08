@@ -1605,6 +1605,7 @@ class SkDiscovery {
     final aggregates = solarTotalPaths.where(isAggregate).toList();
     return [...controllers, ...aggregates];
   }
+
   final List<String> fridgePaths = [];
   final List<String> depthPaths = [];
   final List<String> enginePaths = [];
@@ -1834,13 +1835,12 @@ class BatteryLoadEvent {
     'recoverySeconds': recoverySeconds,
   };
 
-  factory BatteryLoadEvent.fromJson(Map<String, dynamic> j) =>
-      BatteryLoadEvent(
-        at: DateTime.tryParse(j['at'] as String? ?? '') ?? DateTime.now(),
-        restingV: (j['restingV'] as num?)?.toDouble() ?? 0,
-        minV: (j['minV'] as num?)?.toDouble() ?? 0,
-        recoverySeconds: (j['recoverySeconds'] as num?)?.toInt() ?? 0,
-      );
+  factory BatteryLoadEvent.fromJson(Map<String, dynamic> j) => BatteryLoadEvent(
+    at: DateTime.tryParse(j['at'] as String? ?? '') ?? DateTime.now(),
+    restingV: (j['restingV'] as num?)?.toDouble() ?? 0,
+    minV: (j['minV'] as num?)?.toDouble() ?? 0,
+    recoverySeconds: (j['recoverySeconds'] as num?)?.toInt() ?? 0,
+  );
 }
 
 /// ¿Está el cargador imponiendo el voltaje ahora mismo?
@@ -1916,9 +1916,7 @@ class BatteryLoadWatcher {
 
   BatteryLoadEvent? get last => events.isEmpty ? null : events.last;
 
-  List<Map<String, dynamic>> toJson() => [
-    for (final e in events) e.toJson(),
-  ];
+  List<Map<String, dynamic>> toJson() => [for (final e in events) e.toJson()];
 
   void loadJson(List<dynamic> raw) {
     events
@@ -1927,6 +1925,132 @@ class BatteryLoadWatcher {
         raw.whereType<Map<String, dynamic>>().map(BatteryLoadEvent.fromJson),
       );
   }
+}
+
+/// Viento aparente a partir del real y la velocidad del barco.
+///
+/// El DEMO fabricaba AWS/AWA y TWS/TWA como oscilaciones independientes, y
+/// salían combinaciones que no existen en el mar (aparente menor que el
+/// real navegando de ceñida, por ejemplo). Con esto el escenario define
+/// solo el viento real y el aparente sale de la geometría, como en el
+/// barco: el vector del viento real más el vector de la marcha.
+///
+/// [twaDeg] y el AWA devuelto son relativos a proa, con el signo de
+/// [normalizeRelativeAngle]: negativo por babor, positivo por estribor.
+/// Escenarios del modo DEMO.
+///
+/// El DEMO enseñaba siempre lo mismo: una vuelta genérica por el Egeo. Para
+/// enseñar la app hacen falta las dos situaciones reales, porque cada una
+/// usa pantallas distintas — fondeado se mira ANC, navegando se mira NAV y
+/// VNT ("en DEMOS se debe poder elegir fondeado o navegando", 2026-09-08).
+class DemoScenario {
+  const DemoScenario({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.lat,
+    required this.lon,
+    required this.depthM,
+    required this.twdDeg,
+    required this.twsKn,
+    required this.headingDeg,
+    required this.sogKn,
+    required this.seaFromDeg,
+    required this.seaToDeg,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+
+  /// Punto de partida: el fondeo, o el inicio de la singladura.
+  final double lat;
+  final double lon;
+  final double depthM;
+
+  /// Viento real: de dónde viene y cuánto sopla.
+  final double twdDeg;
+  final double twsKn;
+
+  /// Rumbo y velocidad de crucero (ignorados si está fondeado).
+  final double headingDeg;
+  final double sogKn;
+
+  /// Sector de mar abierto visto desde el barco, en grados verdaderos y
+  /// recorrido en sentido horario de [seaFromDeg] a [seaToDeg]. Los barcos
+  /// AIS del DEMO se quedan dentro: fuera de ahí hay costa, y un mercante
+  /// pintado tierra adentro delata el simulacro al instante ("en AIS
+  /// intenta que los barcos no salgan en tierra", 2026-09-08).
+  final double seaFromDeg;
+  final double seaToDeg;
+
+  /// Ancho del sector de mar, siempre positivo.
+  double get seaSpanDeg {
+    final span = normalize360(seaToDeg - seaFromDeg);
+    return span == 0 ? 360 : span;
+  }
+
+  /// Rumbo dentro del sector de mar, con [fraction] entre 0 y 1.
+  double seaBearing(double fraction) =>
+      normalize360(seaFromDeg + seaSpanDeg * fraction);
+
+  /// ¿Cae [bearingDeg] en mar abierto?
+  bool isSeaward(double bearingDeg) =>
+      normalize360(bearingDeg - seaFromDeg) <= seaSpanDeg;
+}
+
+const kDemoScenarios = <DemoScenario>[
+  // Ormos Kolona, Kythnos: una cala clásica del Egeo, abierta al oeste y
+  // cerrada por tierra por el resto.
+  DemoScenario(
+    id: 'anchored',
+    label: 'Fondeado',
+    description: 'Cala de Kythnos (Grecia), 10 m de sonda, meltemi flojo',
+    lat: 37.3925,
+    lon: 24.3855,
+    depthM: 10,
+    twdDeg: 340,
+    twsKn: 12,
+    headingDeg: 160,
+    sogKn: 0,
+    seaFromDeg: 200,
+    seaToDeg: 340,
+  ),
+  // A 5 millas al sur de Málaga, rumbo SE con levante entablado. La costa
+  // queda al norte, así que el mar abierto es todo el semicírculo sur.
+  DemoScenario(
+    id: 'sailing',
+    label: 'Navegando',
+    description: '5 M al sur de Málaga, rumbo SE a 7 kn con levante',
+    lat: 36.6297,
+    lon: -4.4150,
+    depthM: 45,
+    twdDeg: 90,
+    twsKn: 15,
+    headingDeg: 135,
+    sogKn: 7,
+    seaFromDeg: 80,
+    seaToDeg: 280,
+  ),
+];
+
+DemoScenario demoScenarioById(String id) => kDemoScenarios.firstWhere(
+  (s) => s.id == id,
+  orElse: () => kDemoScenarios.last,
+);
+
+(double aws, double awa) apparentFromTrue(
+  double twsKn,
+  double twaDeg,
+  double boatSpeedKn,
+) {
+  final twaRad = twaDeg * math.pi / 180;
+  // Componentes en ejes del barco: x a proa, y a estribor.
+  final x = twsKn * math.cos(twaRad) + boatSpeedKn;
+  final y = twsKn * math.sin(twaRad);
+  final aws = math.sqrt(x * x + y * y);
+  final awa = math.atan2(y, x) * 180 / math.pi;
+  return (aws, normalizeRelativeAngle(awa));
 }
 
 class OwnTrackHistory {
@@ -3008,6 +3132,10 @@ class SettingsModel {
   // competing for space with viento/profundidad. Reported live 2026-09-06.
   bool anchorShowElectrical = false;
   bool demoMode = false;
+
+  /// Escenario del DEMO: 'anchored' (fondeado en una cala) o 'sailing'
+  /// (navegando). Ver kDemoScenarios.
+  String demoScenario = 'sailing';
   // Use the device's own accelerometer as the heel/pitch source instead of
   // Signal K, for a boat with no attitude sensor. The device can be mounted
   // at any orientation, so a 2-point calibration (down from a level

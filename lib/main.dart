@@ -2684,6 +2684,8 @@ class _DashboardState extends State<Dashboard> {
     settings.influxArchiveBucket =
         prefs.getString('influxArchiveBucket') ?? settings.influxArchiveBucket;
     settings.demoMode = prefs.getBool('demoMode') ?? settings.demoMode;
+    settings.demoScenario =
+        prefs.getString('demoScenario') ?? settings.demoScenario;
     settings.usePhoneHeel =
         prefs.getBool('usePhoneHeel') ?? settings.usePhoneHeel;
     settings.phoneAttitudeCalibrated =
@@ -2936,7 +2938,7 @@ class _DashboardState extends State<Dashboard> {
     unawaited(_refreshPressureTrendFromInflux());
   }
 
-  static const _settingsSchemaVersion = 2;
+  static const _settingsSchemaVersion = 3;
 
   Future<void> _migrateAndValidateSettings(SharedPreferences prefs) async {
     final previousVersion = prefs.getInt('settingsSchemaVersion') ?? 0;
@@ -2970,6 +2972,14 @@ class _DashboardState extends State<Dashboard> {
       for (final tank in settings.sensorConfig.tanks) {
         if (tank.groupLabel == 'Fuel 1') tank.groupLabel = 'Diésel 1';
         if (tank.groupLabel == 'Fuel 2') tank.groupLabel = 'Diésel 2';
+      }
+    }
+    if (previousVersion < 3) {
+      // Earlier discovery stored LPG correctly but disabled every newly
+      // found tank. Recover an LPG slot already present in this boat's
+      // saved mapping so it becomes visible immediately after updating.
+      for (final tank in settings.sensorConfig.tanks) {
+        if (tank.type.toLowerCase() == 'lpg') tank.enabled = true;
       }
     }
     if (previousVersion < _settingsSchemaVersion) {
@@ -3107,13 +3117,17 @@ class _DashboardState extends State<Dashboard> {
         }),
       );
     }
+    // Durante el DEMO, settings.anchorConfig es el del escenario: lo que se
+    // guarda es el fondeo REAL apartado, no el inventado. Si no, cerrar la
+    // app en DEMO borraría de disco el fondeo de verdad.
+    final anchorToPersist = _realAnchorConfig ?? settings.anchorConfig;
     await prefs.setString(
       'anchorConfigJson',
-      jsonEncode(settings.anchorConfig.toJson()),
+      jsonEncode(anchorToPersist.toJson()),
     );
     // Same per-host mirroring as sensorConfig above — see
     // _switchToSavedServer and anchorConfigJsonByHost's own doc comment.
-    settings.anchorConfigJsonByHost[_serverConfigKey] = settings.anchorConfig
+    settings.anchorConfigJsonByHost[_serverConfigKey] = anchorToPersist
         .toJson();
     await prefs.setString(
       'anchorConfigByHostJson',
@@ -3236,6 +3250,7 @@ class _DashboardState extends State<Dashboard> {
       jsonEncode(settings.customAlarms.map((r) => r.toJson()).toList()),
     );
     await prefs.setBool('demoMode', settings.demoMode);
+    await prefs.setString('demoScenario', settings.demoScenario);
     await prefs.setBool('usePhoneHeel', settings.usePhoneHeel);
     await prefs.setBool(
       'phoneAttitudeCalibrated',
@@ -4529,6 +4544,96 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
+  DemoScenario get _demoScenario => demoScenarioById(settings.demoScenario);
+
+  /// Config de fondeo real del usuario, guardada mientras el DEMO monta la
+  /// suya. Sin esto, salir del DEMO dejaría el barco "fondeado" en una cala
+  /// griega, con la alarma de garreo armada sobre una posición inventada.
+  AnchorConfig? _realAnchorConfig;
+
+  void setDemoScenario(String id) {
+    if (settings.demoScenario == id) return;
+    settings.demoScenario = id;
+    unawaited(_saveSettings());
+    if (settings.demoMode) _startDemoMode();
+  }
+
+  /// Monta el escenario elegido antes del primer tick.
+  void _seedDemoScenario() {
+    final scenario = _demoScenario;
+    _aisTargets.clear();
+    _ownTrack.clear();
+    _clearLiveHistoryBuffers();
+    _restoreRealAnchorConfig();
+    // El DEMO nunca navega con el fondeo real del usuario: si quedó armado
+    // de la última salida, la posición inventada cae a cientos de millas
+    // del ancla y la pantalla salta con "FUERA DEL CÍRCULO · 2.768.916 m"
+    // y la alarma de garreo sonando. Se aparta el real y se monta el del
+    // escenario; al salir del DEMO se devuelve intacto.
+    _realAnchorConfig = settings.anchorConfig;
+    if (scenario.id != 'anchored') {
+      settings.anchorConfig = AnchorConfig();
+      return;
+    }
+
+    // 10 m de sonda con unos 40 m de cadena: radio de vigilancia realista
+    // con el barco incluido, no un número redondo cualquiera.
+    final cfg = AnchorConfig()
+      ..armed = true
+      ..dropLat = scenario.lat
+      ..dropLon = scenario.lon
+      ..dropDepthM = scenario.depthM
+      ..chainOutM = 40
+      ..radiusM = 48
+      ..initialRadiusM = 48
+      ..droppedAt = skNow().subtract(const Duration(hours: 6))
+      ..armedOrMovedAt = skNow().subtract(const Duration(hours: 6));
+    settings.anchorConfig = cfg;
+    _ownTrack.seedFromHistory(_syntheticSwingTrack(cfg, scenario));
+  }
+
+  void _restoreRealAnchorConfig() {
+    final saved = _realAnchorConfig;
+    if (saved == null) return;
+    settings.anchorConfig = saved;
+    _realAnchorConfig = null;
+  }
+
+  /// Seis horas de borneo alrededor del ancla, para que ANC tenga historia
+  /// desde el primer segundo en vez de empezar con la traza vacía.
+  List<AnchorTrackPoint> _syntheticSwingTrack(
+    AnchorConfig cfg,
+    DemoScenario scenario,
+  ) {
+    final points = <AnchorTrackPoint>[];
+    final rnd = math.Random(scenario.id.hashCode);
+    final now = skNow();
+    final cosLat = math.cos(cfg.dropLat! * math.pi / 180);
+    const stepS = 30;
+    const totalS = 6 * 3600;
+    for (var age = totalS; age > 0; age -= stepS) {
+      final tt = (totalS - age).toDouble();
+      // Mismo borneo que el tick en vivo, para que el histórico y lo que
+      // llega después sean la misma trayectoria y no se note la costura.
+      final bearing = normalize360(
+        scenario.twdDeg +
+            180 +
+            25 * math.sin(2 * math.pi * tt / 1800) +
+            (rnd.nextDouble() - 0.5) * 4,
+      );
+      final r = cfg.radiusM * 0.97 + (rnd.nextDouble() - 0.5) * 2;
+      final rad = bearing * math.pi / 180;
+      points.add(
+        AnchorTrackPoint(
+          now.subtract(Duration(seconds: age)),
+          cfg.dropLat! + (r * math.cos(rad)) / 110540,
+          cfg.dropLon! + (r * math.sin(rad)) / (cosLat * 111320),
+        ),
+      );
+    }
+    return points;
+  }
+
   void _startDemoMode() {
     reconnectTimer?.cancel();
     _skStatusGraceTimer?.cancel();
@@ -4553,6 +4658,7 @@ class _DashboardState extends State<Dashboard> {
     setState(() {
       signalK.connected = true;
       signalK.status = 'DEMO';
+      _seedDemoScenario();
     });
     _demoTimer?.cancel();
     _tickDemo();
@@ -4564,6 +4670,28 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer = null;
     _aisTargets.clear();
     _ownTrack.clear();
+    _clearLiveHistoryBuffers();
+    _restoreRealAnchorConfig();
+  }
+
+  /// Buffers en memoria que alimentan tendencias y mini-gráficas. Se vacían
+  /// al entrar y al salir del DEMO para que no quede ni un punto simulado
+  /// mezclado con los reales — la presión, el viento o la sonda del DEMO
+  /// darían tendencias y rachas que no han pasado nunca.
+  ///
+  /// El histórico de esfuerzos de batería (que sí se guarda en disco) no
+  /// hace falta limpiarlo: solo lo alimentan los handlers de Signal K, que
+  /// en DEMO no llegan a ejecutarse.
+  void _clearLiveHistoryBuffers() {
+    // Los valores en vivo también: si no, al salir del DEMO la pantalla
+    // sigue enseñando la posición de Málaga o la sonda de la cala hasta
+    // que el barco publique cada path, y algunos tardan minutos.
+    signalK.reset();
+    _pressureHistory.clear();
+    _twdShiftHistory.clear();
+    _depthTrend.clear();
+    _startVTrend.clear();
+    _bowVTrend.clear();
   }
 
   void _tickDemo() {
@@ -4587,21 +4715,38 @@ class _DashboardState extends State<Dashboard> {
       signalK.twaUpdate = signalK.windUpdate;
       signalK.twsUpdate = signalK.windUpdate;
       signalK.twdUpdate = signalK.windUpdate;
+      // Los filtros de frescura (_freshEngine y compañía) descartan
+      // cualquier valor sin su marca de tiempo propia, así que sin sellar
+      // estos el DEMO enseñaba "--" en sonda, SOG, STW y rumbo aunque los
+      // estuviera generando cada segundo.
+      signalK.courseUpdate = signalK.navUpdate;
+      signalK.sogKnUpdate = signalK.navUpdate;
+      signalK.stwKnUpdate = signalK.navUpdate;
+      signalK.headingTrueDegUpdate = signalK.navUpdate;
+      signalK.cogTrueDegUpdate = signalK.navUpdate;
+      signalK.depthMUpdate = signalK.navUpdate;
+      signalK.twaWaterUpdate = signalK.windUpdate;
+      signalK.twaGroundUpdate = signalK.windUpdate;
 
       final hadNoPos = signalK.latitude == null;
+      final scenario = _demoScenario;
+      final anchored = scenario.id == 'anchored';
       // "en las pruebas no esta guiñando porque no cambias rumbo" (reported
-      // live 2026-09-05) — while armed, simulate a real anchor swing
-      // (borneo: slow bearing drift around the anchor at ~full chain
-      // scope; guiñada: heading oscillating around that bearing) instead
-      // of the generic open-water cruising loop below, so ANC's Guiñada
-      // screen has something real to show in "Última hora" demo mode too
-      // (not just the dedicated "Últimas 24h" synthetic series).
+      // live 2026-09-05) — fondeado se simula un borneo real (deriva lenta
+      // del rumbo alrededor del ancla a casi todo el radio, más la guiñada
+      // oscilando sobre esa marcación) en vez del bucle genérico de
+      // crucero, para que la pantalla de Guiñada tenga algo que enseñar.
       final anchorCfg = settings.anchorConfig;
-      if (anchorCfg.armed &&
+      if (anchored &&
+          anchorCfg.armed &&
           anchorCfg.dropLat != null &&
           anchorCfg.dropLon != null) {
         final cosAnchorLat = math.cos(anchorCfg.dropLat! * math.pi / 180);
-        final borneoBearing = normalize360(60 + osc(1800, 20, 0));
+        // El barco se orienta al viento, así que bornea alrededor de la
+        // marcación de sotavento del ancla, no de un rumbo cualquiera.
+        final borneoBearing = normalize360(
+          scenario.twdDeg + 180 + osc(1800, 25, 0),
+        );
         final r = (anchorCfg.radiusM * 0.97 + jitter(1.0)).clamp(1.0, 1e6);
         final rad = borneoBearing * math.pi / 180;
         final dx = r * math.sin(rad);
@@ -4616,32 +4761,72 @@ class _DashboardState extends State<Dashboard> {
         signalK.headingTrueDeg = normalize360(borneoBearing + 180 + guinada);
         signalK.cogTrueDeg = signalK.headingTrueDeg;
         signalK.sogKn = (0.3 + jitter(0.2)).clamp(0, 2);
-      } else {
-        // Position: slow loop around the Aegean (demo cruising ground)
-        signalK.latitude = 37.75 + 0.012 * math.sin(t / 900) + jitter(0.0002);
-        signalK.longitude = 26.98 + 0.012 * math.cos(t / 900) + jitter(0.0002);
-        signalK.headingTrueDeg = normalize360(120 + osc(600, 25, 0));
+      } else if (anchored) {
+        // Fondeado pero sin ancla armada todavía: quieto en la cala.
+        signalK.latitude = scenario.lat + jitter(0.00004);
+        signalK.longitude = scenario.lon + jitter(0.00004);
+        signalK.headingTrueDeg = normalize360(
+          scenario.twdDeg + 180 + osc(90, 18, 0),
+        );
         signalK.cogTrueDeg = signalK.headingTrueDeg;
-        signalK.sogKn = (6.2 + osc(180, 1.4, 0.5) + jitter(0.2)).clamp(0, 11);
+        signalK.sogKn = (0.2 + jitter(0.2)).clamp(0, 2);
+      } else {
+        // Singladura real: se avanza de verdad desde el punto de salida al
+        // rumbo del escenario, en vez de dar vueltas en un círculo — así
+        // la traza, el VMG y la distancia recorrida tienen sentido.
+        final headingDeg = normalize360(scenario.headingDeg + osc(600, 6, 0));
+        final sog = (scenario.sogKn + osc(180, 0.7, 0.5) + jitter(0.15)).clamp(
+          0.0,
+          12.0,
+        );
+        final travelledNm = scenario.sogKn * (t / 3600);
+        final hdgRad = scenario.headingDeg * math.pi / 180;
+        signalK.latitude = scenario.lat + (travelledNm / 60) * math.cos(hdgRad);
+        signalK.longitude =
+            scenario.lon +
+            (travelledNm / 60) *
+                math.sin(hdgRad) /
+                math.cos(scenario.lat * math.pi / 180);
+        signalK.headingTrueDeg = headingDeg;
+        signalK.cogTrueDeg = normalize360(headingDeg + osc(240, 4, 1));
+        signalK.sogKn = sog;
       }
       if (hadNoPos) unawaited(_loadWeather(force: true));
       signalK.stwKn = signalK.sogKn == null
           ? null
           : (signalK.sogKn! - 0.2 + jitter(0.1)).clamp(0, 11);
-      signalK.heelDeg = osc(31, 9, 1.1) + jitter(0.4);
-      signalK.depthM = (14 + osc(70, 6, 2) + jitter(0.3)).clamp(2, 60);
+      signalK.heelDeg = anchored
+          ? osc(45, 1.5, 1.1) + jitter(0.3)
+          : osc(31, 9, 1.1) + jitter(0.4);
+      signalK.depthM =
+          (scenario.depthM + osc(70, anchored ? 0.4 : 6, 2) + jitter(0.2))
+              .clamp(2, 200);
       _depthTrend.add(signalK.depthM);
 
-      // Wind
-      signalK.awsKn = (13 + osc(40, 3.5, 0) + jitter(0.4)).clamp(0, 30);
-      signalK.awaDeg = normalize360(40 + osc(53, 18, 1));
-      signalK.twsKn = (11 + osc(65, 3, 0.8) + jitter(0.3)).clamp(0, 28);
-      signalK.twaDeg = normalize360(55 + osc(70, 20, 0.3));
-      signalK.twdDeg = normalize360(signalK.headingTrueDeg! + signalK.twaDeg!);
+      // Viento: el escenario fija el REAL (de dónde viene y cuánto sopla) y
+      // el aparente sale de la geometría con la velocidad del barco, que es
+      // como funciona a bordo. Antes los cuatro valores oscilaban por su
+      // cuenta y salían combinaciones imposibles.
+      signalK.twdDeg = normalize360(scenario.twdDeg + osc(420, 12, 0.3));
+      signalK.twsKn = (scenario.twsKn + osc(65, 3, 0.8) + jitter(0.4)).clamp(
+        0.0,
+        40.0,
+      );
+      final twaRel = normalizeRelativeAngle(
+        signalK.twdDeg! - signalK.headingTrueDeg!,
+      );
+      signalK.twaDeg = normalize360(twaRel);
+      final (aws, awa) = apparentFromTrue(
+        signalK.twsKn!,
+        twaRel,
+        signalK.stwKn ?? 0,
+      );
+      signalK.awsKn = aws;
+      signalK.awaDeg = normalize360(awa);
       _dAws = signalK.awsKn;
-      _dAwa = normalizeRelativeAngle(signalK.awaDeg!);
+      _dAwa = awa;
       _dTws = signalK.twsKn;
-      _dTwa = normalizeRelativeAngle(signalK.twaDeg!);
+      _dTwa = twaRel;
       _dTwd = signalK.twdDeg;
       _twdShiftHistory.add(_dTwd);
 
@@ -4685,12 +4870,17 @@ class _DashboardState extends State<Dashboard> {
   }
 
   void _tickDemoAis(double t) {
+    final scenario = _demoScenario;
+    // Los barcos se colocan por FRACCIÓN del sector de mar abierto, no por
+    // marcación absoluta: así el mismo reparto vale para la cala griega
+    // (abierta solo al oeste) y para Málaga (todo el sur), y ninguno
+    // aparece pintado tierra adentro.
     const demoBoats = [
       (
         mmsi: '211000001',
         name: 'DEMO CARGO 1',
         type: 70,
-        bearing0: 30.0,
+        seaFraction: 0.20,
         speed: 9.0,
         distNm0: 3.0,
       ),
@@ -4698,7 +4888,7 @@ class _DashboardState extends State<Dashboard> {
         mmsi: '211000002',
         name: 'DEMO SAIL 2',
         type: 36,
-        bearing0: 200.0,
+        seaFraction: 0.50,
         speed: 5.5,
         distNm0: 1.6,
       ),
@@ -4706,13 +4896,14 @@ class _DashboardState extends State<Dashboard> {
         mmsi: '211000003',
         name: 'DEMO TANKER 3',
         type: 80,
-        bearing0: 100.0,
+        seaFraction: 0.80,
         speed: 11.0,
         distNm0: 4.5,
       ),
     ];
     final ownLat = signalK.latitude, ownLon = signalK.longitude;
     if (ownLat == null || ownLon == null) return;
+    final cosOwnLat = math.cos(ownLat * math.pi / 180);
     for (final b in demoBoats) {
       final target = _aisTargets.putIfAbsent(
         'vessels.demo.${b.mmsi}',
@@ -4722,24 +4913,33 @@ class _DashboardState extends State<Dashboard> {
       target.name = b.name;
       target.shipTypeId = b.type;
       target.lastUpdate = DateTime.now();
-      final cogDeg = normalize360(b.bearing0 + 180 + 15 * math.sin(t / 400));
-      target.cogDeg = cogDeg;
+
+      // En vez de dejarlos correr en línea recta (que en una cala acaba
+      // metiéndolos en la playa), navegan a lo largo del sector: la
+      // marcación va y viene dentro de él y la distancia respira. El rumbo
+      // se deduce del movimiento, así que sigue siendo coherente.
+      final phase = 2 * math.pi * (t / 900) + b.seaFraction * math.pi * 2;
+      final swing = 0.5 + 0.42 * math.sin(phase);
+      final bearing = scenario.seaBearing(
+        (b.seaFraction + (swing - 0.5) * 0.5).clamp(0.03, 0.97),
+      );
+      final distNm = (b.distNm0 + 0.8 * math.sin(phase * 0.6)).clamp(0.4, 12.0);
+      final brgRad = bearing * math.pi / 180;
+      final lat = ownLat + (distNm / 60) * math.cos(brgRad);
+      final lon = ownLon + (distNm / 60) * math.sin(brgRad) / cosOwnLat;
+
+      final prevLat = target.lat, prevLon = target.lon;
+      if (prevLat != null && prevLon != null) {
+        final dLat = lat - prevLat;
+        final dLon = (lon - prevLon) * cosOwnLat;
+        if (dLat.abs() > 1e-9 || dLon.abs() > 1e-9) {
+          target.cogDeg = normalize360(math.atan2(dLon, dLat) * 180 / math.pi);
+        }
+      }
+      target.cogDeg ??= bearing;
       target.sogKn = b.speed;
-      final travelledNm = b.speed * (t / 3600);
-      final brgRad = b.bearing0 * math.pi / 180;
-      final cogRad = cogDeg * math.pi / 180;
-      final startLat = ownLat + (b.distNm0 / 60) * math.cos(brgRad);
-      final startLon =
-          ownLon +
-          (b.distNm0 / 60) *
-              math.sin(brgRad) /
-              math.cos(ownLat * math.pi / 180);
-      target.lat = startLat + (travelledNm / 60) * math.cos(cogRad);
-      target.lon =
-          startLon +
-          (travelledNm / 60) *
-              math.sin(cogRad) /
-              math.cos(ownLat * math.pi / 180);
+      target.lat = lat;
+      target.lon = lon;
       target.recordTrackPoint();
     }
   }
@@ -12958,6 +13158,43 @@ class _DashboardState extends State<Dashboard> {
                                   title: 'Modo DEMO',
                                   subtitle: 'Datos simulados para pruebas. No debe quedar activo durante la navegación real.',
                                 ),
+                                // Dos situaciones distintas piden pantallas
+                                // distintas: fondeado se mira ANC, navegando
+                                // se miran NAV y VNT.
+                                if (settings.demoMode) ...[
+                                  const SizedBox(height: 6),
+                                  for (final sc in kDemoScenarios)
+                                    RadioListTile<String>(
+                                      value: sc.id,
+                                      // ignore: deprecated_member_use
+                                      groupValue: settings.demoScenario,
+                                      // ignore: deprecated_member_use
+                                      onChanged: (v) {
+                                        if (v == null) return;
+                                        setSt(() {});
+                                        setState(() => setDemoScenario(v));
+                                      },
+                                      dense: true,
+                                      contentPadding: EdgeInsets.zero,
+                                      activeColor: cCyan,
+                                      title: Text(
+                                        sc.label,
+                                        style: const TextStyle(
+                                          color: cText,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        sc.description,
+                                        style: const TextStyle(
+                                          color: cMuted,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ),
+                                  const SizedBox(height: 4),
+                                ],
                                 Align(
                                   alignment: Alignment.centerLeft,
                                   child: OutlinedButton.icon(

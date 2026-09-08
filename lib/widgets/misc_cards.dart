@@ -912,7 +912,7 @@ class MarineGraphicCard extends StatelessWidget {
       onTap: () =>
           zoom?.call(title, fmt(value, 1, ' $unit'), color, subtitle: subtitle),
       child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+        padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

@@ -59,6 +59,15 @@ class _DepthTrendTracker {
   static const _thresholdM = 0.3;
   static const _alpha = 0.15;
 
+  /// Borra la tendencia acumulada. Al entrar o salir del DEMO hay que
+  /// tirarla: mezclar una serie simulada con la real da tendencias que no
+  /// ocurrieron.
+  void clear() {
+    _smoothed = null;
+    _confirmedAt = null;
+    direction = 0;
+  }
+
   void add(double? depth) {
     if (depth == null) return;
     _smoothed = _smoothed == null
@@ -85,6 +94,15 @@ class _VoltageTrendTracker {
   int direction = 0; // -1 descargando, 0 en reposo / sin datos, 1 cargando
   static const _thresholdV = 0.08;
   static const _alpha = 0.1;
+
+  /// Borra la tendencia acumulada. Al entrar o salir del DEMO hay que
+  /// tirarla: mezclar una serie simulada con la real da tendencias que no
+  /// ocurrieron.
+  void clear() {
+    _smoothed = null;
+    _confirmedAt = null;
+    direction = 0;
+  }
 
   void add(double? voltage) {
     if (voltage == null) return;
@@ -232,6 +250,10 @@ class PressureHistory {
   final List<(DateTime, double)> _samples = [];
   static const _window = Duration(hours: 24);
 
+  /// Ver el clear() de los trackers de tendencia: al cambiar entre DEMO y
+  /// datos reales el buffer se tira entero.
+  void clear() => _samples.clear();
+
   void add(double? value) {
     if (value == null) return;
     final now = DateTime.now();
@@ -334,6 +356,10 @@ class _WindShiftTracker {
   // look continuous, so this keeps the buffer (and the per-frame paint
   // cost) small regardless of how chatty the wind instrument is.
   static const _minSpacing = Duration(seconds: 5);
+
+  /// Ver el clear() de los trackers de tendencia: al cambiar entre DEMO y
+  /// datos reales el buffer se tira entero.
+  void clear() => _samples.clear();
 
   void add(double? deg) {
     if (deg == null) return;
