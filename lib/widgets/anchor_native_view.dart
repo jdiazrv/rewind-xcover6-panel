@@ -93,6 +93,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.skPassword,
     required this.onCredentialsChanged,
     this.onVerifyLogin,
+    this.loginTargetLabel,
     this.demo = false,
     required this.gpsFallbackConsent,
     required this.onGpsFallbackConsentChanged,
@@ -178,7 +179,10 @@ class NativeAnchorView extends StatefulWidget {
   // then on. Null means the caller doesn't support verification (treated
   // as "trust the fields", the old behavior) — always provided in
   // practice (see main.dart's _loginToSignalK).
-  final Future<bool> Function()? onVerifyLogin;
+  final Future<SkLoginResult> Function()? onVerifyLogin;
+  /// "host:puerto" al que se intenta entrar, para poder nombrarlo cuando
+  /// el problema es de alcance y no de contraseña.
+  final String? loginTargetLabel;
   // DEMO mode has no real Signal K server to verify against — a real
   // POST would always fail, blocking Fondear/Levar/Recolocar entirely and
   // making it impossible to try the anchor watch out risk-free, exactly
@@ -808,37 +812,62 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   bool get _hasCredentials =>
       widget.skUsername.trim().isNotEmpty && widget.skPassword.isNotEmpty;
 
+  /// Verifica la sesión, y si falla deja corregirlo sin salir de ANC.
+  ///
+  /// Antes esto era un camino de una sola dirección: el diálogo solo salía
+  /// con los dos campos vacíos, así que en cuanto se guardaba algo — bueno
+  /// o malo — no volvía a aparecer nunca. Con unas credenciales erróneas
+  /// guardadas, fondear quedaba bloqueado para siempre y el único aviso
+  /// era un SnackBar que se iba solo ("no me da oportunidad de revisar",
+  /// 2026-09-10). Ahora es un bucle: falla, se enseña POR QUÉ dentro del
+  /// diálogo, y se reintenta las veces que haga falta.
   Future<bool> _ensureLoggedIn() async {
     if (widget.demo) return true;
-    if (!_hasCredentials) {
-      final result = await showDialog<(String, String)>(
-        context: context,
-        builder: (ctx) => _LoginDialog(
-          initialUser: widget.skUsername,
-          initialPass: widget.skPassword,
-        ),
-      );
-      if (result == null) return false;
-      widget.onCredentialsChanged(result.$1, result.$2);
-      if (result.$1.trim().isEmpty || result.$2.isEmpty) return false;
-    }
-    // Actually confirm the credentials work, not just that the fields
-    // aren't empty — a typo used to arm/disarm the watch locally while
-    // the real Signal K publish (which needs a valid login of its own)
-    // silently failed from then on.
     final verify = widget.onVerifyLogin;
     if (verify == null) return true;
-    final ok = await verify();
-    if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No se pudo iniciar sesión en Signal K — revisa usuario/contraseña.',
+
+    String? errorText;
+    var allowSkip = false;
+    // Con los campos ya rellenos se prueba directamente: lo normal es que
+    // funcione y no hay por qué pedir lo que ya se sabe.
+    var askFirst = !_hasCredentials;
+
+    while (true) {
+      if (askFirst) {
+        if (!mounted) return false;
+        final choice = await showDialog<_LoginChoice>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => _LoginDialog(
+            initialUser: widget.skUsername,
+            initialPass: widget.skPassword,
+            errorText: errorText,
+            allowSkip: allowSkip,
+            targetLabel: widget.loginTargetLabel,
           ),
-        ),
+        );
+        if (choice == null) return false; // Cancelar
+        if (choice is _LoginSkip) return true;
+        final retry = choice as _LoginRetry;
+        if (retry.username.isEmpty || retry.password.isEmpty) {
+          errorText = 'Hace falta usuario y contraseña.';
+          continue;
+        }
+        widget.onCredentialsChanged(retry.username, retry.password);
+      }
+
+      final result = await verify();
+      if (result.ok) return true;
+
+      errorText = skLoginErrorText(
+        result,
+        widget.loginTargetLabel ?? 'el servidor',
       );
+      // Reescribir la contraseña no arregla un servidor apagado, así que
+      // ahí se ofrece seguir sin sesión en vez de dejar el fondeo bloqueado.
+      allowSkip = !result.isCredentialProblem;
+      askFirst = true;
     }
-    return ok;
   }
 
   ({AnchorHistoryEntry entry, List<AnchorTrackPoint> points, double distanceM})?
@@ -3185,10 +3214,41 @@ class _WindArrowPainter extends CustomPainter {
       oldDelegate.color != color || oldDelegate.shadow != shadow;
 }
 
+/// Resultado del diálogo: unas credenciales para reintentar, o la decisión
+/// de seguir sin sesión.
+sealed class _LoginChoice {
+  const _LoginChoice();
+}
+
+class _LoginRetry extends _LoginChoice {
+  const _LoginRetry(this.username, this.password);
+  final String username;
+  final String password;
+}
+
+class _LoginSkip extends _LoginChoice {
+  const _LoginSkip();
+}
+
 class _LoginDialog extends StatefulWidget {
-  const _LoginDialog({required this.initialUser, required this.initialPass});
+  const _LoginDialog({
+    required this.initialUser,
+    required this.initialPass,
+    this.errorText,
+    this.allowSkip = false,
+    this.targetLabel,
+  });
   final String initialUser;
   final String initialPass;
+  /// Por qué falló el intento anterior, si lo hubo. Se enseña DENTRO del
+  /// diálogo en vez de en un aviso que se va solo, para poder leerlo
+  /// mientras se corrige.
+  final String? errorText;
+  /// Solo cuando el fallo no es de credenciales: si el servidor no está,
+  /// reescribir la contraseña no arregla nada y quedarse sin poder fondear
+  /// sería peor que fondear sin publicar.
+  final bool allowSkip;
+  final String? targetLabel;
 
   @override
   State<_LoginDialog> createState() => _LoginDialogState();
@@ -3208,23 +3268,46 @@ class _LoginDialogState extends State<_LoginDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     backgroundColor: cPanel,
-    title: const Text('Iniciar sesión'),
+    title: Text(widget.errorText == null ? 'Iniciar sesión' : 'No se ha podido entrar'),
     content: Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        if (widget.errorText != null) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: cRed.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: cRed.withValues(alpha: 0.45)),
+            ),
+            child: Text(
+              widget.errorText!,
+              style: const TextStyle(color: cText, fontSize: 12, height: 1.35),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        Text(
           'Solo quien tenga estas credenciales puede fondear o levar el ancla. '
-          'Son las mismas de CFG → Conexión.',
-          style: TextStyle(color: cMuted, fontSize: 12),
+          'Son las mismas de CFG → Conexión'
+          '${widget.targetLabel == null ? '' : ', contra ${widget.targetLabel}'}.',
+          style: const TextStyle(color: cMuted, fontSize: 12),
         ),
         const SizedBox(height: 12),
         TextField(
           controller: _userCtrl,
+          autocorrect: false,
+          enableSuggestions: false,
+          textCapitalization: TextCapitalization.none,
           decoration: const InputDecoration(labelText: 'Usuario'),
         ),
         TextField(
           controller: _passCtrl,
           obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
           decoration: const InputDecoration(labelText: 'Contraseña'),
         ),
       ],
@@ -3234,10 +3317,19 @@ class _LoginDialogState extends State<_LoginDialog> {
         onPressed: () => Navigator.of(context).pop(),
         child: const Text('Cancelar'),
       ),
+      if (widget.allowSkip)
+        TextButton(
+          onPressed: () =>
+              Navigator.of(context).pop<_LoginChoice>(const _LoginSkip()),
+          child: const Text('Seguir sin sesión'),
+        ),
       FilledButton(
-        onPressed: () =>
-            Navigator.of(context).pop((_userCtrl.text, _passCtrl.text)),
-        child: const Text('Entrar'),
+        onPressed: () => Navigator.of(context).pop<_LoginChoice>(
+          // Se recorta aquí igual que en CFG: un espacio de más al final
+          // del usuario no debe costar un rechazo.
+          _LoginRetry(_userCtrl.text.trim(), _passCtrl.text),
+        ),
+        child: Text(widget.errorText == null ? 'Entrar' : 'Reintentar'),
       ),
     ],
   );

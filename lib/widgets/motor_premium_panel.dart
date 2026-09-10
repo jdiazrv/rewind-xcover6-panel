@@ -512,12 +512,6 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     return _simRunning ? 358.15 : 288.15; // 85°C running, 15°C ambient
   }
 
-  double? get _displayOilPressurePa {
-    if (!_simulEnabled) return widget.engineOilPressurePa;
-    if (_simOff) return null;
-    return _simRunning ? 250000 : 0; // 2.5 bar running, 0 at rest
-  }
-
   double? get _displayAlternatorV {
     if (!_simulEnabled) return widget.engineAlternatorV ?? widget.engineSupplyV;
     if (_simOff) return null;
@@ -583,9 +577,14 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         flex: 2,
         child: Column(
           children: [
+            // Sin reloj de aceite: este motor no lleva sensor de presión,
+            // solo un presostato de alarma, así que una esfera con aguja
+            // pintaría una precisión que no existe ("no tenemos medidor de
+            // presión, solo alarma", 2026-09-10). Su estado sigue estando
+            // en la lámpara PRESIÓN ACEITE de la columna, que es lo que el
+            // presostato realmente dice. De paso, los dos que quedan se
+            // reparten el alto entre dos en vez de entre tres.
             Expanded(child: _tempGaugeTile()),
-            const SizedBox(height: 8),
-            Expanded(child: _oilGaugeTile()),
             const SizedBox(height: 8),
             Expanded(child: _voltGaugeTile()),
           ],
@@ -626,6 +625,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     final alarm = _lampOn('temp');
     return _panelShell(
       child: _AnalogGauge(
+        compact: _isCompact,
         label: 'TEMP. REFRIGERANTE',
         value: value,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)}°C',
@@ -642,76 +642,6 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     );
   }
 
-  Widget _oilGaugeTile() {
-    final pa = _displayOilPressurePa;
-    final value = pa == null ? null : pa / 100000.0;
-    final alarm = _lampOn('aceite');
-    // D1/D2 MDI normally exposes an oil-pressure switch, not an analogue
-    // sender. Do not draw a fictitious needle when the only real datum is
-    // that discrete switch; show its verified state instead.
-    if (!_simulEnabled && widget.engineMdiDetected == true && value == null) {
-      final verified = widget.engineMdiMappingVerified == true;
-      final known = verified && widget.engineLowOilAlarm != null;
-      final color = !known ? cYellow : (alarm ? cRed : cGreen);
-      final text = !verified
-          ? 'MAPA MDI PENDIENTE'
-          : !known
-          ? 'SIN DATO'
-          : alarm
-          ? 'PRESIÓN BAJA'
-          : 'PRESIÓN CORRECTA';
-      return _panelShell(
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Text(
-                'PRESIÓN ACEITE',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: cMuted,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Icon(Icons.oil_barrel, color: color, size: 25),
-              const SizedBox(height: 4),
-              Text(
-                text,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                style: TextStyle(
-                  color: color,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-    return _panelShell(
-      child: _AnalogGauge(
-        label: 'PRESIÓN ACEITE',
-        value: value,
-        valueText: value == null ? '' : '${value.toStringAsFixed(1)} bar',
-        min: 0,
-        max: 6,
-        majorStep: 1,
-        // Low is bad here: red zone runs from 0 up to the minimum threshold.
-        dangerStart: 0,
-        dangerEnd: widget.alarmOilMinBar,
-        needleColor: alarm ? cRed : cCyan,
-        source: _sourceOrSim(widget.engineLowOilAlarm, value),
-        ledState: _ledStateFor(value, alarm),
-      ),
-    );
-  }
-
   Widget _voltGaugeTile() {
     final value = _displayAlternatorV;
     final alarm = _lampOn('carga');
@@ -721,6 +651,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         widget.engineSupplyV != null;
     return _panelShell(
       child: _AnalogGauge(
+        compact: _isCompact,
         label: isSupplyOnly ? 'ALIMENTACIÓN MDI' : 'ALTERNADOR',
         value: value,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)} V',
@@ -1168,34 +1099,52 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     );
   }
 
-  Widget _hoursBox() => _eInkBox(
+  // Las cifras iban clavadas a 19 px pasara lo que pasara, así que en la
+  // columna estrecha del teléfono se quedaban pequeñas mientras sobraba
+  // ancho ("los dígitos de las e-ink no se ven", 2026-09-10). Ahora crecen
+  // con la caja, con techo para que en tablet no se desmadren.
+  Widget _eInkReadout(String label, String value) => _eInkBox(
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          const Text(
-            'HORAS MOTOR',
-            style: TextStyle(
-              color: _kEInkText,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.6,
-            ),
-          ),
-          Text(
-            widget.engineHours.value,
-            style: const TextStyle(
-              color: _kEInkText,
-              fontSize: 19,
-              fontWeight: FontWeight.w800,
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final valueSize = (c.maxWidth * 0.15).clamp(19.0, 34.0);
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _kEInkText,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                value,
+                style: TextStyle(
+                  color: _kEInkText,
+                  fontSize: valueSize,
+                  fontWeight: FontWeight.w800,
+                  height: 1.0,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          );
+        },
       ),
     ),
   );
+
+  Widget _hoursBox() =>
+      _eInkReadout('HORAS MOTOR', widget.engineHours.value);
 
   // Same PGN 61444 frame as RPM (SPN 512) — its own recessed screen, not a
   // second row inside HORAS MOTOR's, matching how every other readout on
@@ -1204,34 +1153,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   Widget? _torqueBox() {
     final torque = _displayTorquePercent;
     if (!widget.detailed || torque == null) return null;
-    return _eInkBox(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text(
-              'PAR MOTOR',
-              style: TextStyle(
-                color: _kEInkText,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.6,
-              ),
-            ),
-            Text(
-              '${torque.round()}%',
-              style: const TextStyle(
-                color: _kEInkText,
-                fontSize: 15,
-                fontWeight: FontWeight.w800,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    return _eInkReadout('PAR MOTOR', '${torque.round()}%');
   }
 
   // Lit lamps fill with their own colour like a real panel LED (contacto's
@@ -1882,6 +1804,7 @@ class _AnalogGauge extends StatelessWidget {
     this.big = false,
     this.source,
     this.ledState,
+    this.compact = false,
   });
 
   final String? label;
@@ -1896,10 +1819,17 @@ class _AnalogGauge extends StatelessWidget {
   final String valueText;
   final String? source;
   final _LedState? ledState;
+  /// En teléfono la esfera circular no cabe: el diámetro sale de
+  /// min(ancho, alto) y en una columna de tres el alto manda, así que
+  /// quedaban 54-72 px de esfera y cifras de 5-7 px, ilegibles (medido a
+  /// 800x360 y 915x412, 2026-09-10). Con esto la lectura pasa a barra
+  /// horizontal, que es la forma que sí encaja en una caja ancha y baja.
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final display = (value ?? min).clamp(min, max);
+    if (compact) return _buildCompact(display);
     // _panelShell has no padding of its own — without this, the label/LED
     // row sits flush against the card's rounded corners (radius 14) and
     // visually collides with the curve instead of clearing it.
@@ -1991,6 +1921,195 @@ class _AnalogGauge extends StatelessWidget {
       ),
     );
   }
+
+  /// Misma información que la esfera — valor, dónde cae en el rango, si
+  /// está en zona roja y el testigo — repartida a lo ancho en vez de en
+  /// círculo. Lo único que se pierde es la forma redonda.
+  Widget _buildCompact(double display) => Padding(
+    padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+    child: LayoutBuilder(
+      builder: (context, c) {
+        final showEnds = c.maxHeight > 86;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Row(
+              children: [
+                if (label != null)
+                  Expanded(
+                    child: Text(
+                      label!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: cMuted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ),
+                if (source != null)
+                  Text(
+                    source!,
+                    style: TextStyle(
+                      color: needleColor.withValues(alpha: 0.75),
+                      fontSize: 8.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      valueText.isEmpty ? '--' : valueText,
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: value == null ? cMuted : cText,
+                        fontSize: 30,
+                        fontWeight: FontWeight.w900,
+                        height: 1.0,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ),
+                if (ledState != null) ...[
+                  const SizedBox(width: 8),
+                  _StatusLed(state: ledState!),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: 9,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween<double>(begin: display, end: display),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.easeOutCubic,
+                builder: (context, animated, child) => CustomPaint(
+                  size: Size.infinite,
+                  painter: _BarGaugePainter(
+                    value: value == null ? null : animated,
+                    min: min,
+                    max: max,
+                    dangerStart: dangerStart,
+                    dangerEnd: dangerEnd,
+                    fillColor: needleColor,
+                  ),
+                ),
+              ),
+            ),
+            if (showEnds) ...[
+              const SizedBox(height: 2),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    _endLabel(min),
+                    style: const TextStyle(color: cMuted, fontSize: 8.5),
+                  ),
+                  Text(
+                    _endLabel(max),
+                    style: const TextStyle(color: cMuted, fontSize: 8.5),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        );
+      },
+    ),
+  );
+
+  static String _endLabel(double v) =>
+      v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
+}
+
+/// Barra horizontal con su zona roja: el equivalente de la esfera cuando
+/// la caja es ancha y baja.
+class _BarGaugePainter extends CustomPainter {
+  _BarGaugePainter({
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.dangerStart,
+    required this.dangerEnd,
+    required this.fillColor,
+  });
+
+  final double? value;
+  final double min;
+  final double max;
+  final double? dangerStart;
+  final double? dangerEnd;
+  final Color fillColor;
+
+  double _x(double v, double w) =>
+      max == min ? 0 : ((v - min) / (max - min)).clamp(0.0, 1.0) * w;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    if (w <= 0 || h <= 0) return;
+    final radius = Radius.circular(h / 2);
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Offset.zero & size, radius),
+      Paint()..color = cMuted.withValues(alpha: 0.18),
+    );
+
+    // La zona roja va DEBAJO del relleno: si el valor entra en ella se ve
+    // el relleno rojo encima, no una franja tapando el dato.
+    if (dangerStart != null && dangerEnd != null) {
+      final a = _x(dangerStart!, w), b = _x(dangerEnd!, w);
+      if (b > a) {
+        canvas.save();
+        canvas.clipRRect(
+          RRect.fromRectAndRadius(Offset.zero & size, radius),
+        );
+        canvas.drawRect(
+          Rect.fromLTRB(a, 0, b, h),
+          Paint()..color = cRed.withValues(alpha: 0.35),
+        );
+        canvas.restore();
+      }
+    }
+
+    if (value == null) return;
+    final fill = _x(value!, w);
+    if (fill <= 0) return;
+    canvas.save();
+    canvas.clipRRect(RRect.fromRectAndRadius(Offset.zero & size, radius));
+    canvas.drawRect(
+      Rect.fromLTRB(0, 0, fill, h),
+      Paint()..color = fillColor.withValues(alpha: 0.85),
+    );
+    canvas.restore();
+    // Marca en la punta: el borde exacto se lee mejor que el degradado.
+    canvas.drawRect(
+      Rect.fromLTRB(math.max(0.0, fill - 2), 0, fill, h),
+      Paint()..color = fillColor,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _BarGaugePainter old) =>
+      old.value != value ||
+      old.min != min ||
+      old.max != max ||
+      old.dangerStart != dangerStart ||
+      old.dangerEnd != dangerEnd ||
+      old.fillColor != fillColor;
 }
 
 enum _LedState { ok, alarm }

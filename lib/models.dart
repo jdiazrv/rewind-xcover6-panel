@@ -7,6 +7,26 @@ import 'attitude_sensor.dart';
 import 'data_api.dart';
 import 'theme.dart';
 
+/// Whether recent measured engine telemetry proves that the ECU/contact is
+/// currently present. Values and source timestamps stay paired so a retained
+/// Signal K replay cannot masquerade as fresh contact activity.
+bool engineContactTelemetryIsFresh({
+  required DateTime now,
+  required double? rpm,
+  required DateTime? rpmUpdatedAt,
+  required Iterable<(double?, DateTime?)> slowTelemetry,
+  required Duration fastStaleAfter,
+  required Duration slowStaleAfter,
+}) {
+  bool fresh(double? value, DateTime? updatedAt, Duration limit) =>
+      value != null && updatedAt != null && now.difference(updatedAt) < limit;
+
+  if (fresh(rpm, rpmUpdatedAt, fastStaleAfter)) return true;
+  return slowTelemetry.any(
+    (sample) => fresh(sample.$1, sample.$2, slowStaleAfter),
+  );
+}
+
 // How far ahead/behind the connected Signal K server's own clock this
 // device's clock is (server − device) — refreshed opportunistically from
 // the `Date` response header on ordinary REST calls (see main.dart's
@@ -23,6 +43,12 @@ import 'theme.dart';
 // 2026-09-04.
 Duration skClockOffset = Duration.zero;
 DateTime skNow() => DateTime.now().toUtc().add(skClockOffset);
+
+bool shouldAutoRaiseAnchor({
+  required bool armed,
+  required double? trustedDistanceM,
+  double limitM = 300,
+}) => armed && trustedDistanceM != null && trustedDistanceM > limitM;
 
 // RFC 7231 preferred HTTP-date format only (what every HTTP server this
 // app talks to actually sends, including Signal K's), e.g.
@@ -928,6 +954,7 @@ class SignalKModel {
   double? startV;
   double? bowthrusterV;
   double? engineHours; // hours, from propulsion.<id>.runTime (seconds)
+  DateTime? engineHoursUpdate;
   // Real engine telemetry — siblings of enginePath under the same
   // propulsion.<id> base (see _buildDynamicHandlers), auto-registered
   // once the user picks the engine's runTime path in CFG > Sensores, no
@@ -1105,6 +1132,7 @@ class SignalKModel {
     engineAlternatorV = null;
     engineSupplyV = null;
     engineRpmUpdate = null;
+    engineHoursUpdate = null;
     engineCoolantTempUpdate = null;
     engineOilPressureUpdate = null;
     engineAlternatorVUpdate = null;
@@ -2052,6 +2080,70 @@ DemoScenario demoScenarioById(String id) => kDemoScenarios.firstWhere(
   final awa = math.atan2(y, x) * 180 / math.pi;
   return (aws, normalizeRelativeAngle(awa));
 }
+
+/// Por qué falló (o no) un intento de login contra Signal K.
+///
+/// Antes esto era un simple bool y ANC enseñaba "revisa usuario/contraseña"
+/// para TODO: contraseña mala, servidor apagado, timeout de 8 s, DNS que no
+/// resuelve o un Signal K sin seguridad activada. Los cinco casos parecían
+/// el mismo, así que el aviso no servía de diagnóstico y mandaba a corregir
+/// unas credenciales que podían estar perfectas (2026-09-10: el Pi estaba
+/// caído y el mensaje culpaba a la contraseña).
+enum SkLoginOutcome {
+  ok,
+  /// El servidor contestó y rechazó las credenciales.
+  badCredentials,
+  /// No se pudo hablar con el servidor: apagado, fuera de la red, timeout.
+  unreachable,
+  /// Contestó, pero con algo que no es ni 200 ni un rechazo de credenciales.
+  serverError,
+}
+
+class SkLoginResult {
+  const SkLoginResult(this.outcome, {this.statusCode, this.serverMessage});
+  final SkLoginOutcome outcome;
+  final int? statusCode;
+  final String? serverMessage;
+
+  bool get ok => outcome == SkLoginOutcome.ok;
+
+  /// Solo las credenciales malas se arreglan reescribiéndolas; el resto se
+  /// arregla en el servidor o en la red, así que ofrecer "reintentar con
+  /// otra contraseña" en esos casos sería mandar por el camino equivocado.
+  bool get isCredentialProblem => outcome == SkLoginOutcome.badCredentials;
+
+  static SkLoginResult fromStatus(int status, {String? body}) {
+    if (status == 200) return const SkLoginResult(SkLoginOutcome.ok);
+    if (status == 401 || status == 403) {
+      return SkLoginResult(
+        SkLoginOutcome.badCredentials,
+        statusCode: status,
+        serverMessage: body,
+      );
+    }
+    return SkLoginResult(
+      SkLoginOutcome.serverError,
+      statusCode: status,
+      serverMessage: body,
+    );
+  }
+}
+
+/// Texto que ve el usuario. Nombra el host y el puerto cuando el problema
+/// es de alcance, porque saber A QUIÉN no se ha podido llamar es la mitad
+/// del diagnóstico.
+String skLoginErrorText(SkLoginResult result, String target) =>
+    switch (result.outcome) {
+      SkLoginOutcome.ok => '',
+      SkLoginOutcome.badCredentials =>
+        'Signal K ha rechazado el usuario o la contraseña.',
+      SkLoginOutcome.unreachable =>
+        'No se pudo contactar con $target. El servidor puede estar apagado '
+            'o fuera de esta red — no es necesariamente la contraseña.',
+      SkLoginOutcome.serverError =>
+        'El servidor respondió con un error ${result.statusCode ?? ''}. '
+            'Revisa Signal K en $target.',
+    };
 
 class OwnTrackHistory {
   final List<AnchorTrackPoint> points = [];

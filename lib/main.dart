@@ -271,6 +271,13 @@ class _DashboardState extends State<Dashboard> {
   static const _engineStaleAfter = Duration(seconds: 2);
   static const _engineSlowStaleAfter = Duration(seconds: 6);
   static const _engineAlarmStaleAfter = Duration(seconds: 6);
+  // Contact is a presence indication, not a gauge-retention policy. EEC1 is
+  // emitted by the bridge every 500 ms and the slow PGNs every 2 s, so these
+  // tighter windows react quickly without flickering during their normal
+  // cadence. The old 6 s slow-gauge window plus the 2 s UI watchdog made OFF
+  // take as long as 8 s.
+  static const _engineContactFastStaleAfter = Duration(milliseconds: 1500);
+  static const _engineContactSlowStaleAfter = Duration(milliseconds: 2800);
   double? _freshEngine(
     double? v,
     DateTime? updatedAt, {
@@ -308,31 +315,20 @@ class _DashboardState extends State<Dashboard> {
   // lamp lit as a reminder to press OFF (see PremiumMotorEnginePanel's
   // engineContactOn / _isLampOnReal).
   bool get _engineContactOn =>
-      _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate) != null ||
-      _freshEngine(
-            signalK.engineCoolantTempK,
-            signalK.engineCoolantTempUpdate,
-            staleAfter: _engineSlowStaleAfter,
-          ) !=
-          null ||
-      _freshEngine(
-            signalK.engineOilPressurePa,
-            signalK.engineOilPressureUpdate,
-            staleAfter: _engineSlowStaleAfter,
-          ) !=
-          null ||
-      _freshEngine(
-            signalK.engineAlternatorV,
-            signalK.engineAlternatorVUpdate,
-            staleAfter: _engineSlowStaleAfter,
-          ) !=
-          null ||
-      _freshEngine(
-            signalK.engineSupplyV,
-            signalK.engineSupplyVUpdate,
-            staleAfter: _engineSlowStaleAfter,
-          ) !=
-          null ||
+      engineContactTelemetryIsFresh(
+        now: DateTime.now(),
+        rpm: signalK.engineRpm,
+        rpmUpdatedAt: signalK.engineRpmUpdate,
+        slowTelemetry: [
+          (signalK.engineHours, signalK.engineHoursUpdate),
+          (signalK.engineCoolantTempK, signalK.engineCoolantTempUpdate),
+          (signalK.engineOilPressurePa, signalK.engineOilPressureUpdate),
+          (signalK.engineAlternatorV, signalK.engineAlternatorVUpdate),
+          (signalK.engineSupplyV, signalK.engineSupplyVUpdate),
+        ],
+        fastStaleAfter: _engineContactFastStaleAfter,
+        slowStaleAfter: _engineContactSlowStaleAfter,
+      ) ||
       _freshEngineFlag(
             signalK.engineStarting,
             signalK.engineDiagnosticUpdate,
@@ -343,6 +339,34 @@ class _DashboardState extends State<Dashboard> {
             signalK.enginePreheatActiveUpdate,
           ) ==
           true;
+
+  Timer? _engineContactExpiryTimer;
+
+  void _scheduleEngineContactExpiry() {
+    _engineContactExpiryTimer?.cancel();
+    final deadlines = <DateTime>[
+      if (signalK.engineRpmUpdate != null)
+        signalK.engineRpmUpdate!.add(_engineContactFastStaleAfter),
+      for (final updatedAt in [
+        signalK.engineHoursUpdate,
+        signalK.engineCoolantTempUpdate,
+        signalK.engineOilPressureUpdate,
+        signalK.engineAlternatorVUpdate,
+        signalK.engineSupplyVUpdate,
+      ])
+        if (updatedAt != null) updatedAt.add(_engineContactSlowStaleAfter),
+    ];
+    if (deadlines.isEmpty) return;
+    final now = DateTime.now();
+    final deadline = deadlines.reduce((a, b) => a.isAfter(b) ? a : b);
+    if (!deadline.isAfter(now)) return;
+    _engineContactExpiryTimer = Timer(
+      deadline.difference(now) + const Duration(milliseconds: 20),
+      () {
+        if (mounted) setState(() {});
+      },
+    );
+  }
 
   bool loadingWeather = false;
   // Manual pick from the PRON map picker overrides the boat's own GPS position
@@ -412,6 +436,18 @@ class _DashboardState extends State<Dashboard> {
   // speed numbers the screen itself shows.
   bool _anchorIsDragging = false;
   double? _anchorDragSpeedMPerMin;
+  // A confirmed position more than 300 m from the stored anchor means the
+  // vessel has left the anchorage. The watch is raised automatically, but
+  // the resulting alarm stays latched until the user acknowledges it.
+  static const _anchorAutoRaiseDistanceM = 300.0;
+  static const _anchorAutoRaiseConfirmStreak = 2;
+  double? _lastTrustedAnchorDistanceM;
+  double? _autoRaiseCandidateLat;
+  double? _autoRaiseCandidateLon;
+  int _autoRaiseFarStreak = 0;
+  double? _autoRaisedAnchorDistanceM;
+  bool _autoRaiseInProgress = false;
+  bool _autoRaiseDialogShowing = false;
   Timer? _anchorPublishTimer;
   // Debounces CFG > Alarmas' ntfy topic field pushing to the server plugin
   // — see its onChanged handler. Without this, the plugin's own copy of
@@ -1367,6 +1403,10 @@ class _DashboardState extends State<Dashboard> {
       _pendingGlitchLat = null;
       _pendingGlitchLon = null;
       _pendingGlitchStreak = 0;
+      _lastTrustedAnchorDistanceM = null;
+      _autoRaiseCandidateLat = null;
+      _autoRaiseCandidateLon = null;
+      _autoRaiseFarStreak = 0;
       // Also invalidates the re-entrancy memo below — a fresh drop always
       // needs its first sample evaluated for real, even on the (unlikely
       // but possible) chance it exactly matches the previous anchorage's
@@ -1429,6 +1469,7 @@ class _DashboardState extends State<Dashboard> {
     _lastAnchorCheckLat = lat;
     _lastAnchorCheckLon = lon;
     final r = bearingDistanceMeters(dropLat, dropLon, lat, lon);
+    _lastTrustedAnchorDistanceM = r.distanceM;
     _lastAnchorZoneResult = isOutsideWatchZone(
       distanceM: r.distanceM,
       radiusM: cfg.radiusM,
@@ -1438,6 +1479,121 @@ class _DashboardState extends State<Dashboard> {
       sectorEndDeg: cfg.sectorEndDeg,
     );
     return _lastAnchorZoneResult;
+  }
+
+  void _maybeAutoRaiseAnchor() {
+    final cfg = settings.anchorConfig;
+    if (!cfg.armed || _autoRaiseInProgress) return;
+
+    // This call is also the first gate through the existing GPS-glitch
+    // corroboration logic. _lastTrustedAnchorDistanceM is only updated after
+    // a sample has passed that gate.
+    final outside = _isOutsideAnchorZone();
+    final distanceM = _lastTrustedAnchorDistanceM;
+    if (!shouldAutoRaiseAnchor(
+      armed: cfg.armed,
+      trustedDistanceM: distanceM,
+      limitM: _anchorAutoRaiseDistanceM,
+    )) {
+      if (distanceM != null && distanceM <= _anchorAutoRaiseDistanceM) {
+        _autoRaiseCandidateLat = null;
+        _autoRaiseCandidateLon = null;
+        _autoRaiseFarStreak = 0;
+      }
+      return;
+    }
+    if (!outside || _lastRawAnchorLat == null || _lastRawAnchorLon == null) {
+      return;
+    }
+    // Independent second gate for the first fix after launch, when the
+    // ordinary jump filter has no prior trusted position to compare with.
+    // Re-reading the same fix during rebuilds never advances the streak.
+    final sameSample =
+        _autoRaiseCandidateLat == _lastRawAnchorLat &&
+        _autoRaiseCandidateLon == _lastRawAnchorLon;
+    if (sameSample) return;
+    final agreesWithCandidate =
+        _autoRaiseCandidateLat != null &&
+        bearingDistanceMeters(
+              _autoRaiseCandidateLat!,
+              _autoRaiseCandidateLon!,
+              _lastRawAnchorLat!,
+              _lastRawAnchorLon!,
+            ).distanceM <=
+            _glitchConfirmToleranceM;
+    _autoRaiseFarStreak = agreesWithCandidate ? _autoRaiseFarStreak + 1 : 1;
+    _autoRaiseCandidateLat = _lastRawAnchorLat;
+    _autoRaiseCandidateLon = _lastRawAnchorLon;
+    if (_autoRaiseFarStreak < _anchorAutoRaiseConfirmStreak) return;
+    final confirmedDistanceM = distanceM!;
+
+    _autoRaiseInProgress = true;
+    final raisedAt = skNow();
+    setState(() {
+      cfg.armed = false;
+      cfg.armedOrMovedAt = raisedAt;
+      if (cfg.dropLat != null && cfg.dropLon != null) {
+        cfg.history = [
+          ...cfg.history,
+          AnchorHistoryEntry(
+            droppedAt: cfg.droppedAt ?? raisedAt.toLocal(),
+            raisedAt: raisedAt.toLocal(),
+            lat: cfg.dropLat!,
+            lon: cfg.dropLon!,
+            radiusM: cfg.radiusM,
+            depthM: cfg.dropDepthM,
+          ),
+        ];
+        if (cfg.history.length > 50) {
+          cfg.history = cfg.history.sublist(cfg.history.length - 50);
+        }
+      }
+      _autoRaisedAnchorDistanceM = confirmedDistanceM;
+      _mutedAlarms.remove('anchorAutoRaise');
+      _autoRaiseInProgress = false;
+    });
+    unawaited(
+      _recordEvent(
+        'ANCHOR_AUTO_RAISED',
+        'distance=${confirmedDistanceM.toStringAsFixed(1)}m limit=${_anchorAutoRaiseDistanceM.round()}m',
+      ),
+    );
+    unawaited(_saveSettings());
+    unawaited(_publishAnchorDelta());
+    _syncAnchorPublishTimer();
+    unawaited(_syncAlarmSound());
+    unawaited(_showAutoRaisedAnchorAlert(confirmedDistanceM));
+  }
+
+  Future<void> _showAutoRaisedAnchorAlert(double distanceM) async {
+    if (!mounted || _autoRaiseDialogShowing) return;
+    _autoRaiseDialogShowing = true;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Ancla levantada automáticamente'),
+        content: Text(
+          'El barco está a ${distanceM.toStringAsFixed(0)} m del ancla, '
+          'por encima del límite de ${_anchorAutoRaiseDistanceM.round()} m.\n\n'
+          'La vigilancia de fondeo se ha desactivado y el fondeo se ha '
+          'guardado en el histórico.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Entendido'),
+          ),
+        ],
+      ),
+    );
+    _autoRaiseDialogShowing = false;
+    if (!mounted) return;
+    setState(() {
+      _autoRaisedAnchorDistanceM = null;
+      _mutedAlarms.remove('anchorAutoRaise');
+    });
+    unawaited(_syncAlarmSound());
   }
 
   void _routeNotification(String path, dynamic value) {
@@ -1499,6 +1655,17 @@ class _DashboardState extends State<Dashboard> {
         key: key,
         label: 'Corredera (SOG sin STW)',
         sound: settings.alarmCorrederaSound,
+        muted: _mutedAlarms.contains(key),
+      ));
+    }
+    final autoRaisedDistanceM = _autoRaisedAnchorDistanceM;
+    if (autoRaisedDistanceM != null) {
+      const key = 'anchorAutoRaise';
+      out.add((
+        key: key,
+        label:
+            'Ancla levantada automáticamente — barco a ${autoRaisedDistanceM.toStringAsFixed(0)} m',
+        sound: true,
         muted: _mutedAlarms.contains(key),
       ));
     }
@@ -1954,6 +2121,7 @@ class _DashboardState extends State<Dashboard> {
   String? _pageForAlarmKey(String key) {
     if (key == 'corredera') return 'NAV';
     if (key == 'anchorDrag' ||
+        key == 'anchorAutoRaise' ||
         key == 'anchorDepth' ||
         key == 'anchorWind' ||
         key == 'anchorNoPosition') {
@@ -3324,6 +3492,40 @@ class _DashboardState extends State<Dashboard> {
 
   Map<String, void Function(dynamic)> _dynamicHandlers = {};
 
+  // Dynamic handlers predate per-delta timestamps and only receive the
+  // value. Stamp engine telemetry here, where Signal K's source timestamp is
+  // still available: a retained value replayed on reconnect must not look
+  // like a newly switched-on MDI.
+  void _stampEngineTelemetryUpdate(
+    String path,
+    dynamic value,
+    DateTime? dataTime,
+  ) {
+    final configuredPath = settings.sensorConfig.enginePath;
+    if (configuredPath == null || configuredPath.isEmpty || value == null) {
+      return;
+    }
+    final base = configuredPath.replaceFirst(RegExp(r'\.runTime$'), '');
+    final ts = dataTime ?? DateTime.now();
+    var telemetry = true;
+    if (path == configuredPath) {
+      signalK.engineHoursUpdate = ts;
+    } else if (path == '$base.revolutions') {
+      signalK.engineRpmUpdate = ts;
+    } else if (path == '$base.coolantTemperature') {
+      signalK.engineCoolantTempUpdate = ts;
+    } else if (path == '$base.oilPressure') {
+      signalK.engineOilPressureUpdate = ts;
+    } else if (path == '$base.alternatorVoltage') {
+      signalK.engineAlternatorVUpdate = ts;
+    } else if (path == '$base.volvoMdi.supplyVoltage') {
+      signalK.engineSupplyVUpdate = ts;
+    } else {
+      telemetry = false;
+    }
+    if (telemetry) _scheduleEngineContactExpiry();
+  }
+
   void _buildDynamicHandlers() {
     final c = settings.sensorConfig;
     final h = <String, void Function(dynamic)>{};
@@ -3370,7 +3572,9 @@ class _DashboardState extends State<Dashboard> {
       h[c.enginePath!] = (v) {
         final n = _num(v);
         final hours = n == null ? null : n / 3600.0;
-        // A lifetime counter is not an engine-running/contact signal.
+        // The value itself is only a lifetime counter. Its fresh source
+        // timestamp is nevertheless valid ECU activity and is stamped in
+        // _stampEngineTelemetryUpdate; a retained replay remains stale.
         signalK.engineHours = hours;
       };
       // Real engine telemetry beyond hours — RPM, coolant temp, oil
@@ -3383,23 +3587,18 @@ class _DashboardState extends State<Dashboard> {
       h['$base.revolutions'] = (v) {
         final n = _num(v);
         signalK.engineRpm = n == null ? null : n * 60;
-        signalK.engineRpmUpdate = DateTime.now();
       };
       h['$base.coolantTemperature'] = (v) {
         signalK.engineCoolantTempK = _num(v);
-        signalK.engineCoolantTempUpdate = DateTime.now();
       };
       h['$base.oilPressure'] = (v) {
         signalK.engineOilPressurePa = _num(v);
-        signalK.engineOilPressureUpdate = DateTime.now();
       };
       h['$base.alternatorVoltage'] = (v) {
         signalK.engineAlternatorV = _num(v);
-        signalK.engineAlternatorVUpdate = DateTime.now();
       };
       h['$base.volvoMdi.supplyVoltage'] = (v) {
         signalK.engineSupplyV = _num(v);
-        signalK.engineSupplyVUpdate = DateTime.now();
       };
       // Discrete DM1 fault bits (J1939 PGN 65226), if the bridge firmware
       // ever decodes them: SPN 110/FMI 0 (coolant above normal range), SPN
@@ -4238,6 +4437,7 @@ class _DashboardState extends State<Dashboard> {
     final dynamicHandler = _dynamicHandlers[path];
     if (dynamicHandler != null) {
       dynamicHandler(value);
+      _stampEngineTelemetryUpdate(path, value, dataTime);
       return true;
     }
     if (path.startsWith('notifications.')) {
@@ -4272,6 +4472,7 @@ class _DashboardState extends State<Dashboard> {
               weather.updated == null) {
             unawaited(_loadWeather(force: true));
           }
+          _maybeAutoRaiseAnchor();
           return true;
         }
       case 'navigation.speedOverGround':
@@ -5248,9 +5449,15 @@ class _DashboardState extends State<Dashboard> {
   // just check the username/password fields weren't empty, never that
   // they actually worked, so a typo could arm the watch locally while the
   // real Signal K publish silently failed from then on.
-  Future<bool> _loginToSignalK() async {
+  Future<bool> _loginToSignalK() async =>
+      (await _loginToSignalKResult()).ok;
+
+  /// Igual que [_loginToSignalK] pero diciendo POR QUÉ falló, para que ANC
+  /// pueda distinguir "contraseña mala" de "el Pi no está" en vez de
+  /// culpar siempre a las credenciales. Ver SkLoginResult.
+  Future<SkLoginResult> _loginToSignalKResult() async {
     if (settings.skUsername.isEmpty || settings.skPassword.isEmpty) {
-      return false;
+      return const SkLoginResult(SkLoginOutcome.badCredentials);
     }
     try {
       final uri = Uri.parse(
@@ -5266,12 +5473,36 @@ class _DashboardState extends State<Dashboard> {
             }),
           )
           .timeout(const Duration(seconds: 8));
-      final ok = response.statusCode == 200;
-      if (mounted) setState(() => _skLoginOk = ok);
-      return ok;
-    } catch (_) {
+      final result = SkLoginResult.fromStatus(response.statusCode);
+      if (mounted) setState(() => _skLoginOk = result.ok);
+      return result;
+    } catch (e) {
+      // Timeout, conexión rechazada, DNS: nada de esto dice nada sobre la
+      // contraseña, así que no se cuenta como credenciales malas.
       if (mounted) setState(() => _skLoginOk = false);
-      return false;
+      return SkLoginResult(
+        SkLoginOutcome.unreachable,
+        serverMessage: e.toString(),
+      );
+    }
+  }
+
+  /// Guarda las credenciales actuales en la entrada del servidor guardado
+  /// al que corresponden.
+  ///
+  /// Cambiar de servidor guardado reemplaza usuario/contraseña por los de
+  /// esa entrada — deliberado, para no autenticarse en un barco con el
+  /// login de otro (2026-09-04). La pega es que unas credenciales recién
+  /// escritas se perdían al tocar cualquier chip, porque no llegaban a
+  /// guardarse en ninguna entrada ("pongo esos campos en conexión y luego
+  /// no los usa", 2026-09-10). Ahora se anclan a su propio servidor, así
+  /// que sobreviven a ir y volver sin mezclarse entre barcos.
+  void _rememberCredentialsForCurrentServer() {
+    for (final server in settings.savedServers) {
+      if (server.host == settings.host && server.port == settings.port) {
+        server.skUsername = settings.skUsername;
+        server.skPassword = settings.skPassword;
+      }
     }
   }
 
@@ -5818,6 +6049,7 @@ class _DashboardState extends State<Dashboard> {
     _windToastTimer?.cancel();
     _demoTimer?.cancel();
     _staleWatchdog?.cancel();
+    _engineContactExpiryTimer?.cancel();
     _anchorPublishTimer?.cancel();
     _ntfyTopicSyncDebounce?.cancel();
     _anchorPublishChannel?.sink.close();
@@ -10506,12 +10738,14 @@ class _DashboardState extends State<Dashboard> {
       skPassword: settings.skPassword,
       onCredentialsChanged: (user, pass) {
         setState(() {
-          settings.skUsername = user;
+          settings.skUsername = user.trim();
           settings.skPassword = pass;
+          _rememberCredentialsForCurrentServer();
         });
         unawaited(_saveSettings());
       },
-      onVerifyLogin: _loginToSignalK,
+      onVerifyLogin: _loginToSignalKResult,
+      loginTargetLabel: '${settings.host}:${settings.port}',
       demo: settings.demoMode,
       gpsFallbackConsent: settings.gpsFallbackConsent,
       onGpsFallbackConsentChanged: (allow) {
@@ -10532,6 +10766,7 @@ class _DashboardState extends State<Dashboard> {
         // calling it every build (this fires via addPostFrameCallback on
         // every NativeAnchorView build) is safe.
         _ownTrack.add(lat, lon);
+        _maybeAutoRaiseAnchor();
       },
       onDragStatusChanged: (outside, isDragging, dragSpeedMPerMin) {
         _anchorIsDragging = isDragging;
@@ -10782,6 +11017,7 @@ class _DashboardState extends State<Dashboard> {
       settings.authBase64 = authController.text.trim();
       settings.skUsername = skUsernameController.text.trim();
       settings.skPassword = skPasswordController.text;
+      _rememberCredentialsForCurrentServer();
       settings.influxHost = influxHostController.text.trim();
       settings.influxOrg = influxOrgController.text.trim().isEmpty
           ? influxOrgDefault
@@ -12659,6 +12895,10 @@ class _DashboardState extends State<Dashboard> {
                               ),
                               for (final entry in const [
                                 ('anchorDrag', 'Garreando'),
+                                (
+                                  'anchorAutoRaise',
+                                  'Ancla levantada automáticamente (>300 m)',
+                                ),
                                 ('anchorDepth', 'Cambio de profundidad'),
                                 ('anchorWind', 'Viento fuerte'),
                                 ('anchorNoPosition', 'Sin posición (fondeado)'),

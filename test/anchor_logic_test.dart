@@ -4,6 +4,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rewind_xcover6_panel/models.dart';
 
 void main() {
+  test('el auto levado exige estar armado y superar estrictamente 300 m', () {
+    expect(shouldAutoRaiseAnchor(armed: true, trustedDistanceM: 300), isFalse);
+    expect(
+      shouldAutoRaiseAnchor(armed: true, trustedDistanceM: 300.01),
+      isTrue,
+    );
+    expect(shouldAutoRaiseAnchor(armed: false, trustedDistanceM: 500), isFalse);
+    expect(shouldAutoRaiseAnchor(armed: true, trustedDistanceM: null), isFalse);
+  });
+
   test('live anchor-track points use the same adjusted clock as the drop', () {
     final previousOffset = skClockOffset;
     addTearDown(() => skClockOffset = previousOffset);
