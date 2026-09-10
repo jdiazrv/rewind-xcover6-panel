@@ -5474,16 +5474,27 @@ class _DashboardState extends State<Dashboard> {
           )
           .timeout(const Duration(seconds: 8));
       final result = SkLoginResult.fromStatus(response.statusCode);
-      if (mounted) setState(() => _skLoginOk = result.ok);
+      if (mounted) {
+        setState(() {
+          _skLoginOk = result.ok;
+          _skLastLogin = result;
+        });
+      }
       return result;
     } catch (e) {
       // Timeout, conexión rechazada, DNS: nada de esto dice nada sobre la
       // contraseña, así que no se cuenta como credenciales malas.
-      if (mounted) setState(() => _skLoginOk = false);
-      return SkLoginResult(
+      final result = SkLoginResult(
         SkLoginOutcome.unreachable,
         serverMessage: e.toString(),
       );
+      if (mounted) {
+        setState(() {
+          _skLoginOk = false;
+          _skLastLogin = result;
+        });
+      }
+      return result;
     }
   }
 
@@ -5507,6 +5518,10 @@ class _DashboardState extends State<Dashboard> {
   }
 
   bool? _skLoginOk; // null = not attempted, true/false = last attempt result
+  /// Motivo del último intento fallido, para poder enseñarlo en CFG en vez
+  /// de un "no se pudo iniciar sesión" que no distingue una contraseña
+  /// rechazada de un servidor que no contesta.
+  SkLoginResult? _skLastLogin;
 
   Future<Map<String, dynamic>> _fetchRawSkNode(String path) async {
     final uri = Uri.parse(
@@ -12063,8 +12078,13 @@ class _DashboardState extends State<Dashboard> {
                                             skUsernameController.text.trim();
                                         settings.skPassword =
                                             skPasswordController.text;
+                                        // Este botón no anclaba lo escrito
+                                        // a la entrada del servidor, así
+                                        // que al volver a tocar un chip se
+                                        // perdía y había que reescribirlo.
+                                        _rememberCredentialsForCurrentServer();
                                         await _saveSettings();
-                                        await _loginToSignalK();
+                                        await _loginToSignalKResult();
                                         if (mounted) setState(() {});
                                       },
                                     ),
@@ -12078,11 +12098,24 @@ class _DashboardState extends State<Dashboard> {
                                         ),
                                       )
                                     else if (_skLoginOk == false)
-                                      const Text(
-                                        'No se pudo iniciar sesión',
-                                        style: TextStyle(
-                                          color: cRed,
-                                          fontSize: 12,
+                                      // Antes decía solo "no se pudo
+                                      // iniciar sesión", que vale igual
+                                      // para una contraseña rechazada que
+                                      // para un servidor que no contesta —
+                                      // y son dos problemas distintos con
+                                      // dos soluciones distintas.
+                                      Expanded(
+                                        child: Text(
+                                          _skLastLogin == null
+                                              ? 'No se pudo iniciar sesión'
+                                              : skLoginErrorText(
+                                                  _skLastLogin!,
+                                                  '${settings.host}:${settings.port}',
+                                                ),
+                                          style: const TextStyle(
+                                            color: cRed,
+                                            fontSize: 12,
+                                          ),
                                         ),
                                       ),
                                   ],
