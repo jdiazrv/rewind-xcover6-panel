@@ -190,7 +190,9 @@ void main() {
     expect(find.text('Rendimiento del barco'), findsOneWidget);
     expect(find.text('Viento y vela'), findsOneWidget);
     expect(find.text('Informe completo'), findsOneWidget);
-    expect(find.text('24h'), findsOneWidget);
+    expect(find.text('−72 h'), findsOneWidget);
+    expect(find.text('ahora'), findsOneWidget);
+    expect(find.text('24 h'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

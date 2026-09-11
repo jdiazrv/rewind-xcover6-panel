@@ -47,15 +47,298 @@ extension PerformanceReportKindLabel on PerformanceReportKind {
   };
 }
 
+const _reportHorizonMinutes = 72 * 60;
+const _reportMaxPeriodMinutes = 24 * 60;
+const _reportStepMinutes = 15;
+
+String _reportDateTime(DateTime value) {
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${two(value.day)}/${two(value.month)} ${two(value.hour)}:${two(value.minute)}';
+}
+
+String _reportDurationLabel(Duration duration) {
+  final minutes = duration.inMinutes;
+  if (minutes < 60) return '$minutes min';
+  if (minutes % 60 == 0) return '${minutes ~/ 60} h';
+  return '${minutes ~/ 60} h ${minutes % 60} min';
+}
+
+AppRange _reportRangeFor(Duration duration) {
+  final minutes = duration.inMinutes;
+  final agg = switch (minutes) {
+    <= 60 => '10s',
+    <= 6 * 60 => '30s',
+    <= 12 * 60 => '1m',
+    _ => '2m',
+  };
+  return (
+    label: _reportDurationLabel(duration),
+    flux: '-${math.max(_reportStepMinutes, minutes)}m',
+    agg: agg,
+    longRange: false,
+  );
+}
+
+/// Applies the report picker's 15-minute grid and 24-hour maximum without
+/// moving the opposite handle. Public so the interaction contract can be
+/// covered by a small unit test independently of the PDF/network layer.
+RangeValues normalizeReportRange(RangeValues current, RangeValues proposed) {
+  double snap(double value) =>
+      (value / _reportStepMinutes).round() * _reportStepMinutes.toDouble();
+  var start = snap(proposed.start).clamp(0, _reportHorizonMinutes.toDouble());
+  var end = snap(proposed.end).clamp(0, _reportHorizonMinutes.toDouble());
+  final startMoved =
+      (proposed.start - current.start).abs() >=
+      (proposed.end - current.end).abs();
+  if (startMoved) {
+    start = start.clamp(
+      math.max(0.0, end - _reportMaxPeriodMinutes),
+      end - _reportStepMinutes,
+    );
+  } else {
+    end = end.clamp(
+      start + _reportStepMinutes,
+      math.min(
+        _reportHorizonMinutes.toDouble(),
+        start + _reportMaxPeriodMinutes,
+      ),
+    );
+  }
+  return RangeValues(start.toDouble(), end.toDouble());
+}
+
+class _ReportPeriodSelector extends StatelessWidget {
+  const _ReportPeriodSelector({
+    required this.referenceNow,
+    required this.values,
+    required this.onChanged,
+  });
+
+  final DateTime referenceNow;
+  final RangeValues values;
+  final ValueChanged<RangeValues> onChanged;
+
+  DateTime _timeFor(double minutes) => referenceNow
+      .subtract(const Duration(hours: 72))
+      .add(Duration(minutes: minutes.round()));
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = Duration(minutes: (values.end - values.start).round());
+    return Column(
+      children: [
+        Text(
+          'Inicio ${_reportDateTime(_timeFor(values.start))}  ·  '
+          'Fin ${_reportDateTime(_timeFor(values.end))}  ·  '
+          '${_reportDurationLabel(duration)}',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: cText,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 3),
+        SizedBox(
+          height: 102,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              const markerWidth = 116.0;
+              const markerHeight = 34.0;
+              final width = constraints.maxWidth;
+              final startCenter = width * values.start / _reportHorizonMinutes;
+              final endCenter = width * values.end / _reportHorizonMinutes;
+
+              Widget marker(double center, String text, bool above) {
+                final left = (center - markerWidth / 2)
+                    .clamp(0.0, math.max(0.0, width - markerWidth))
+                    .toDouble();
+                return Positioned(
+                  left: left,
+                  top: above ? 0 : 68,
+                  width: markerWidth,
+                  height: markerHeight,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onHorizontalDragUpdate: (details) {
+                      final deltaMinutes =
+                          details.delta.dx / width * _reportHorizonMinutes;
+                      onChanged(
+                        above
+                            ? RangeValues(
+                                values.start + deltaMinutes,
+                                values.end,
+                              )
+                            : RangeValues(
+                                values.start,
+                                values.end + deltaMinutes,
+                              ),
+                      );
+                    },
+                    child: CustomPaint(
+                      painter: _ReportMarkerPainter(
+                        pointerDown: above,
+                        pointerX: (center - left)
+                            .clamp(8.0, markerWidth - 8)
+                            .toDouble(),
+                      ),
+                      child: Center(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            top: above ? 0 : 5,
+                            bottom: above ? 5 : 0,
+                          ),
+                          child: Text(
+                            text,
+                            style: const TextStyle(
+                              color: cText,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }
+
+              return Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 27,
+                    height: 48,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        activeTrackColor: cCyan,
+                        inactiveTrackColor: Colors.white24,
+                        rangeThumbShape: const _InvisibleRangeThumbShape(),
+                        rangeValueIndicatorShape:
+                            const PaddleRangeSliderValueIndicatorShape(),
+                        showValueIndicator: ShowValueIndicator.never,
+                        overlayColor: cCyan.withValues(alpha: 0.14),
+                      ),
+                      child: RangeSlider(
+                        min: 0,
+                        max: _reportHorizonMinutes.toDouble(),
+                        divisions: _reportHorizonMinutes ~/ _reportStepMinutes,
+                        values: values,
+                        onChanged: onChanged,
+                      ),
+                    ),
+                  ),
+                  marker(
+                    startCenter,
+                    _reportDateTime(_timeFor(values.start)),
+                    true,
+                  ),
+                  marker(
+                    endCenter,
+                    _reportDateTime(_timeFor(values.end)),
+                    false,
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+        const Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('−72 h', style: TextStyle(color: cMuted, fontSize: 10)),
+            Text('ahora', style: TextStyle(color: cMuted, fontSize: 10)),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _InvisibleRangeThumbShape extends RangeSliderThumbShape {
+  const _InvisibleRangeThumbShape();
+
+  @override
+  Size getPreferredSize(bool isEnabled, bool isDiscrete) => const Size(2, 2);
+
+  @override
+  void paint(
+    PaintingContext context,
+    Offset center, {
+    required Animation<double> activationAnimation,
+    required Animation<double> enableAnimation,
+    bool isDiscrete = false,
+    bool isEnabled = false,
+    bool isOnTop = false,
+    bool isPressed = false,
+    required SliderThemeData sliderTheme,
+    TextDirection textDirection = TextDirection.ltr,
+    Thumb thumb = Thumb.start,
+  }) {}
+}
+
+class _ReportMarkerPainter extends CustomPainter {
+  const _ReportMarkerPainter({
+    required this.pointerDown,
+    required this.pointerX,
+  });
+
+  final bool pointerDown;
+  final double pointerX;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const pointerHeight = 6.0;
+    final rect = pointerDown
+        ? Rect.fromLTRB(0, 0, size.width, size.height - pointerHeight)
+        : Rect.fromLTRB(0, pointerHeight, size.width, size.height);
+    final fill = Paint()..color = cPanel2;
+    final border = Paint()
+      ..color = cCyan
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.3;
+    final box = RRect.fromRectAndRadius(rect, const Radius.circular(4));
+    canvas.drawRRect(box, fill);
+    canvas.drawRRect(box, border);
+    final tipY = pointerDown ? size.height : 0.0;
+    final baseY = pointerDown ? size.height - pointerHeight : pointerHeight;
+    final pointer = Path()
+      ..moveTo(pointerX - 6, baseY)
+      ..lineTo(pointerX, tipY)
+      ..lineTo(pointerX + 6, baseY)
+      ..close();
+    canvas.drawPath(pointer, fill);
+    canvas.drawPath(pointer, border);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ReportMarkerPainter oldDelegate) =>
+      oldDelegate.pointerDown != pointerDown ||
+      oldDelegate.pointerX != pointerX;
+}
+
 Future<void> showPerformanceReportPicker(
   BuildContext context, {
   required SettingsModel settings,
 }) async {
-  var selectedRange = appRanges[3]; // 24 h: useful default, explicit in UI.
+  // Freeze "now" while this dialog is open: otherwise both labels would
+  // drift under the user's fingers even though neither marker had moved.
+  final referenceNow = DateTime.now();
+  var selectedPeriod = RangeValues(
+    (_reportHorizonMinutes - _reportMaxPeriodMinutes).toDouble(),
+    _reportHorizonMinutes.toDouble(),
+  );
   Duration? selectedBarbInterval;
   final selection =
       await showDialog<
-        ({PerformanceReportKind kind, AppRange range, Duration? barbInterval})
+        ({
+          PerformanceReportKind kind,
+          DateTime start,
+          DateTime end,
+          Duration? barbInterval,
+        })
       >(
         context: context,
         builder: (dialogContext) => StatefulBuilder(
@@ -70,7 +353,7 @@ Future<void> showPerformanceReportPicker(
             ),
             content: SizedBox(
               width: 560,
-              height: math.min(300, MediaQuery.sizeOf(context).height * 0.58),
+              height: math.min(410, MediaQuery.sizeOf(context).height * 0.7),
               child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -84,22 +367,38 @@ Future<void> showPerformanceReportPicker(
                         letterSpacing: 0.8,
                       ),
                     ),
-                    const SizedBox(height: 7),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SegmentedButton<AppRange>(
-                        showSelectedIcon: false,
-                        segments: [
-                          for (final range in appRanges)
-                            ButtonSegment(
-                              value: range,
-                              label: Text(range.label),
-                            ),
-                        ],
-                        selected: {selectedRange},
-                        onSelectionChanged: (value) =>
-                            setDialogState(() => selectedRange = value.first),
+                    const SizedBox(height: 4),
+                    _ReportPeriodSelector(
+                      referenceNow: referenceNow,
+                      values: selectedPeriod,
+                      onChanged: (value) => setDialogState(
+                        () => selectedPeriod = normalizeReportRange(
+                          selectedPeriod,
+                          value,
+                        ),
                       ),
+                    ),
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final hours in const [1, 3, 6, 12, 24])
+                          ChoiceChip(
+                            visualDensity: VisualDensity.compact,
+                            label: Text('$hours h'),
+                            selected:
+                                selectedPeriod.end == _reportHorizonMinutes &&
+                                selectedPeriod.end - selectedPeriod.start ==
+                                    hours * 60,
+                            onSelected: (_) => setDialogState(
+                              () => selectedPeriod = RangeValues(
+                                (_reportHorizonMinutes - hours * 60).toDouble(),
+                                _reportHorizonMinutes.toDouble(),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                     const SizedBox(height: 16),
                     const Text(
@@ -162,11 +461,21 @@ Future<void> showPerformanceReportPicker(
                             Icons.chevron_right,
                             color: cMuted,
                           ),
-                          onTap: () => Navigator.of(dialogContext).pop((
-                            kind: kind,
-                            range: selectedRange,
-                            barbInterval: selectedBarbInterval,
-                          )),
+                          onTap: () {
+                            final horizonStart = referenceNow.subtract(
+                              const Duration(hours: 72),
+                            );
+                            Navigator.of(dialogContext).pop((
+                              kind: kind,
+                              start: horizonStart.add(
+                                Duration(minutes: selectedPeriod.start.round()),
+                              ),
+                              end: horizonStart.add(
+                                Duration(minutes: selectedPeriod.end.round()),
+                              ),
+                              barbInterval: selectedBarbInterval,
+                            ));
+                          },
                         ),
                       ),
                       if (kind != PerformanceReportKind.values.last)
@@ -189,7 +498,8 @@ Future<void> showPerformanceReportPicker(
   await openPerformanceReport(
     context,
     settings: settings,
-    range: selection.range,
+    start: selection.start,
+    end: selection.end,
     kind: selection.kind,
     barbInterval: selection.barbInterval,
   );
@@ -201,7 +511,8 @@ Future<void> showPerformanceReportPicker(
 Future<void> openPerformanceReport(
   BuildContext context, {
   required SettingsModel settings,
-  required AppRange range,
+  required DateTime start,
+  required DateTime end,
   PerformanceReportKind kind = PerformanceReportKind.complete,
   Duration? barbInterval,
 }) {
@@ -210,7 +521,8 @@ Future<void> openPerformanceReport(
       fullscreenDialog: true,
       builder: (_) => PerformanceReportPage(
         settings: settings,
-        range: range,
+        start: start,
+        end: end,
         kind: kind,
         barbInterval: barbInterval,
       ),
@@ -222,12 +534,14 @@ class PerformanceReportPage extends StatefulWidget {
   const PerformanceReportPage({
     super.key,
     required this.settings,
-    required this.range,
+    required this.start,
+    required this.end,
     required this.kind,
     this.barbInterval,
   });
   final SettingsModel settings;
-  final AppRange range;
+  final DateTime start;
+  final DateTime end;
   final PerformanceReportKind kind;
   final Duration? barbInterval;
 
@@ -246,6 +560,20 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   // resolution can otherwise flip between individual HTTP requests.
   String? _resolvedSkHost;
 
+  AppRange get _range {
+    final base = _reportRangeFor(widget.end.difference(widget.start));
+    return (
+      label: base.label,
+      flux: base.flux,
+      agg: base.agg,
+      // A short interval can still sit near the old end of the 72-hour
+      // selector, outside the raw bucket's normal retention window.
+      longRange: widget.start.isBefore(
+        DateTime.now().subtract(const Duration(hours: 48)),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -254,7 +582,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
   Future<List<GraphPoint>> _query(MetricDef def) async {
     final s = widget.settings;
-    final r = widget.range;
+    final r = _range;
     Future<List<GraphPoint>> fromInflux() => influxQuery(
       host: s.effectiveInfluxHost,
       org: s.influxOrg,
@@ -262,6 +590,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       def: def,
       fluxRange: r.flux,
       aggEvery: r.agg,
+      start: widget.start,
+      stop: widget.end,
       bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
     );
     Future<List<GraphPoint>> fromSk() async => skHistoryQuery(
@@ -271,6 +601,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       def: def,
       range: parseFluxRange(r.flux),
       resolution: parseAggEvery(r.agg),
+      start: widget.start,
+      stop: widget.end,
     );
     switch (s.historySource) {
       case 'influx':
@@ -302,19 +634,61 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       _error = null;
     });
     try {
-      final r = widget.range;
+      final r = _range;
       if (!widget.settings.demoMode) {
         _resolvedSkHost = await resolveHostOnce(widget.settings.host);
       }
       if (widget.settings.demoMode) {
         _series = {
-          'sog': demoGraphSeries(mSog, r.flux, r.agg),
-          'stw': demoGraphSeries(mStw, r.flux, r.agg),
-          'aws': demoGraphSeries(mAws, r.flux, r.agg),
-          'tws': demoGraphSeries(mTws, r.flux, r.agg),
-          'twd': demoGraphSeries(mTwd, r.flux, r.agg),
-          'heel': demoGraphSeries(mHeel, r.flux, r.agg),
-          'twa': demoGraphSeries(mTwa, r.flux, r.agg),
+          'sog': demoGraphSeries(
+            mSog,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'stw': demoGraphSeries(
+            mStw,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'aws': demoGraphSeries(
+            mAws,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'tws': demoGraphSeries(
+            mTws,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'twd': demoGraphSeries(
+            mTwd,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'heel': demoGraphSeries(
+            mHeel,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
+          'twa': demoGraphSeries(
+            mTwa,
+            r.flux,
+            r.agg,
+            start: widget.start,
+            stop: widget.end,
+          ),
         };
         _track = []; // No plausible synthetic track worth drawing.
       } else {
@@ -362,7 +736,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   Future<({List<GraphPoint> lat, List<GraphPoint> lon})>
   _fetchPositionSeries() async {
     final s = widget.settings;
-    final r = widget.range;
+    final r = _range;
     if (s.influxToken.isNotEmpty) {
       try {
         final res = await influxPositionQuery(
@@ -371,6 +745,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           token: s.influxToken,
           fluxRange: r.flux,
           aggEvery: r.agg,
+          start: widget.start,
+          stop: widget.end,
           bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
         );
         if (res.lat.isNotEmpty && res.lon.isNotEmpty) return res;
@@ -386,6 +762,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         def: const MetricDef('navigation.position.latitude', 'Lat', 'deg'),
         range: parseFluxRange(r.flux),
         resolution: parseAggEvery(r.agg),
+        start: widget.start,
+        stop: widget.end,
       ),
       skHistoryQuery(
         host: _resolvedSkHost ?? s.host,
@@ -394,6 +772,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         def: const MetricDef('navigation.position.longitude', 'Lon', 'deg'),
         range: parseFluxRange(r.flux),
         resolution: parseAggEvery(r.agg),
+        start: widget.start,
+        stop: widget.end,
       ),
     ]);
     return (lat: results[0], lon: results[1]);
@@ -497,7 +877,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       appBar: AppBar(
         backgroundColor: cBg,
         foregroundColor: cText,
-        title: Text('${widget.kind.label} - ${widget.range.label}'),
+        title: Text('${widget.kind.label} - ${_range.label}'),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -672,7 +1052,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   Future<Uint8List> _buildReportPdf() async {
     final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
     final showWind = widget.kind != PerformanceReportKind.navigation;
-    final r = widget.range;
+    final r = _range;
     final sog = _series['sog'] ?? [];
     final stw = _series['stw'] ?? [];
     final aws = _series['aws'] ?? [];
@@ -681,10 +1061,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final heel = _series['heel'] ?? [];
     final twa = _series['twa'] ?? [];
     final interval = parseAggEvery(r.agg);
-    final now = DateTime.now();
+    final generatedAt = DateTime.now();
     final polar = _realPolar(stw, twa, tws, sog);
 
-    final rangeDur = parseFluxRange(r.flux);
+    final rangeDur = widget.end.difference(widget.start);
     final distanceNm = _distanceNm(sog, interval);
     final underwayFrac = _underwayFraction(sog);
     final underwayDur = Duration(
@@ -718,7 +1098,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
     String fmtDateTime(DateTime d) =>
         '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    final periodStart = now.subtract(rangeDur);
+    final periodStart = widget.start;
+    final periodEnd = widget.end;
 
     pw.Widget header() => pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -732,11 +1113,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ),
         ),
         pw.Text(
-          'Periodo: ${r.label} - del ${fmtDateTime(periodStart)} al ${fmtDateTime(now)}',
+          'Periodo: ${r.label} - del ${fmtDateTime(periodStart)} al ${fmtDateTime(periodEnd)}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
         ),
         pw.Text(
-          'Generado ${fmtDateTime(now)}',
+          'Generado ${fmtDateTime(generatedAt)}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
         ),
         pw.Text(
@@ -931,7 +1312,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               tws: tws,
               twd: twd,
               start: periodStart,
-              end: now,
+              end: periodEnd,
               width: contentWidth,
               barbInterval: widget.barbInterval,
             ),

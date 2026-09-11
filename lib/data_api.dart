@@ -68,6 +68,8 @@ Future<List<GraphPoint>> influxQuery({
   required MetricDef def,
   required String fluxRange,
   required String aggEvery,
+  DateTime? start,
+  DateTime? stop,
   String bucket = influxBucketDefault,
   String org = influxOrgDefault,
   String token = influxTokenDefault,
@@ -77,9 +79,12 @@ Future<List<GraphPoint>> influxQuery({
   String aggFn = 'mean',
 }) async {
   final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
+  final rangeClause = start != null && stop != null
+      ? '|>range(start:time(v:"${_fluxString(start.toUtc().toIso8601String())}"),stop:time(v:"${_fluxString(stop.toUtc().toIso8601String())}"))'
+      : '|>range(start:$fluxRange,stop:now())';
   final query =
       'from(bucket:"${_fluxString(bucket)}")'
-      '|>range(start:$fluxRange,stop:now())'
+      '$rangeClause'
       '|>filter(fn:(r)=>r._measurement=="${_fluxString(def.skPath)}")'
       '|>aggregateWindow(every:$aggEvery,fn:${_fluxString(aggFn)},createEmpty:true)'
       '|>keep(columns:["_time","_value"])';
@@ -142,14 +147,19 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
   required String host,
   required String fluxRange,
   required String aggEvery,
+  DateTime? start,
+  DateTime? stop,
   String bucket = influxBucketDefault,
   String org = influxOrgDefault,
   String token = influxTokenDefault,
 }) async {
   final url = Uri.parse('http://$host:8086/api/v2/query?org=$org');
+  final rangeClause = start != null && stop != null
+      ? '|>range(start:time(v:"${_fluxString(start.toUtc().toIso8601String())}"),stop:time(v:"${_fluxString(stop.toUtc().toIso8601String())}"))'
+      : '|>range(start:$fluxRange,stop:now())';
   final query =
       'from(bucket:"${_fluxString(bucket)}")'
-      '|>range(start:$fluxRange,stop:now())'
+      '$rangeClause'
       '|>filter(fn:(r)=>r._measurement=="navigation.position" and (r._field=="lat" or r._field=="lon"))'
       '|>aggregateWindow(every:$aggEvery,fn:mean,createEmpty:false)'
       '|>keep(columns:["_time","_value","_field"])';
@@ -220,18 +230,20 @@ Future<List<GraphPoint>> skHistoryQuery({
   required MetricDef def,
   required Duration range,
   required Duration resolution,
+  DateTime? start,
+  DateTime? stop,
   // Signal K's own per-path aggregate, appended as "path:method" — the
   // API defaults to `average`. Same reasoning as influxQuery's aggFn: a
   // gust has to come back as `max`, never averaged away.
   String aggFn = 'average',
 }) async {
-  final now = DateTime.now().toUtc();
-  final from = now.subtract(range);
+  final to = (stop ?? DateTime.now()).toUtc();
+  final from = (start ?? to.subtract(range)).toUtc();
   final url = Uri.http('$host:$port', '/signalk/v2/api/history/values', {
     'context': 'vessels.self',
     'paths': aggFn == 'average' ? def.skPath : '${def.skPath}:$aggFn',
     'from': from.toIso8601String(),
-    'to': now.toIso8601String(),
+    'to': to.toIso8601String(),
     'resolution': resolution.inSeconds.clamp(1, 1 << 30).toString(),
   });
   final response = await http
@@ -321,16 +333,19 @@ Duration parseAggEvery(String a) {
 List<GraphPoint> demoGraphSeries(
   MetricDef def,
   String fluxRange,
-  String aggEvery,
-) {
+  String aggEvery, {
+  DateTime? start,
+  DateTime? stop,
+}) {
   final duration = parseFluxRange(fluxRange);
   final step = parseAggEvery(aggEvery);
-  final now = DateTime.now();
+  final end = stop ?? DateTime.now();
+  final begin = start ?? end.subtract(duration);
   final rng = math.Random(def.skPath.hashCode);
   final (baseline, volatility, minV, maxV) = _demoGraphBounds(def);
   var value = baseline;
   final points = <GraphPoint>[];
-  for (var t = now.subtract(duration); t.isBefore(now); t = t.add(step)) {
+  for (var t = begin; t.isBefore(end); t = t.add(step)) {
     value += (rng.nextDouble() - 0.5) * volatility + (baseline - value) * 0.03;
     value = value.clamp(minV, maxV);
     points.add(GraphPoint(time: t, value: value));

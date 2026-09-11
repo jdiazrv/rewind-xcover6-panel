@@ -5665,14 +5665,6 @@ class _DashboardState extends State<Dashboard> {
   // over its window is exactly how you lose it. Signal K takes it as
   // "path:max"; InfluxDB as aggregateWindow(fn:max). Verified against
   // REWIND live: same window returns 13.95 m/s peak vs 9.08 mean.
-  // TWD rebuilt from TWA + heading, for boats whose instruments only ever
-  // publish the relative angle. Uses the same heading/COG fallback chain
-  // the VNT dial uses for the mirror-image derivation.
-  double? get _derivedTwdDeg => trueWindDirection(
-    _freshWind(_dTwa, signalK.twaUpdate) ?? _dTwa,
-    _freshHeading ?? _freshCog,
-  );
-
   ({double kn, int ageMin})? _historicGust;
   bool _loadingHistoricGust = false;
   DateTime? _historicGustFetchedAt;
@@ -10701,35 +10693,27 @@ class _DashboardState extends State<Dashboard> {
           : null,
       ownPositionUpdatedAt: signalK.positionUpdate,
       skConnected: signalK.connected,
-      // Deliberately just heading, not the usual `?? _freshCog` fallback used
-      // elsewhere — the anchor screen's own fallback (bow pointing at the
-      // anchor with no heading) is more meaningful at anchor than COG, which
-      // is noisy-to-meaningless at near-zero SOG.
-      // _freshHeading itself falls back to null after 5s without a new delta
-      // (the engine-alarm staleness rule) — fine for RPM, wrong for heading:
-      // a compass reading a boat swinging gently at anchor can go many
-      // seconds between deltas without being stale at all, which is exactly
-      // why "fondear" only offset by heading the first time (heading fresh
-      // right after motoring in) and stopped doing it on a second drop taken
-      // moments later at rest. Falls back to the raw last-known value here.
-      headingDeg: _freshHeading ?? signalK.headingTrueDeg,
+      // Deliberately just a CURRENT heading, not COG and not the last value
+      // retained in the model. At anchor COG is noisy-to-meaningless and a
+      // frozen compass value makes the hull keep pointing in a direction we
+      // no longer know. NativeAnchorView already has the safer fallback: it
+      // points the bow at the anchor when this becomes null.
+      headingDeg: _freshHeading,
       sogKn: _freshSog,
       depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
       bowRollerHeightM: settings.anchorBowRollerHeightM,
       gpsToBowM: settings.anchorGpsToBowM,
       awaDeg: _freshWind(_dAwa, signalK.awaUpdate),
       awsKn: _freshWind(_dAws, signalK.awsUpdate),
-      // Same normalize360 the VNT dial applies — TWD is a true bearing and
-      // must never render as a negative number if the source ever emits a
-      // signed delta. Falls back to deriving it from TWA + heading, and
-      // then to the last raw value, so the anchor screen keeps showing
-      // which way the wind is coming from (the single most useful number
-      // when lying to an anchor) instead of the field vanishing whenever
-      // the direct path goes briefly stale. Reported live 2026-09-07 ("en
-      // anc tiene que mostrar TWD").
+      // A direct TWD is shown only while that path is current. If the boat
+      // publishes only relative true wind, derive TWD exclusively from a
+      // current TWA and a current heading. Never use COG or cached values in
+      // ANC: both would make an obsolete direction look like live data.
       twdDeg: switch (_freshWind(_dTwd, signalK.twdUpdate) ??
-          _derivedTwdDeg ??
-          _dTwd) {
+          trueWindDirection(
+            _freshWind(_dTwa, signalK.twaUpdate),
+            _freshHeading,
+          )) {
         null => null,
         final v => normalize360(v),
       },
