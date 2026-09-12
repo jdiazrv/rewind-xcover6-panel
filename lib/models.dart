@@ -951,6 +951,21 @@ class SignalKModel {
   double? startV;
   double? bowthrusterV;
   double? engineHours; // hours, from propulsion.<id>.runTime (seconds)
+  /// Última lectura vista del cuentahoras, con su fecha, guardada en
+  /// disco. Un cuentahoras es acumulativo: solo puede subir, así que una
+  /// lectura vieja sigue siendo cierta y enseñarla es mejor que un "--".
+  /// Sin esto, bastaba con que el motor dejara de publicar (contacto
+  /// quitado, bus apagado, reconexión) para que las horas desaparecieran
+  /// de la pantalla ("tienes que dejar siempre las últimas que viste
+  /// aunque sean antiguas", 2026-09-12).
+  double? lastEngineHours;
+  DateTime? lastEngineHoursAt;
+  /// Cuándo se usó el motor por última vez y cuánto duró ese uso, deducido
+  /// del propio cuentahoras: mientras el motor gira runTime sube, así que
+  /// el último tramo en que subió ES el último uso. No hace falta ningún
+  /// dato nuevo en el servidor, solo leer su histórico.
+  DateTime? lastEngineRunAt;
+  double? lastEngineRunHours;
   DateTime? engineHoursUpdate;
   // Real engine telemetry — siblings of enginePath under the same
   // propulsion.<id> base (see _buildDynamicHandlers), auto-registered
@@ -1124,6 +1139,7 @@ class SignalKModel {
     startV = null;
     bowthrusterV = null;
     engineHours = null;
+    // lastEngineHours NO se borra aquí: ver su propio comentario.
     engineRpm = null;
     engineTorquePercent = null;
     engineCoolantTempK = null;

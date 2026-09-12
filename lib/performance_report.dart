@@ -15,14 +15,6 @@ import 'models.dart';
 import 'pdf/pdf_theme.dart';
 import 'theme.dart';
 
-typedef PolarData = ({
-  List<int> twsEdges,
-  List<({int loDeg, int hiDeg})> twaBands,
-  List<List<double?>> avgStw,
-  List<List<int>> counts,
-  int minSamples,
-  bool engineFilterAvailable,
-});
 
 typedef ReportGpsSample = ({
   DateTime time,
@@ -1180,144 +1172,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     return (points.length / expected * 100).round().clamp(0, 100);
   }
 
-  // "Polar de datos reales": average STW by TWA (30° bands, port/starboard
-  // combined since a boat's polar is symmetric) × TWS band — the same
-  // whole-number TWS margins used by the wind distribution above, so
-  // "el margen que haya pedido" (the histogram's bin width) drives this
-  // table too. STW/TWA/TWS come back as 3 independent series from the same
-  // query window, so they're joined by nearest timestamp rather than by
-  // index, tolerant of small gaps between them.
-  PolarData _realPolar(
-    List<GraphPoint> stw,
-    List<GraphPoint> twa,
-    List<GraphPoint> tws,
-    List<GraphPoint> sog,
-    List<GraphPoint> rpm,
-    Duration interval,
-  ) {
-    const twaBandDeg = 10;
-    final twaBands = [
-      for (var d = 0; d < 180; d += twaBandDeg)
-        (loDeg: d, hiDeg: d + twaBandDeg),
-    ];
-    if (stw.isEmpty || twa.isEmpty || tws.isEmpty) {
-      return (
-        twsEdges: const [0],
-        twaBands: twaBands,
-        avgStw: [for (final _ in twaBands) <double?>[]],
-        counts: [for (final _ in twaBands) <int>[]],
-        minSamples: 0,
-        engineFilterAvailable: rpm.isNotEmpty,
-      );
-    }
-    final twsValues = tws.map((p) => p.value).toList();
-    final twsMin = twsValues.reduce(math.min);
-    final twsMax = twsValues.reduce(math.max);
-    final twsSpan = twsMax - twsMin;
-    // TWS bands stay narrow (max 2kt) since wind strength changes the
-    // predicted speed a lot — a 5kt-wide band used to blur together
-    // conditions that sail very differently.
-    int niceStep(double s) {
-      if (s <= 6) return 1;
-      return 2;
-    }
-
-    final step = niceStep(twsSpan);
-    final twsLow = (twsMin / step).floor() * step;
-    final twsBinCount = twsSpan > 0
-        ? ((twsMax - twsLow) / step).ceil().clamp(1, 16)
-        : 1;
-    final twsEdges = [for (var i = 0; i <= twsBinCount; i++) twsLow + step * i];
-
-    GraphPoint? nearest(List<GraphPoint> series, DateTime t, Duration tol) {
-      GraphPoint? best;
-      Duration? bestDiff;
-      for (final p in series) {
-        final diff = p.time.difference(t).abs();
-        if (diff > tol) continue;
-        if (bestDiff == null || diff < bestDiff) {
-          best = p;
-          bestDiff = diff;
-        }
-      }
-      return best;
-    }
-
-    final tol = Duration(
-      seconds: math.max(
-        30,
-        stw.length > 1
-            ? stw[1].time.difference(stw[0].time).inSeconds ~/ 2
-            : 60,
-      ),
-    );
-
-    final values = [
-      for (final _ in twaBands)
-        [for (var w = 0; w < twsBinCount; w++) <double>[]],
-    ];
-
-    for (final sp in stw) {
-      final twaP = nearest(twa, sp.time, tol);
-      final twsP = nearest(tws, sp.time, tol);
-      if (twaP == null || twsP == null) continue;
-      // Anchored/stationary moments (same SOG>0.5kt threshold used for the
-      // "tiempo navegando" stat) would otherwise drag every band's average
-      // toward zero with samples that aren't actually sailing.
-      final sogP = nearest(sog, sp.time, tol);
-      if (sogP == null || sogP.value <= 0.5) continue;
-      final rpmP = rpm.isEmpty ? null : nearest(rpm, sp.time, tol);
-      if (rpmP != null && rpmP.value > 100) continue;
-      final angle = twaP.value.abs().clamp(0, 180);
-      final bandIdx = math.min(
-        twaBands.length - 1,
-        (angle / twaBandDeg).floor(),
-      );
-      final twsIdx = twsSpan > 0
-          ? math.min(twsBinCount - 1, ((twsP.value - twsLow) / step).floor())
-          : 0;
-      if (twsIdx < 0) continue;
-      if (sp.value.isFinite && sp.value >= 0) {
-        values[bandIdx][twsIdx].add(sp.value);
-      }
-    }
-
-    final minSamples =
-        (const Duration(minutes: 5).inMilliseconds /
-                math.max(1, interval.inMilliseconds))
-            .ceil()
-            .clamp(3, 30);
-    final counts = [
-      for (var b = 0; b < twaBands.length; b++)
-        [for (var w = 0; w < twsBinCount; w++) values[b][w].length],
-    ];
-
-    final avgStw = [
-      for (var b = 0; b < twaBands.length; b++)
-        [
-          for (var w = 0; w < twsBinCount; w++)
-            if (counts[b][w] < minSamples)
-              null
-            else
-              (() {
-                final sorted = List<double>.of(values[b][w])..sort();
-                final middle = sorted.length ~/ 2;
-                return sorted.length.isOdd
-                    ? sorted[middle]
-                    : (sorted[middle - 1] + sorted[middle]) / 2;
-              })(),
-        ],
-    ];
-
-    return (
-      twsEdges: twsEdges,
-      twaBands: twaBands,
-      avgStw: avgStw,
-      counts: counts,
-      minSamples: minSamples,
-      engineFilterAvailable: rpm.isNotEmpty,
-    );
-  }
 
   Future<Uint8List> _buildReportPdf() async {
     final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
@@ -1330,12 +1184,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twd = _series['twd'] ?? [];
     final heel = _series['heel'] ?? [];
     final twa = _series['twa'] ?? [];
-    final rpm = _series['rpm'] ?? [];
     final awsPeak = _series['awsPeak'] ?? [];
     final twsPeak = _series['twsPeak'] ?? [];
     final interval = parseAggEvery(r.agg);
     final generatedAt = DateTime.now();
-    final polar = _realPolar(stw, twa, tws, sog, rpm, interval);
 
     final rangeDur = widget.end.difference(widget.start);
     final navigationStats = calculateReportNavigationStats(sog, interval);
@@ -1655,31 +1507,15 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               barbInterval: widget.barbInterval,
             ),
           ],
-          if (showWind) ...[
-            if (showNavigation) pw.SizedBox(height: 16),
-            pw.Text(
-              'Polar observada - STW mediana (kt)',
-              style: const pw.TextStyle(
-                color: pdfText,
-                fontSize: 12,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Text(
-              'Datos realmente navegados por TWA y franja de TWS; no es la polar objetivo del fabricante. '
-              'Exige al menos ${polar.minSamples} muestras por punto y excluye SOG≤0.5 kt. '
-              '${polar.engineFilterAvailable ? 'Excluye también los intervalos con RPM>100.' : 'No hay RPM disponible: no se puede descartar el uso del motor.'}',
-              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-            ),
-            pw.SizedBox(height: 8),
-            pdfObservedPolarChart(
-              polar: polar,
-              font: canvasFont,
-              width: contentWidth,
-            ),
-            pw.SizedBox(height: 12),
-            pdfPolarTable(polar, pdfGreen),
-          ],
+          // Fuera la "polar observada" (gráfico y tabla). Con los datos de
+          // una singladura suelta la mayoría de las casillas salían vacías
+          // o con dos o tres muestras, y una polar medio vacía no se puede
+          // interpretar: invitaba a sacar conclusiones de nada, y el n=0
+          // de cada casilla solo añadía ruido. Para saber si el barco va
+          // bien está la página POLAR de VNT, que compara contra un
+          // certificado completo en vez de contra un puñado de muestras
+          // propias ("es muy difícil de interpretar con datos parciales",
+          // 2026-09-12).
         ],
       ),
     );
@@ -2465,222 +2301,3 @@ pw.Widget pdfTrackMap({
   );
 }
 
-pw.Widget pdfObservedPolarChart({
-  required PolarData polar,
-  required PdfFont font,
-  required double width,
-  double height = 245,
-}) {
-  final binCount = polar.twsEdges.length - 1;
-  if (binCount < 1) {
-    return pw.Text(
-      'Sin datos suficientes para construir la polar observada.',
-      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
-    );
-  }
-
-  final totals = [
-    for (var w = 0; w < binCount; w++)
-      (
-        index: w,
-        count: [
-          for (var b = 0; b < polar.twaBands.length; b++)
-            if (polar.avgStw[b][w] != null) polar.counts[b][w],
-        ].fold<int>(0, (sum, count) => sum + count),
-      ),
-  ]..sort((a, b) => b.count.compareTo(a.count));
-  final selected = totals.where((entry) => entry.count > 0).take(5).toList()
-    ..sort((a, b) => a.index.compareTo(b.index));
-  if (selected.isEmpty) {
-    return pw.Text(
-      'Sin celdas con la permanencia mínima necesaria para dibujar una curva.',
-      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
-    );
-  }
-
-  final values = <double>[];
-  for (final entry in selected) {
-    for (var b = 0; b < polar.twaBands.length; b++) {
-      final value = polar.avgStw[b][entry.index];
-      if (value != null) values.add(value);
-    }
-  }
-  final maxStw = math.max(1.0, values.reduce(math.max).ceilToDouble());
-  const colors = [pdfCyan, pdfGreen, pdfOrange, pdfPurple, pdfRed];
-
-  return pw.Column(
-    crossAxisAlignment: pw.CrossAxisAlignment.start,
-    children: [
-      pw.Container(
-        width: width,
-        height: height,
-        padding: const pw.EdgeInsets.all(4),
-        decoration: pw.BoxDecoration(
-          color: const PdfColor.fromInt(0xfff5fafb),
-          border: pw.Border.all(color: pdfGrid, width: 0.6),
-          borderRadius: pw.BorderRadius.circular(5),
-        ),
-        child: pw.CustomPaint(
-          size: PdfPoint(width - 8, height - 8),
-          painter: (canvas, size) {
-            final cx = size.x / 2;
-            final cy = size.y / 2;
-            final radius = math.min(size.x / 2 - 34, size.y / 2 - 17);
-
-            for (var ring = 1; ring <= 4; ring++) {
-              final r = radius * ring / 4;
-              canvas
-                ..setStrokeColor(pdfGrid)
-                ..setLineWidth(0.45)
-                ..drawEllipse(cx - r, cy - r, r * 2, r * 2)
-                ..strokePath()
-                ..setFillColor(pdfMuted)
-                ..drawString(
-                  font,
-                  6.5,
-                  (maxStw * ring / 4).toStringAsFixed(1),
-                  cx + 2,
-                  cy + r - 7,
-                );
-            }
-            canvas
-              ..setStrokeColor(pdfGrid)
-              ..setLineWidth(0.45)
-              ..moveTo(cx, cy - radius)
-              ..lineTo(cx, cy + radius)
-              ..moveTo(cx - radius, cy)
-              ..lineTo(cx + radius, cy)
-              ..strokePath()
-              ..setFillColor(pdfMuted)
-              ..drawString(font, 7, '0', cx + 4, cy + radius - 2)
-              ..drawString(font, 7, '90', cx + radius + 3, cy - 2)
-              ..drawString(font, 7, '180', cx + 4, cy - radius - 5);
-
-            void drawSide(int windBin, PdfColor color, double side) {
-              canvas
-                ..setStrokeColor(color)
-                ..setLineWidth(1.5);
-              var started = false;
-              for (var b = 0; b < polar.twaBands.length; b++) {
-                final speed = polar.avgStw[b][windBin];
-                if (speed == null) {
-                  if (started) canvas.strokePath();
-                  started = false;
-                  continue;
-                }
-                final band = polar.twaBands[b];
-                final angle = (band.loDeg + band.hiDeg) / 2 * math.pi / 180;
-                final r = speed / maxStw * radius;
-                final x = cx + side * math.sin(angle) * r;
-                final y = cy + math.cos(angle) * r;
-                if (started) {
-                  canvas.lineTo(x, y);
-                } else {
-                  canvas.moveTo(x, y);
-                  started = true;
-                }
-              }
-              if (started) canvas.strokePath();
-            }
-
-            for (var i = 0; i < selected.length; i++) {
-              drawSide(selected[i].index, colors[i], -1);
-              drawSide(selected[i].index, colors[i], 1);
-            }
-          },
-        ),
-      ),
-      pw.SizedBox(height: 5),
-      pw.Wrap(
-        spacing: 12,
-        runSpacing: 3,
-        children: [
-          for (var i = 0; i < selected.length; i++)
-            pw.Row(
-              mainAxisSize: pw.MainAxisSize.min,
-              children: [
-                pw.Container(width: 10, height: 3, color: colors[i]),
-                pw.SizedBox(width: 3),
-                pw.Text(
-                  '${polar.twsEdges[selected[i].index]}-${polar.twsEdges[selected[i].index + 1]} kt TWS',
-                  style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
-                ),
-              ],
-            ),
-        ],
-      ),
-    ],
-  );
-}
-
-pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
-  final twsBinCount = polar.twsEdges.length - 1;
-  if (twsBinCount < 1) {
-    return pw.Text(
-      'Sin datos suficientes (TWA/TWS/STW) en este periodo.',
-      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
-    );
-  }
-  pw.Widget cell(String text, {bool header = false}) => pw.Padding(
-    padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-    child: pw.Text(
-      text,
-      textAlign: pw.TextAlign.center,
-      style: pw.TextStyle(
-        color: header ? pdfText : pdfMuted,
-        fontSize: 8,
-        fontWeight: header ? pw.FontWeight.bold : pw.FontWeight.normal,
-      ),
-    ),
-  );
-
-  return pw.Table(
-    border: pw.TableBorder.all(color: pdfGrid, width: 0.5),
-    columnWidths: {
-      0: const pw.FlexColumnWidth(1.3),
-      for (var w = 0; w < twsBinCount; w++) w + 1: const pw.FlexColumnWidth(1),
-    },
-    children: [
-      pw.TableRow(
-        decoration: const pw.BoxDecoration(color: pdfPanel),
-        children: [
-          cell('TWA \\ TWS', header: true),
-          for (var w = 0; w < twsBinCount; w++)
-            cell(
-              '${polar.twsEdges[w]}-${polar.twsEdges[w + 1]}kt',
-              header: true,
-            ),
-        ],
-      ),
-      for (var b = 0; b < polar.twaBands.length; b++)
-        pw.TableRow(
-          children: [
-            cell(
-              '${polar.twaBands[b].loDeg}-${polar.twaBands[b].hiDeg}°',
-              header: true,
-            ),
-            for (var w = 0; w < twsBinCount; w++)
-              pw.Padding(
-                padding: const pw.EdgeInsets.symmetric(
-                  horizontal: 4,
-                  vertical: 5,
-                ),
-                child: pw.Text(
-                  polar.avgStw[b][w] == null
-                      ? '--\n(n=${polar.counts[b][w]})'
-                      : '${polar.avgStw[b][w]!.toStringAsFixed(1)}\n(n=${polar.counts[b][w]})',
-                  textAlign: pw.TextAlign.center,
-                  style: pw.TextStyle(
-                    color: polar.avgStw[b][w] == null ? pdfMuted : color,
-                    fontSize: 9,
-                    fontWeight: polar.avgStw[b][w] == null
-                        ? pw.FontWeight.normal
-                        : pw.FontWeight.bold,
-                  ),
-                ),
-              ),
-          ],
-        ),
-    ],
-  );
-}

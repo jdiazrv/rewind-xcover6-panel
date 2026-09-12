@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
 import 'package:rewind_xcover6_panel/models.dart';
 import 'package:rewind_xcover6_panel/performance_report.dart';
 
@@ -145,35 +143,4 @@ void main() {
     expect(stats.underway, Duration.zero);
   });
 
-  test('la polar observada se puede renderizar en PDF', () async {
-    final bands = [
-      for (var angle = 0; angle < 180; angle += 10)
-        (loDeg: angle, hiDeg: angle + 10),
-    ];
-    final polar = (
-      twsEdges: <int>[6, 8, 10],
-      twaBands: bands,
-      avgStw: [
-        for (var b = 0; b < bands.length; b++)
-          <double?>[b < 3 ? null : 4 + b / 12, b < 4 ? null : 5 + b / 12],
-      ],
-      counts: [
-        for (var b = 0; b < bands.length; b++)
-          <int>[b < 3 ? 0 : 5, b < 4 ? 0 : 6],
-      ],
-      minSamples: 3,
-      engineFilterAvailable: true,
-    );
-    final document = pw.Document();
-    final font = PdfFont.helvetica(document.document);
-    document.addPage(
-      pw.Page(
-        build: (_) =>
-            pdfObservedPolarChart(polar: polar, font: font, width: 500),
-      ),
-    );
-
-    final bytes = await document.save();
-    expect(bytes, isNotEmpty);
-  });
 }

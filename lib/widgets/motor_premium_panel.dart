@@ -123,9 +123,15 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.activeUnmutedAlarmCount = 0,
     this.onMuteAllAlarms,
     this.allowSimulation = false,
+    this.lastRunLabel,
   });
 
   final NavCardData engineHours;
+
+  /// "hace 3 días · 2,4 h": cuándo se usó el motor por última vez, deducido
+  /// del propio cuentahoras (ver lastEngineRunAt en models.dart). Nulo
+  /// mientras no se haya podido averiguar.
+  final String? lastRunLabel;
   // Real signal derived from fresh propulsion.<id>.revolutions by
   // _DashboardState._engineRunning.
   final bool engineRunning;
@@ -501,8 +507,16 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     );
     if (hours == null || !hours.isFinite || hours < 0) return null;
     final totalTenths = (hours * 10).round();
-    final wholeHours = (totalTenths ~/ 10) % 100000;
-    return '${wholeHours.toString().padLeft(5, '0')}${totalTenths % 10}';
+    final whole = totalTenths ~/ 10;
+    // Cuatro ruedas de horas, no cinco: con seis dígitos el tambor se
+    // comía los números 1 y 3 de la esfera ("no deja ver los dígitos 1 y 3
+    // del cuentarrevoluciones", 2026-09-12). Solo se ensancha a cinco si
+    // el motor pasa de las 9.999 horas, que es cuando el dígito de más
+    // dice algo de verdad.
+    final wide = whole >= 10000;
+    final wheels = wide ? 5 : 4;
+    final shown = whole % (wide ? 100000 : 10000);
+    return '${shown.toString().padLeft(wheels, '0')}${totalTenths % 10}';
   }
 
   // Same SIMUL-vs-real split as _displayRpm, for the "Completo" gauges —
@@ -532,11 +546,15 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(8),
+    // En teléfono el alto es el recurso escaso: la esfera de RPM se queda
+    // en los 299 px que le deja la altura aunque le sobren 245 de ancho,
+    // así que cada píxel que se recorta arriba y abajo se lo lleva ella
+    // ("puedes hacer un poco más grande el cuentarrevoluciones", 2026-09-12).
+    padding: EdgeInsets.all(_isCompact ? 4 : 8),
     child: Column(
       children: [
         _statusBanner(),
-        const SizedBox(height: 8),
+        SizedBox(height: _isCompact ? 4 : 8),
         Expanded(
           child: Row(
             children: [
@@ -792,7 +810,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
 
   Widget _statusBanner() => Container(
     width: double.infinity,
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+    padding: EdgeInsets.symmetric(horizontal: 14, vertical: _isCompact ? 5 : 9),
     decoration: BoxDecoration(
       color: _statusColor.withValues(alpha: 0.10),
       borderRadius: BorderRadius.circular(10),
@@ -895,42 +913,20 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   Widget _rpmCard() => _panelShell(
     child: Padding(
       padding: EdgeInsets.fromLTRB(
-        _isCompact ? 14 : 16,
-        _isCompact ? 8 : 12,
-        _isCompact ? 14 : 16,
-        _isCompact ? 6 : 12,
+        _isCompact ? 10 : 16,
+        _isCompact ? 4 : 12,
+        _isCompact ? 10 : 16,
+        _isCompact ? 3 : 12,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Phone: "RPM" + "×1000" in one compact strip (instead of the
-          // tablet's original two rows) frees up real height for the
-          // circle below to actually double in size instead of just
-          // filling whatever was left over.
-          if (_isCompact)
-            Row(
-              children: [
-                const Text(
-                  'RPM',
-                  style: TextStyle(
-                    color: cMuted,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.6,
-                  ),
-                ),
-                const Spacer(),
-                const Text(
-                  '×1000',
-                  style: TextStyle(
-                    color: cCyan,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            )
-          else ...[
+          // En teléfono los rótulos no ocupan fila propia: van superpuestos
+          // en las esquinas del cuadro, que es donde los cuentavueltas de
+          // verdad los llevan y, sobre todo, donde no le quitan altura a
+          // la esfera (ver el Stack de abajo). En tablet sobra sitio y se
+          // quedan en su fila.
+          if (!_isCompact) ...[
             Row(
               children: [
                 const Text(
@@ -955,31 +951,61 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             ),
           ],
           Expanded(
-            // RPM's "RPM"/×1000 header row above already says what this
-            // gauge is, so it renders with no label of its own — just the
-            // dial, needle and its own digital RPM readout.
-            child: _AnalogGauge(
-              label: null,
-              value: _displayRpm == null ? null : _displayRpm! / 1000,
-              valueText: _displayRpm == null
-                  ? ''
-                  : _displayRpm!.round().toString(),
-              min: 0,
-              max: 4,
-              majorStep: 1,
-              // Decorative redline (not tied to any alarm — there's no
-              // real over-rev signal yet) at the conventional ~85% mark,
-              // matching what every physical tachometer shows.
-              dangerStart: 3.4,
-              dangerEnd: 4,
-              needleColor: cCyan,
-              big: true,
-              hourMeterDigits: _hourMeterDigits,
-            ),
+            child: _isCompact
+                ? Stack(
+                    children: [
+                      Positioned.fill(child: _rpmGauge()),
+                      const Positioned(
+                        top: 0,
+                        left: 0,
+                        child: Text(
+                          'RPM',
+                          style: TextStyle(
+                            color: cMuted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                      const Positioned(
+                        top: 0,
+                        right: 0,
+                        child: Text(
+                          '×1000',
+                          style: TextStyle(
+                            color: cCyan,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                : _rpmGauge(),
           ),
         ],
       ),
     ),
+  );
+
+  /// La esfera sin rótulo propio: en compacto lo lleva superpuesto y en
+  /// tablet en su fila de arriba.
+  Widget _rpmGauge() => _AnalogGauge(
+    label: null,
+    value: _displayRpm == null ? null : _displayRpm! / 1000,
+    valueText: _displayRpm == null ? '' : _displayRpm!.round().toString(),
+    min: 0,
+    max: 4,
+    majorStep: 1,
+    // Decorative redline (not tied to any alarm — there's no real
+    // over-rev signal yet) at the conventional ~85% mark, matching what
+    // every physical tachometer shows.
+    dangerStart: 3.4,
+    dangerEnd: 4,
+    needleColor: cCyan,
+    big: true,
+    hourMeterDigits: _hourMeterDigits,
   );
 
   // Phone: a plain Column here overflowed on a phone's much shorter
@@ -998,11 +1024,33 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // screen. Tablet uses the same two-column pairing (just without the
   // phone's FittedBox/scaling — it isn't short on height, so the plain
   // paired Rows fit at full size).
+  /// Cuándo se usó el motor por última vez. El cuentahoras dice cuánto ha
+  /// trabajado en total; esto dice si fue ayer o hace tres meses, que es
+  /// lo que uno se pregunta de verdad al mirar el panel.
+  Widget? _lastRunStrip() {
+    final last = widget.lastRunLabel;
+    if (last == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 2),
+      child: Text(
+        'Último uso: $last',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: cMuted,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
   Widget _sideColumn() {
     if (!_isCompact) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          ?_lastRunStrip(),
           if (_torqueBox() case final box?) ...[const SizedBox(height: 6), box],
           const SizedBox(height: 6),
           for (var i = 0; i < _motorLamps.length; i += 2) ...[
@@ -1511,13 +1559,19 @@ class _AnalogGaugePainter extends CustomPainter {
 
   void _paintHourMeter(Canvas canvas, Offset center, double r) {
     final digits = hourMeterDigits;
-    if (!big || digits == null || digits.length != 6) return;
+    if (!big || digits == null || digits.length < 5 || digits.length > 6) {
+      return;
+    }
+    // Cinco ruedas de serie (4 horas + décima) y seis solo al pasar de
+    // 9.999 h: con seis siempre, el tambor tapaba los números 1 y 3 de la
+    // esfera. El ancho va con el número de ruedas, no fijo.
+    final wheels = digits.length;
 
     // A framed aperture containing six individual cylindrical drums. The
     // local RewindOdometer font supplies crisp tabular figures; the clipped
     // neighbours, highlights and shadows are what make them read as wheels
     // rather than six ordinary boxes of text.
-    final meterW = r * 1.08;
+    final meterW = r * (wheels == 6 ? 1.08 : 0.92);
     final meterH = r * 0.25;
     final meterCenter = center + Offset(0, -r * 0.35);
     final outer = RRect.fromRectAndRadius(
@@ -1538,12 +1592,12 @@ class _AnalogGaugePainter extends CustomPainter {
     final inset = outer.outerRect.deflate(meterH * 0.075);
     final wheelGap = meterW * 0.008;
     final decimalGap = meterW * 0.025;
-    final usableW = inset.width - wheelGap * 5 - decimalGap;
-    final wheelW = usableW / 6;
+    final usableW = inset.width - wheelGap * (wheels - 1) - decimalGap;
+    final wheelW = usableW / wheels;
     var x = inset.left;
 
-    for (var i = 0; i < 6; i++) {
-      if (i == 5) x += decimalGap;
+    for (var i = 0; i < wheels; i++) {
+      if (i == wheels - 1) x += decimalGap;
       final rect = Rect.fromLTWH(x, inset.top, wheelW, inset.height);
       final wheel = RRect.fromRectAndRadius(
         rect,
@@ -1563,7 +1617,9 @@ class _AnalogGaugePainter extends CustomPainter {
       );
 
       final current = int.parse(digits[i]);
-      final color = i == 5 ? const Color(0xffff3b30) : const Color(0xfff3f3ec);
+      final color = i == wheels - 1
+          ? const Color(0xffff3b30)
+          : const Color(0xfff3f3ec);
       void paintDigit(int digit, double dy, double opacity, double scale) {
         final painter = TextPainter(
           text: TextSpan(

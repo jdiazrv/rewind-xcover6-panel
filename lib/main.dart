@@ -2837,7 +2837,11 @@ class _DashboardState extends State<Dashboard> {
         ? prefs.getBool('gpsFallbackConsent')
         : settings.gpsFallbackConsent;
     settings.keepAwake = prefs.getBool('keepAwake') ?? settings.keepAwake;
-    _windPageIndex = (prefs.getInt('windPageIndex') ?? 0).clamp(0, 1);
+    // 0..2: CRUCERO, TÉCNICA y POLAR (esta última solo si hay polar
+    // elegida). Estaba topado en 1, así que al reiniciar estando en POLAR
+    // se volvía a TÉCNICA. El propio _windPage ya corrige el índice si la
+    // página ha dejado de existir.
+    _windPageIndex = (prefs.getInt('windPageIndex') ?? 0).clamp(0, 2);
     settings.brightnessMode =
         prefs.getString('brightnessMode') ??
         (kIsWeb ? 'dia' : settings.brightnessMode);
@@ -3049,6 +3053,16 @@ class _DashboardState extends State<Dashboard> {
         /* keep empty if corrupted */
       }
     }
+    signalK.lastEngineHours = prefs.getDouble('lastEngineHours');
+    signalK.lastEngineRunHours = prefs.getDouble('lastEngineRunHours');
+    final lastRunMs = prefs.getInt('lastEngineRunAt');
+    signalK.lastEngineRunAt = lastRunMs == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(lastRunMs);
+    final lastHoursMs = prefs.getInt('lastEngineHoursAt');
+    signalK.lastEngineHoursAt = lastHoursMs == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(lastHoursMs);
     final polarByHostJson = prefs.getString('polarConfigByHostJson');
     if (polarByHostJson != null) {
       try {
@@ -3291,6 +3305,21 @@ class _DashboardState extends State<Dashboard> {
       'polarConfigByHostJson',
       jsonEncode(settings.polarConfigJsonByHost),
     );
+    // El cuentahoras sobrevive a cerrar la app: ver lastEngineHours.
+    if (signalK.lastEngineHours != null) {
+      await prefs.setDouble('lastEngineHours', signalK.lastEngineHours!);
+      await prefs.setInt(
+        'lastEngineHoursAt',
+        (signalK.lastEngineHoursAt ?? DateTime.now()).millisecondsSinceEpoch,
+      );
+    }
+    if (signalK.lastEngineRunHours != null) {
+      await prefs.setDouble('lastEngineRunHours', signalK.lastEngineRunHours!);
+      await prefs.setInt(
+        'lastEngineRunAt',
+        (signalK.lastEngineRunAt ?? DateTime.now()).millisecondsSinceEpoch,
+      );
+    }
     await prefs.setString(
       'savedServers',
       jsonEncode([
@@ -3606,6 +3635,15 @@ class _DashboardState extends State<Dashboard> {
         // timestamp is nevertheless valid ECU activity and is stamped in
         // _stampEngineTelemetryUpdate; a retained replay remains stale.
         signalK.engineHours = hours;
+        if (hours != null && hours > 0) {
+          final previous = signalK.lastEngineHours;
+          signalK.lastEngineHours = hours;
+          signalK.lastEngineHoursAt = DateTime.now();
+          // Se guarda solo cuando cambia de décima, no en cada trama.
+          if (previous == null || (hours - previous).abs() >= 0.05) {
+            unawaited(_saveSettings());
+          }
+        }
       };
       // Real engine telemetry beyond hours — RPM, coolant temp, oil
       // pressure, alternator voltage — rides along on the SAME engine id
@@ -4054,6 +4092,7 @@ class _DashboardState extends State<Dashboard> {
       unawaited(_fetchSelfMmsi());
       unawaited(_seedOwnTrackFromHistory());
       unawaited(_autoConfigureBlankSensorPaths());
+      unawaited(_seedEngineHoursFromHistory());
       // signalK.connected/status flip to true/'Signal K' in
       // _onSignalKMessage, only once real data actually arrives — that's
       // a stronger signal than the WS handshake completing (which
@@ -4133,6 +4172,12 @@ class _DashboardState extends State<Dashboard> {
       'design.influxBucket',
       'design.influxArchiveBucket',
       'notifications.*',
+      // Comodín, no solo la ruta configurada: al dar contacto el motor
+      // empieza a emitir de golpe, y si no estamos suscritos no llega
+      // nada hasta que alguien reconfigure. Con esto el primer dato entra
+      // en cuanto se pulsa ON, y _adoptEngineFromPath lo engancha solo
+      // ("que al pulsar el on sea instantáneo su reflejo", 2026-09-12).
+      'propulsion.*',
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
         if (rule.type == 'tempAbove' && rule.target != null) rule.target!,
@@ -4471,10 +4516,35 @@ class _DashboardState extends State<Dashboard> {
     // doesn't lose the trails — stale targets just show orange until fresh data returns.
   }
 
+  /// Adopta el motor que acaba de empezar a emitir, si no había ninguno
+  /// configurado.
+  ///
+  /// La autoconfiguración de sensores mira el árbol EN VIVO, que con el
+  /// motor apagado ni siquiera tiene rama `propulsion`. Resultado: había
+  /// que estar conectado Y con el motor en marcha para poder configurarlo,
+  /// justo cuando nadie se acuerda de entrar en CFG. Ahora basta con que
+  /// llegue un dato suyo.
+  bool _engineAdoptionTried = false;
+  void _adoptEngineFromPath(String path) {
+    if (_engineAdoptionTried || settings.demoMode) return;
+    final current = settings.sensorConfig.enginePath;
+    if (current != null && current.isNotEmpty) return;
+    final parts = path.split('.');
+    if (parts.length < 3) return;
+    _engineAdoptionTried = true;
+    final adopted = 'propulsion.${parts[1]}.runTime';
+    settings.sensorConfig.enginePath = adopted;
+    _buildDynamicHandlers();
+    _sendSignalKSubscription();
+    unawaited(_saveSettings());
+    unawaited(_recordEvent('ENGINE_ADOPTED $adopted'));
+  }
+
   bool _routeValue(String path, dynamic value, DateTime? dataTime) {
     if (path.endsWith('.temperature')) {
       _customTempValues[path] = _num(value);
     }
+    if (path.startsWith('propulsion.')) _adoptEngineFromPath(path);
     final dynamicHandler = _dynamicHandlers[path];
     if (dynamicHandler != null) {
       dynamicHandler(value);
@@ -5254,6 +5324,119 @@ class _DashboardState extends State<Dashboard> {
   // elección del usuario, y si algo falla no se dice nada — es una
   // comodidad, no una función crítica, y el diálogo de CFG sigue estando
   // ahí para corregir cualquier acierto discutible.
+  /// Busca la ruta del cuentahoras entre las que el servidor guarda en su
+  /// histórico, no entre las que publica ahora mismo.
+  Future<String?> _discoverEnginePathFromHistory() async {
+    try {
+      final now = DateTime.now().toUtc();
+      final uri = Uri.http(
+        '${settings.host}:${settings.port}',
+        '/signalk/v2/api/history/paths',
+        {
+          'from': now
+              .subtract(const Duration(days: 90))
+              .toIso8601String()
+              .split('.')
+              .first,
+          'to': now.toIso8601String().split('.').first,
+        },
+      );
+      final res = await http
+          .get(
+            uri,
+            headers: settings.authBase64.isEmpty
+                ? const <String, String>{}
+                : {'Authorization': 'Basic ${settings.authBase64}'},
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final paths = (jsonDecode(res.body) as List).cast<String>();
+      for (final p in paths) {
+        if (p.startsWith('propulsion.') && p.endsWith('.runTime')) return p;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Rellena el cuentahoras con la última lectura del histórico cuando el
+  /// motor no está publicando.
+  ///
+  /// La caché de lastEngineHours solo se llena viendo un valor en vivo, y
+  /// eso obliga a esperar a que el motor arranque una vez. Como runTime es
+  /// un contador que solo sube, el MÁXIMO de la ventana es exactamente su
+  /// último valor, y además aguanta huecos en los datos. Así las horas
+  /// están desde el primer arranque de la app aunque el puente del motor
+  /// lleve días apagado.
+  Future<void> _seedEngineHoursFromHistory() async {
+    if (settings.demoMode) return;
+    if (signalK.engineHours != null || signalK.lastEngineHours != null) return;
+    var path = settings.sensorConfig.enginePath;
+    if (path == null || path.isEmpty) {
+      // La autodetección de sensores mira el árbol EN VIVO, y con el motor
+      // apagado propulsion ni siquiera existe (el servidor devuelve 404),
+      // así que la ruta se quedaba en blanco justo en el caso en que hace
+      // falta. El histórico sí la recuerda.
+      path = await _discoverEnginePathFromHistory();
+      if (path == null || !mounted) return;
+      setState(() => settings.sensorConfig.enginePath = path);
+      _buildDynamicHandlers();
+      _sendSignalKSubscription();
+      unawaited(_saveSettings());
+    }
+    try {
+      final points = await skHistoryQuery(
+        host: settings.host,
+        port: settings.port,
+        authBase64: settings.authBase64,
+        def: MetricDef(path, 'Horas motor', 'h', scale: 1 / 3600.0),
+        range: const Duration(days: 30),
+        resolution: const Duration(hours: 6),
+        aggFn: 'max',
+      );
+      if (!mounted || points.isEmpty) return;
+      var best = 0.0;
+      DateTime? at;
+      for (final p in points) {
+        if (p.value > best) {
+          best = p.value;
+          at = p.time;
+        }
+      }
+      if (best <= 0) return;
+      // El último uso: el tramo final en el que el contador subió. Se
+      // recorre hacia atrás desde el máximo y se para en cuanto hay un
+      // hueco sin subida, que es el motor parado.
+      DateTime? runStart;
+      var runHours = 0.0;
+      final rising = [
+        for (final p in points)
+          if (p.value > 0) p,
+      ]..sort((a, b) => a.time.compareTo(b.time));
+      for (var i = rising.length - 1; i > 0; i--) {
+        final delta = rising[i].value - rising[i - 1].value;
+        if (delta <= 0.005) {
+          if (runStart != null) break; // el uso ya estaba cerrado
+          continue;
+        }
+        runHours += delta;
+        runStart = rising[i - 1].time;
+      }
+      setState(() {
+        signalK.lastEngineHours = best;
+        signalK.lastEngineHoursAt = at;
+        if (runStart != null && runHours > 0.01) {
+          signalK.lastEngineRunAt = at;
+          signalK.lastEngineRunHours = runHours;
+        }
+      });
+      unawaited(_saveSettings());
+    } catch (_) {
+      /* sin histórico se sigue sin horas hasta que el motor publique */
+    }
+  }
+
   Future<void> _autoConfigureBlankSensorPaths() async {
     if (settings.demoMode) return;
     final c = settings.sensorConfig;
@@ -6538,6 +6721,15 @@ class _DashboardState extends State<Dashboard> {
   // ─── NAV page ───────────────────────────────────────────────────────────────
   int _navPageIndex = 0;
   double _navDragOverscroll = 0;
+  /// Un gesto, un salto de página.
+  ///
+  /// Al pasar de página el acumulado se ponía a cero pero el MISMO arrastre
+  /// seguía sumando overscroll, así que un gesto largo encadenaba dos o
+  /// tres saltos y había que hacerlos cortísimos para no pasarse ("los
+  /// arrastres hay que hacerlos demasiado cortos si no se pasa de
+  /// pantalla", 2026-09-12). Con esto, en cuanto salta una página se ignora
+  /// el resto del gesto hasta soltar el dedo.
+  bool _navFlipLock = false;
   // Briefly names the screen you just swiped to (e.g. "Fondeado"), then
   // fades — otherwise which of several near-identical-looking Premium
   // screens you landed on isn't obvious at a glance.
@@ -6584,6 +6776,8 @@ class _DashboardState extends State<Dashboard> {
   // the other.
   int _windPageIndex = 0;
   double _windDragOverscroll = 0;
+  bool _windFlipLock = false; // ver _navFlipLock
+
   String? _windToast;
   Timer? _windToastTimer;
   final _windScrollController = ScrollController();
@@ -6885,11 +7079,16 @@ class _DashboardState extends State<Dashboard> {
           onNotification: (notification) {
             if (notification is ScrollStartNotification) {
               _windDragOverscroll = 0;
+              _windFlipLock = false;
+            } else if (notification is ScrollEndNotification) {
+              _windFlipLock = false;
             } else if (notification is OverscrollNotification) {
+              if (_windFlipLock) return false;
               _windDragOverscroll += notification.overscroll;
               if (_windDragOverscroll.abs() >= 60) {
                 final forward = _windDragOverscroll > 0;
                 _windDragOverscroll = 0;
+                _windFlipLock = true;
                 setState(() {
                   _windPageIndex = forward
                       ? (_windPageIndex + 1) % totalPages
@@ -7122,11 +7321,16 @@ class _DashboardState extends State<Dashboard> {
           onNotification: (notification) {
             if (notification is ScrollStartNotification) {
               _navDragOverscroll = 0;
+              _navFlipLock = false;
+            } else if (notification is ScrollEndNotification) {
+              _navFlipLock = false;
             } else if (notification is OverscrollNotification) {
+              if (_navFlipLock) return false;
               _navDragOverscroll += notification.overscroll;
               if (_navDragOverscroll.abs() >= 60) {
                 final forward = _navDragOverscroll > 0;
                 _navDragOverscroll = 0;
+                _navFlipLock = true;
                 setState(() {
                   _navPageIndex = forward
                       ? (_navPageIndex + 1) %
@@ -7631,13 +7835,21 @@ class _DashboardState extends State<Dashboard> {
           color: aws == null ? cMuted : cGreen,
         );
       case 'engineHours':
-        final h = signalK.engineHours;
+        // Si el motor no está publicando ahora, se enseña la última
+        // lectura vista en vez de "--": el contador solo puede haber
+        // subido, así que sigue siendo el mejor dato disponible.
+        final live = signalK.engineHours;
+        final h = live ?? signalK.lastEngineHours;
+        final stale = live == null && h != null;
         final enginePath = settings.sensorConfig.enginePath;
         return NavCardData(
           id: id,
           title: 'Horas motor',
           value: h != null ? h.toStringAsFixed(1) : '--',
           unit: h != null ? 'h' : null,
+          subtitle: stale
+              ? 'última lectura${signalK.lastEngineHoursAt == null ? '' : ' · ${_lastUpdateText(signalK.lastEngineHoursAt)}'}'
+              : null,
           color: h == null ? cMuted : cText,
           graphMetrics: enginePath == null
               ? null
@@ -7990,8 +8202,20 @@ class _DashboardState extends State<Dashboard> {
   // block and _buildDynamicHandlers); _engineRunning is derived only from
   // fresh propulsion.<id>.revolutions, never from the lifetime runTime
   // counter.
+  /// "hace 3 días · 2,4 h" para la pantalla de motor.
+  String? get _engineLastRunLabel {
+    final at = signalK.lastEngineRunAt;
+    final hours = signalK.lastEngineRunHours;
+    if (at == null || hours == null || hours <= 0) return null;
+    final dur = hours >= 1
+        ? '${hours.toStringAsFixed(1)} h'
+        : '${(hours * 60).round()} min';
+    return '${_lastUpdateText(at)} · $dur';
+  }
+
   Widget _navPremiumMotorPage() => PremiumMotorEnginePanel(
     engineHours: _navCardData('engineHours'),
+    lastRunLabel: _engineLastRunLabel,
     engineRunning: _engineRunning,
     engineContactOn: _engineContactOn,
     engineRpm: _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate),
