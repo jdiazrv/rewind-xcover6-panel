@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.4.185+196
+version: 1.4.188+199
 
 environment:
   sdk: ^3.13.1
@@ -79,6 +79,7 @@ flutter:
 
   # To add assets to your application, add an assets section, like this:
   assets:
+    - assets/polars/orc_polars.json
     - assets/img/own_ship.png
     - assets/img/other_boat.svg
     - assets/img/boats/grande/
@@ -88,6 +89,15 @@ flutter:
     - assets/sound/starter_crank.wav
     - assets/sound/engine_idle.wav
     - assets/sound/ready_beeps.wav
+
+  # Embedded locally so the mechanical hour meter keeps the same crisp,
+  # tabular numerals offline on every XCover. Licensed under SIL OFL 1.1;
+  # the license text is stored beside the font asset.
+  fonts:
+    - family: RewindOdometer
+      fonts:
+        - asset: assets/fonts/RobotoMono-Bold.ttf
+          weight: 700
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

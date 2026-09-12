@@ -1009,7 +1009,9 @@ class _LineGraphPainter extends CustomPainter {
       final range = windowEnd.difference(windowStart);
       final interval = windBarbInterval(
         range,
-        targetCount: math.max(1, (pW / 36).floor()),
+        // About one glyph every 24 px: dense enough to read changes without
+        // the 14 px shafts visually merging into one another.
+        targetCount: math.max(1, (pW / 24).floor()),
       );
       final barbs = sampleWindBarbs(
         tws: windSpeeds,

@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:rewind_xcover6_panel/main.dart';
+import 'package:rewind_xcover6_panel/models.dart';
+import 'package:rewind_xcover6_panel/theme.dart';
+import 'package:rewind_xcover6_panel/widgets/motor_premium_panel.dart';
 
 void main() {
   testWidgets('REWIND panel boots', (WidgetTester tester) async {
@@ -11,6 +14,38 @@ void main() {
 
     expect(find.text('NAV'), findsOneWidget);
     expect(find.text('Signal K'), findsNothing);
+  });
+
+  testWidgets('motor hour meter fits the landscape tachometer', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: PremiumMotorEnginePanel(
+            engineHours: NavCardData(
+              id: 'engineHours',
+              title: 'Horas motor',
+              value: '1626.2',
+              color: cText,
+            ),
+            engineRunning: true,
+            engineContactOn: true,
+            engineRpm: 761.4,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CustomPaint), findsWidgets);
+    expect(find.text('HORAS MOTOR'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('PRON layout fits landscape phone size', (
@@ -187,8 +222,8 @@ void main() {
     await tester.tap(find.text('INFORMES'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Rendimiento del barco'), findsOneWidget);
-    expect(find.text('Viento y vela'), findsOneWidget);
+    expect(find.text('Navegación y singladura'), findsOneWidget);
+    expect(find.text('Viento y rendimiento a vela'), findsOneWidget);
     expect(find.text('Informe completo'), findsOneWidget);
     expect(find.text('−72 h'), findsOneWidget);
     expect(find.text('ahora'), findsOneWidget);

@@ -375,7 +375,43 @@ class ForecastStrip extends StatelessWidget {
     return ListView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.all(12),
-      children: [for (final p in points) HourForecast(point: p)],
+      children: [
+        for (var i = 0; i < points.length; i++) ...[
+          if (i > 0 &&
+              points[i].time.toLocal().day != points[i - 1].time.toLocal().day)
+            _ForecastDayDivider(time: points[i].time),
+          HourForecast(point: points[i]),
+        ],
+      ],
+    );
+  }
+}
+
+class _ForecastDayDivider extends StatelessWidget {
+  const _ForecastDayDivider({required this.time});
+  final DateTime time;
+
+  @override
+  Widget build(BuildContext context) {
+    final local = time.toLocal();
+    return Container(
+      width: 34,
+      margin: const EdgeInsets.only(right: 8),
+      decoration: const BoxDecoration(
+        border: Border(left: BorderSide(color: cCyan, width: 2)),
+      ),
+      alignment: Alignment.center,
+      child: RotatedBox(
+        quarterTurns: 3,
+        child: Text(
+          '${local.day}/${local.month}',
+          style: const TextStyle(
+            color: cCyan,
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -399,13 +435,18 @@ class HourForecast extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hour = point.time.toLocal().hour;
+    final night = hour < 7 || hour >= 20;
     return Container(
       width: 98,
       margin: const EdgeInsets.only(right: 8),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: cPanel2,
+        color: night ? const Color(0xff0b1622) : cPanel2,
         borderRadius: BorderRadius.circular(8),
+        border: night
+            ? Border.all(color: cPurple.withValues(alpha: 0.35))
+            : null,
       ),
       child: FittedBox(
         fit: BoxFit.scaleDown,

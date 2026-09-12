@@ -8,14 +8,11 @@ import 'package:flutter/services.dart';
 import '../models.dart';
 import '../theme.dart';
 
-// ─── Motor premium panel — SIMULATION SCAFFOLDING ───────────────────────────
-// This whole widget renders against a *locally simulated* engine state, not
-// real telemetry: the boat has no RPM/alarm PGNs (127488/127489) wired into
-// SignalKModel yet. The SIMUL switch and every field in _lamps below exist
-// only to preview the design; once Signal K exposes real engine paths, this
-// state machine should be replaced by values read straight from
-// SignalKModel (matching how the rest of NavCardData works) and the SIMUL
-// switch removed entirely.
+// ─── Motor premium panel ────────────────────────────────────────────────────
+// Live mode is fed exclusively by the confirmed Signal K/J1939 values passed
+// by main.dart. The local key/start simulation is available only when the
+// application's explicit DEMO mode enables it; it is never exposed on the
+// operational panel by itself.
 
 // Approximate Volvo Penta D2 (EVC/MDI) glow-plug preheat time — begins the
 // moment ON is pressed (a real diesel starts preheating on contact, not
@@ -65,7 +62,7 @@ const _motorLamps = [
   _MotorLamp('carga', 'CARGA', cRed, Icons.bolt),
   _MotorLamp('aceite', 'PRESIÓN\nACEITE', cRed, Icons.opacity),
   _MotorLamp('temp', 'TEMPERATURA', cRed, Icons.thermostat),
-  _MotorLamp('precal', 'PRECALENTAR', cYellow, Icons.local_fire_department),
+  _MotorLamp('precal', 'CALENTADORES', cYellow, Icons.local_fire_department),
 ];
 
 /// Premium "Motor" screen — RPM arc gauge + engine warning lights, styled to
@@ -125,12 +122,12 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.onUnmuteAlarms,
     this.activeUnmutedAlarmCount = 0,
     this.onMuteAllAlarms,
+    this.allowSimulation = false,
   });
 
   final NavCardData engineHours;
-  // Real signal (from propulsion.<id>.runTime deltas — see
-  // _DashboardState._engineRunning) used for the status banner whenever
-  // SIMUL is off.
+  // Real signal derived from fresh propulsion.<id>.revolutions by
+  // _DashboardState._engineRunning.
   final bool engineRunning;
   // True whenever the engine ECU has reported *anything* recently (RPM,
   // coolant, oil pressure or alternator — any one is enough), regardless
@@ -140,8 +137,8 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   // CONTACTO lamp uses this instead of [engineRunning].
   final bool engineContactOn;
   final double? engineRpm;
-  // Percent load, same PGN 61444 frame as RPM (SPN 512) — informational
-  // only, shown in _hoursBox() when [detailed] and available.
+  // Reserved for an ECU that really publishes engine load. The captured MDI
+  // sends the EEC1 torque byte as unavailable, so live mode never displays it.
   final double? engineTorquePercent;
   final double? engineOilPressurePa;
   final double? engineCoolantTempK;
@@ -156,8 +153,8 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   // Glow-plug/starter-relay circuit fault (SPN 677/724, FMI 5) — discrete
   // only, no threshold equivalent exists for a relay fault.
   final bool? engineGlowPlugFaultAlarm;
-  // Preheat-in-progress status (PGN 65264, SPN 1494) — not a fault, drives
-  // the 'precal' lamp in real mode the way the sim state machine does.
+  // Reserved for a future, verified preheat-in-progress mapping. Current MDI
+  // captures only confirm an acoustic A0 pattern, not the heater state.
   final bool? enginePreheatActive;
   final bool? engineMdiDetected;
   final bool? engineMdiMappingVerified;
@@ -178,6 +175,7 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   final double alarmOilMinBar;
   final double alarmTempMaxC;
   final double alarmVoltMinV;
+  final bool allowSimulation;
   // "Completo" CFG toggle (settings.motorPanelDetailed) — adds numeric
   // gauges for temp/oil/volt (each labeled CONFIRMADO/ESTIMADO/SIN DATO
   // for provenance) and the undecoded-PGN diagnostics line below the
@@ -431,16 +429,13 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // actually running.
   String get _statusText {
     if (!_simulEnabled) {
-      if (widget.engineSystemFault == true ||
-          widget.engineAuxiliaryFault == true ||
-          widget.engineCheckAlarm == true) {
+      if (widget.engineCheckAlarm == true) {
         return 'REVISAR MOTOR';
       }
-      if (widget.engineStarting == true) return 'ARRANCANDO…';
-      if (widget.engineStopping == true) return 'PARANDO…';
-      if (widget.enginePreheatActive == true) return 'PRECALENTANDO…';
-      if (!widget.engineContactOn) return 'SIN DATOS · CONTACTO OFF';
-      return widget.engineRunning ? 'MOTOR EN MARCHA' : 'MOTOR PARADO';
+      if (!widget.engineContactOn) return 'SIN TELEMETRÍA DEL MOTOR';
+      return widget.engineRunning
+          ? 'MOTOR EN MARCHA'
+          : 'CONTACTO ACTIVO · MOTOR PARADO';
     }
     switch (_engineState) {
       case _EngineSimState.off:
@@ -458,15 +453,8 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
 
   Color get _statusColor {
     if (!_simulEnabled) {
-      if (widget.engineSystemFault == true ||
-          widget.engineAuxiliaryFault == true ||
-          widget.engineCheckAlarm == true) {
+      if (widget.engineCheckAlarm == true) {
         return cRed;
-      }
-      if (widget.engineStarting == true ||
-          widget.engineStopping == true ||
-          widget.enginePreheatActive == true) {
-        return cYellow;
       }
       return widget.engineRunning ? cGreen : cMuted;
     }
@@ -502,6 +490,21 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     return _simRunning ? (_manualRpm ?? _kSimIdleRpm) : 0;
   }
 
+  // Six mechanical-style drums inside the tachometer: five whole-hour
+  // wheels plus one red tenths wheel.  The value arriving here has already
+  // been formatted to one decimal by _navCardData, so round it back to
+  // tenths instead of multiplying the raw binary double and risking a
+  // one-tenth display error (for example 1626.2 becoming 1626.1).
+  String? get _hourMeterDigits {
+    final hours = double.tryParse(
+      widget.engineHours.value.replaceAll(',', '.'),
+    );
+    if (hours == null || !hours.isFinite || hours < 0) return null;
+    final totalTenths = (hours * 10).round();
+    final wholeHours = (totalTenths ~/ 10) % 100000;
+    return '${wholeHours.toString().padLeft(5, '0')}${totalTenths % 10}';
+  }
+
   // Same SIMUL-vs-real split as _displayRpm, for the "Completo" gauges —
   // plausible resting-vs-running numbers rather than always 0, so SIMUL
   // actually previews what those gauges look like with real data instead
@@ -519,7 +522,9 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   }
 
   double? get _displayTorquePercent {
-    if (!_simulEnabled) return widget.engineTorquePercent;
+    // SPN 513 is unavailable in the captured MDI EEC1 frames. Never show a
+    // live torque figure until a source actually provides that SPN.
+    if (!_simulEnabled) return null;
     if (_simOff) return null;
     if (!_simRunning) return 0;
     return ((_manualRpm ?? _kSimIdleRpm) / 4000 * 80).clamp(0, 100);
@@ -644,11 +649,13 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
 
   Widget _voltGaugeTile() {
     final value = _displayAlternatorV;
-    final alarm = _lampOn('carga');
     final isSupplyOnly =
         !_simulEnabled &&
         widget.engineAlternatorV == null &&
         widget.engineSupplyV != null;
+    final alarm = isSupplyOnly
+        ? widget.engineRunning && value != null && value < widget.alarmVoltMinV
+        : _lampOn('carga');
     return _panelShell(
       child: _AnalogGauge(
         compact: _isCompact,
@@ -661,7 +668,9 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         dangerStart: 10,
         dangerEnd: widget.alarmVoltMinV,
         needleColor: alarm ? cRed : cCyan,
-        source: _sourceOrSim(widget.engineLowVoltAlarm, value),
+        source: isSupplyOnly
+            ? 'MEDIDO MDI'
+            : _sourceOrSim(widget.engineLowVoltAlarm, value),
         ledState: _ledStateFor(value, alarm),
       ),
     );
@@ -675,26 +684,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // this panel's glass/LED look, the way a real e-ink diagnostic display
   // would sit inset in a dark instrument bezel.
   Widget _diagnosticsFooter() {
-    final count = widget.engineUnknownFrameCount;
-    final pgn = widget.engineUnknownPgn;
     final dtcCount = widget.engineActiveDtcCount?.round() ?? 0;
-    if (widget.engineMdiDetected != true &&
-        dtcCount <= 0 &&
-        (count == null || count <= 0)) {
-      return const SizedBox.shrink();
-    }
+    if (dtcCount <= 0) return const SizedBox.shrink();
     final details = <String>[
-      if (widget.engineMdiDetected == true)
-        'MDI SA ${widget.engineSourceAddress?.round() ?? "–"} · ${widget.engineCanBitrateKbps?.round() ?? "–"} kbit/s · ${widget.engineMdiMappingVerified == true ? "mapa verificado" : "PGN privado sin mapa"}',
-      if (dtcCount > 0)
-        'DTC $dtcCount · SPN ${widget.engineFirstDtcSpn?.round() ?? "–"} / FMI ${widget.engineFirstDtcFmi?.round() ?? "–"}',
-      if (count != null && count > 0)
-        pgn == null
-            ? '${count.round()} PGN sin decodificar'
-            : '${count.round()} sin decodificar · último ${pgn.round()}',
-      if (widget.engineMdiDetected == true &&
-          widget.engineMdiRawBytes.any((value) => value != null))
-        'RAW ${widget.engineMdiRawBytes.map((value) => value == null ? "--" : value.round().toRadixString(16).padLeft(2, "0").toUpperCase()).join(" ")}',
+      'DTC $dtcCount · SPN ${widget.engineFirstDtcSpn?.round() ?? "–"} / FMI ${widget.engineFirstDtcFmi?.round() ?? "–"}',
     ];
     return _eInkBox(
       child: Padding(
@@ -981,6 +974,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
               dangerEnd: 4,
               needleColor: cCyan,
               big: true,
+              hourMeterDigits: _hourMeterDigits,
             ),
           ),
         ],
@@ -989,8 +983,8 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   );
 
   // Phone: a plain Column here overflowed on a phone's much shorter
-  // landscape row — hoursBox + 5 lamp chips alone could already eat the
-  // whole available height, silently pushing the SIMUL toggle (last
+  // landscape row — the lamp chips alone could already eat most of the
+  // available height, silently pushing the SIMUL toggle (last
   // child) past the bottom of the screen with no way to reach it. A
   // scroll view would be the obvious fix, but the NAV page this panel
   // lives on already uses whole-screen vertical swipes to switch between
@@ -1009,7 +1003,6 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _hoursBox(),
           if (_torqueBox() case final box?) ...[const SizedBox(height: 6), box],
           const SizedBox(height: 6),
           for (var i = 0; i < _motorLamps.length; i += 2) ...[
@@ -1034,7 +1027,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             _diagnosticsFooter(),
             const SizedBox(height: 6),
           ],
-          Expanded(child: _simulArea()),
+          if (widget.allowSimulation)
+            Expanded(child: _simulArea())
+          else
+            const Spacer(),
         ],
       );
     }
@@ -1070,11 +1066,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _hoursBox(),
-            if (_torqueBox() case final box?) ...[
-              const SizedBox(height: 6),
-              box,
-            ],
+            if (_torqueBox() case final box?) ...[box],
             const SizedBox(height: 6),
             Expanded(
               flex: 3,
@@ -1083,16 +1075,17 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
                 child: SizedBox(width: constraints.maxWidth, child: lamps),
               ),
             ),
-            Expanded(
-              flex: 2,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: SizedBox(
-                  width: constraints.maxWidth,
-                  child: _simulArea(),
+            if (widget.allowSimulation)
+              Expanded(
+                flex: 2,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: SizedBox(
+                    width: constraints.maxWidth,
+                    child: _simulArea(),
+                  ),
                 ),
               ),
-            ),
           ],
         );
       },
@@ -1143,9 +1136,6 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     ),
   );
 
-  Widget _hoursBox() =>
-      _eInkReadout('HORAS MOTOR', widget.engineHours.value);
-
   // Same PGN 61444 frame as RPM (SPN 512) — its own recessed screen, not a
   // second row inside HORAS MOTOR's, matching how every other readout on
   // this panel gets its own box. Only worth showing in "Completo" mode,
@@ -1191,7 +1181,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         // See _DashboardState._engineContactOn.
         return widget.engineContactOn;
       case 'carga':
-        final v = widget.engineAlternatorV ?? widget.engineSupplyV;
+        // MDI supply (SPN 158) is not charging potential (SPN 167). With no
+        // alternator value and no DM1 flag the honest state is simply off /
+        // unavailable, not a fabricated charge warning.
+        final v = widget.engineAlternatorV;
         final threshold = v != null && v < widget.alarmVoltMinV;
         return widget.engineLowVoltAlarm == true || threshold;
       case 'aceite':
@@ -1205,8 +1198,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         final threshold = c != null && c > widget.alarmTempMaxC;
         return widget.engineOverTempAlarm == true || threshold;
       case 'precal':
-        return (widget.enginePreheatActive ?? false) ||
-            (widget.engineGlowPlugFaultAlarm ?? false);
+        // Captures identify the acoustic A0 pattern, not a confirmed active
+        // preheat bit. In live mode this lamp therefore means a real DM1
+        // heater/relay fault only; the normal yellow cycle remains DEMO-only.
+        return widget.engineGlowPlugFaultAlarm ?? false;
       default:
         return false;
     }
@@ -1484,6 +1479,7 @@ class _AnalogGaugePainter extends CustomPainter {
     required this.majorStep,
     required this.needleColor,
     required this.valueText,
+    this.hourMeterDigits,
     this.dangerStart,
     this.dangerEnd,
     this.big = false,
@@ -1498,6 +1494,7 @@ class _AnalogGaugePainter extends CustomPainter {
   final Color needleColor;
   final bool big;
   final String valueText;
+  final String? hourMeterDigits;
 
   // Bottom-left start, 270° clockwise sweep to bottom-right — a small gap
   // at the bottom like a real automotive dial, so 0 and max never overlap.
@@ -1511,6 +1508,138 @@ class _AnalogGaugePainter extends CustomPainter {
 
   String _fmtTick(double v) =>
       v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
+
+  void _paintHourMeter(Canvas canvas, Offset center, double r) {
+    final digits = hourMeterDigits;
+    if (!big || digits == null || digits.length != 6) return;
+
+    // A framed aperture containing six individual cylindrical drums. The
+    // local RewindOdometer font supplies crisp tabular figures; the clipped
+    // neighbours, highlights and shadows are what make them read as wheels
+    // rather than six ordinary boxes of text.
+    final meterW = r * 1.08;
+    final meterH = r * 0.25;
+    final meterCenter = center + Offset(0, -r * 0.35);
+    final outer = RRect.fromRectAndRadius(
+      Rect.fromCenter(center: meterCenter, width: meterW, height: meterH),
+      Radius.circular(meterH * 0.13),
+    );
+    canvas.drawRRect(
+      outer,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xff69747a), Color(0xff111719), Color(0xff455056)],
+          stops: [0, 0.48, 1],
+        ).createShader(outer.outerRect),
+    );
+
+    final inset = outer.outerRect.deflate(meterH * 0.075);
+    final wheelGap = meterW * 0.008;
+    final decimalGap = meterW * 0.025;
+    final usableW = inset.width - wheelGap * 5 - decimalGap;
+    final wheelW = usableW / 6;
+    var x = inset.left;
+
+    for (var i = 0; i < 6; i++) {
+      if (i == 5) x += decimalGap;
+      final rect = Rect.fromLTWH(x, inset.top, wheelW, inset.height);
+      final wheel = RRect.fromRectAndRadius(
+        rect,
+        Radius.circular(wheelW * 0.08),
+      );
+      canvas.save();
+      canvas.clipRRect(wheel);
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xff050606), Color(0xff202326), Color(0xff050606)],
+            stops: [0, 0.5, 1],
+          ).createShader(rect),
+      );
+
+      final current = int.parse(digits[i]);
+      final color = i == 5 ? const Color(0xffff3b30) : const Color(0xfff3f3ec);
+      void paintDigit(int digit, double dy, double opacity, double scale) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: '${digit % 10}',
+            style: TextStyle(
+              color: color.withValues(alpha: opacity),
+              fontFamily: 'RewindOdometer',
+              fontSize: rect.height * 0.72 * scale,
+              fontWeight: FontWeight.w700,
+              height: 1,
+              fontFeatures: const [FontFeature.tabularFigures()],
+              shadows: const [
+                Shadow(
+                  color: Colors.black,
+                  offset: Offset(0, 1),
+                  blurRadius: 1,
+                ),
+              ],
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        painter.paint(
+          canvas,
+          Offset(
+            rect.center.dx - painter.width / 2,
+            rect.center.dy - painter.height / 2 + dy,
+          ),
+        );
+      }
+
+      // Just enough of the adjacent figures remains visible at the curved
+      // edges to identify a physical rotating drum without compromising the
+      // current reading.
+      paintDigit((current + 9) % 10, -rect.height * 0.72, 0.24, 0.82);
+      paintDigit(current, 0, 1, 1);
+      paintDigit((current + 1) % 10, rect.height * 0.72, 0.24, 0.82);
+
+      // Convex glass/drum highlight through the centre and deep edge shade.
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0.42),
+              Colors.white.withValues(alpha: 0.10),
+              Colors.transparent,
+              Colors.black.withValues(alpha: 0.48),
+            ],
+            stops: const [0, 0.38, 0.58, 1],
+          ).createShader(rect),
+      );
+      canvas.restore();
+      canvas.drawRRect(
+        wheel,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = math.max(0.7, r * 0.006)
+          ..color = const Color(0xff020303),
+      );
+      x += wheelW + wheelGap;
+    }
+
+    // Stronger separator before tenths: the red drum itself acts as the
+    // decimal indicator, so no dot or comma is needed.
+    final separatorX = inset.right - wheelW - decimalGap * 0.5;
+    canvas.drawLine(
+      Offset(separatorX, inset.top + meterH * 0.08),
+      Offset(separatorX, inset.bottom - meterH * 0.08),
+      Paint()
+        ..color = const Color(0xff9aa1a4)
+        ..strokeWidth = math.max(0.8, r * 0.007),
+    );
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1670,6 +1799,8 @@ class _AnalogGaugePainter extends CustomPainter {
         ..color = Colors.black.withValues(alpha: 0.6),
     );
 
+    _paintHourMeter(canvas, center, r);
+
     // Digital readout — e-ink style (matte pale ground, flat dark text),
     // matching every other plain numeric readout on this panel, instead of
     // the black-glass LCD look. Bigger than before per "se ven muy
@@ -1782,6 +1913,7 @@ class _AnalogGaugePainter extends CustomPainter {
       old.dangerEnd != dangerEnd ||
       old.needleColor != needleColor ||
       old.valueText != valueText ||
+      old.hourMeterDigits != hourMeterDigits ||
       old.big != big;
 }
 
@@ -1797,6 +1929,7 @@ class _AnalogGauge extends StatelessWidget {
     required this.max,
     required this.majorStep,
     required this.valueText,
+    this.hourMeterDigits,
     this.label,
     this.dangerStart,
     this.dangerEnd,
@@ -1817,8 +1950,10 @@ class _AnalogGauge extends StatelessWidget {
   final Color needleColor;
   final bool big;
   final String valueText;
+  final String? hourMeterDigits;
   final String? source;
   final _LedState? ledState;
+
   /// En teléfono la esfera circular no cabe: el diámetro sale de
   /// min(ancho, alto) y en una columna de tres el alto manda, así que
   /// quedaban 54-72 px de esfera y cifras de 5-7 px, ilegibles (medido a
@@ -1889,6 +2024,7 @@ class _AnalogGauge extends StatelessWidget {
                                     needleColor: needleColor,
                                     big: big,
                                     valueText: valueText,
+                                    hourMeterDigits: hourMeterDigits,
                                   ),
                                 ),
                           ),
@@ -2074,9 +2210,7 @@ class _BarGaugePainter extends CustomPainter {
       final a = _x(dangerStart!, w), b = _x(dangerEnd!, w);
       if (b > a) {
         canvas.save();
-        canvas.clipRRect(
-          RRect.fromRectAndRadius(Offset.zero & size, radius),
-        );
+        canvas.clipRRect(RRect.fromRectAndRadius(Offset.zero & size, radius));
         canvas.drawRect(
           Rect.fromLTRB(a, 0, b, h),
           Paint()..color = cRed.withValues(alpha: 0.35),

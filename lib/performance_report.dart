@@ -20,22 +20,185 @@ typedef PolarData = ({
   List<({int loDeg, int hiDeg})> twaBands,
   List<List<double?>> avgStw,
   List<List<int>> counts,
+  int minSamples,
+  bool engineFilterAvailable,
 });
+
+typedef ReportGpsSample = ({
+  DateTime time,
+  double lat,
+  double lon,
+  double? sogKn,
+  bool moving,
+});
+
+/// Removes geographically valid but contextually impossible GPS fixes. The
+/// threshold combines elapsed time with measured SOG when available, plus a
+/// 75 m allowance for normal GNSS scatter and asynchronous history samples.
+/// A 45 kt ceiling still protects reports whose SOG history is unavailable.
+List<ReportGpsSample> filterImplausibleReportGps(
+  List<ReportGpsSample> samples,
+) {
+  final valid = samples
+      .where(
+        (sample) =>
+            sample.lat.isFinite &&
+            sample.lon.isFinite &&
+            sample.lat.abs() <= 90 &&
+            sample.lon.abs() <= 180,
+      )
+      .toList();
+  if (valid.length < 2) return valid;
+  final sorted = List<ReportGpsSample>.of(valid)
+    ..sort((a, b) => a.time.compareTo(b.time));
+
+  bool plausible(ReportGpsSample a, ReportGpsSample b) {
+    final seconds = b.time.difference(a.time).inMilliseconds / 1000;
+    if (seconds <= 0) return false;
+    final distanceM = bearingDistanceMeters(
+      a.lat,
+      a.lon,
+      b.lat,
+      b.lon,
+    ).distanceM;
+    final sogValues = [
+      a.sogKn,
+      b.sogKn,
+    ].whereType<double>().where((value) => value.isFinite && value >= 0);
+    final contextualSog = sogValues.isEmpty ? null : sogValues.reduce(math.max);
+    final allowedKn = contextualSog == null
+        ? 45.0
+        : (contextualSog * 2.5 + 5).clamp(8.0, 45.0).toDouble();
+    final allowedDistanceM = 75 + allowedKn / 1.943844 * seconds;
+    return distanceM <= allowedDistanceM;
+  }
+
+  // If the first fix is the isolated bad one, accepting it as the reference
+  // would make every subsequent real fix look wrong. Establish context from
+  // the next two coherent samples in that special case.
+  var first = 0;
+  if (sorted.length >= 3 &&
+      !plausible(sorted[0], sorted[1]) &&
+      plausible(sorted[1], sorted[2])) {
+    first = 1;
+  }
+  final accepted = <ReportGpsSample>[sorted[first]];
+  for (var i = first + 1; i < sorted.length; i++) {
+    if (plausible(accepted.last, sorted[i])) accepted.add(sorted[i]);
+  }
+  return accepted;
+}
+
+typedef ReportNavigationStats = ({
+  double? distanceNm,
+  Duration underway,
+  double? avgSogUnderway,
+  double? maxSog,
+});
+
+/// Integrates SOG using each pair's real timestamps. Long data holes are not
+/// silently charged as distance or underway time.
+ReportNavigationStats calculateReportNavigationStats(
+  List<GraphPoint> source,
+  Duration expectedStep,
+) {
+  final sog = source.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  if (sog.length < 2) {
+    return (
+      distanceNm: null,
+      underway: Duration.zero,
+      avgSogUnderway: null,
+      maxSog: sog.isEmpty ? null : sog.first.value,
+    );
+  }
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+  var distanceNm = 0.0;
+  var underwayDistanceNm = 0.0;
+  var underwaySeconds = 0.0;
+  var acceptedSegments = 0;
+  for (var i = 1; i < sog.length; i++) {
+    final dt = sog[i].time.difference(sog[i - 1].time);
+    if (dt <= Duration.zero || dt > maxGap) continue;
+    final hours = dt.inMilliseconds / 3600000;
+    final meanKn = (sog[i - 1].value + sog[i].value) / 2;
+    distanceNm += meanKn * hours;
+    acceptedSegments++;
+    if (meanKn > 0.5) {
+      underwayDistanceNm += meanKn * hours;
+      underwaySeconds += dt.inMilliseconds / 1000;
+    }
+  }
+  return (
+    distanceNm: acceptedSegments == 0 ? null : distanceNm,
+    underway: Duration(seconds: underwaySeconds.round()),
+    avgSogUnderway: underwaySeconds <= 0
+        ? null
+        : underwayDistanceNm / (underwaySeconds / 3600),
+    maxSog: sog.map((p) => p.value).reduce(math.max),
+  );
+}
+
+double? reportAverageStwUnderway(
+  List<GraphPoint> stwSource,
+  List<GraphPoint> sogSource,
+  Duration expectedStep,
+) {
+  final stw = stwSource.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  final sog = sogSource.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  if (stw.length < 2 || sog.isEmpty) return null;
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+
+  GraphPoint? nearestSog(DateTime time) {
+    GraphPoint? best;
+    Duration? bestDifference;
+    for (final point in sog) {
+      final difference = point.time.difference(time).abs();
+      if (difference > maxGap) continue;
+      if (bestDifference == null || difference < bestDifference) {
+        best = point;
+        bestDifference = difference;
+      }
+    }
+    return best;
+  }
+
+  var weightedSpeed = 0.0;
+  var seconds = 0.0;
+  for (var i = 1; i < stw.length; i++) {
+    final dt = stw[i].time.difference(stw[i - 1].time);
+    if (dt <= Duration.zero || dt > maxGap) continue;
+    final midpoint = stw[i - 1].time.add(
+      Duration(milliseconds: dt.inMilliseconds ~/ 2),
+    );
+    if ((nearestSog(midpoint)?.value ?? 0) <= 0.5) continue;
+    final segmentSeconds = dt.inMilliseconds / 1000;
+    weightedSpeed += (stw[i - 1].value + stw[i].value) / 2 * segmentSeconds;
+    seconds += segmentSeconds;
+  }
+  return seconds == 0 ? null : weightedSpeed / seconds;
+}
 
 enum PerformanceReportKind { navigation, windAndSailing, complete }
 
 extension PerformanceReportKindLabel on PerformanceReportKind {
   String get label => switch (this) {
-    PerformanceReportKind.navigation => 'Rendimiento del barco',
-    PerformanceReportKind.windAndSailing => 'Viento y vela',
+    PerformanceReportKind.navigation => 'Navegación y singladura',
+    PerformanceReportKind.windAndSailing => 'Viento y rendimiento a vela',
     PerformanceReportKind.complete => 'Informe completo',
   };
 
   String get description => switch (this) {
     PerformanceReportKind.navigation =>
-      'Distancia, tiempo navegando, SOG, STW y traza GPS',
+      'Distancia, tiempo real navegando, velocidades y traza GPS',
     PerformanceReportKind.windAndSailing =>
-      'Viento, barbas, escora y polar real',
+      'Viento, barbas, escora y polar observada',
     PerformanceReportKind.complete =>
       'Navegación, viento y rendimiento a vela en un único PDF',
   };
@@ -48,7 +211,8 @@ extension PerformanceReportKindLabel on PerformanceReportKind {
 }
 
 const _reportHorizonMinutes = 72 * 60;
-const _reportMaxPeriodMinutes = 24 * 60;
+const _reportDefaultPeriodMinutes = 24 * 60;
+const _reportMaxPeriodMinutes = 48 * 60;
 const _reportStepMinutes = 15;
 
 String _reportDateTime(DateTime value) {
@@ -62,6 +226,9 @@ String _reportDurationLabel(Duration duration) {
   if (minutes % 60 == 0) return '${minutes ~/ 60} h';
   return '${minutes ~/ 60} h ${minutes % 60} min';
 }
+
+Duration _selectedWindBarbInterval(Duration automatic, Duration? requested) =>
+    requested ?? automatic;
 
 AppRange _reportRangeFor(Duration duration) {
   final minutes = duration.inMinutes;
@@ -79,9 +246,10 @@ AppRange _reportRangeFor(Duration duration) {
   );
 }
 
-/// Applies the report picker's 15-minute grid and 24-hour maximum without
-/// moving the opposite handle. Public so the interaction contract can be
-/// covered by a small unit test independently of the PDF/network layer.
+/// Applies the report picker's 15-minute grid and 48-hour maximum. When an
+/// outward drag would exceed 48 hours, the opposite marker moves with it so
+/// the whole 48-hour window pans instead of the active marker just stopping.
+/// Public so this interaction contract can be tested without the PDF layer.
 RangeValues normalizeReportRange(RangeValues current, RangeValues proposed) {
   double snap(double value) =>
       (value / _reportStepMinutes).round() * _reportStepMinutes.toDouble();
@@ -91,18 +259,26 @@ RangeValues normalizeReportRange(RangeValues current, RangeValues proposed) {
       (proposed.start - current.start).abs() >=
       (proposed.end - current.end).abs();
   if (startMoved) {
-    start = start.clamp(
-      math.max(0.0, end - _reportMaxPeriodMinutes),
-      end - _reportStepMinutes,
-    );
+    start = start.clamp(0.0, end - _reportStepMinutes);
+    if (end - start > _reportMaxPeriodMinutes) {
+      end = start + _reportMaxPeriodMinutes;
+      if (end > _reportHorizonMinutes) {
+        end = _reportHorizonMinutes.toDouble();
+        start = end - _reportMaxPeriodMinutes;
+      }
+    }
   } else {
     end = end.clamp(
       start + _reportStepMinutes,
-      math.min(
-        _reportHorizonMinutes.toDouble(),
-        start + _reportMaxPeriodMinutes,
-      ),
+      _reportHorizonMinutes.toDouble(),
     );
+    if (end - start > _reportMaxPeriodMinutes) {
+      start = end - _reportMaxPeriodMinutes;
+      if (start < 0) {
+        start = 0;
+        end = _reportMaxPeriodMinutes.toDouble();
+      }
+    }
   }
   return RangeValues(start.toDouble(), end.toDouble());
 }
@@ -249,6 +425,7 @@ class _ReportPeriodSelector extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text('−72 h', style: TextStyle(color: cMuted, fontSize: 10)),
+            Text('máx. 48 h', style: TextStyle(color: cMuted, fontSize: 10)),
             Text('ahora', style: TextStyle(color: cMuted, fontSize: 10)),
           ],
         ),
@@ -327,7 +504,7 @@ Future<void> showPerformanceReportPicker(
   // drift under the user's fingers even though neither marker had moved.
   final referenceNow = DateTime.now();
   var selectedPeriod = RangeValues(
-    (_reportHorizonMinutes - _reportMaxPeriodMinutes).toDouble(),
+    (_reportHorizonMinutes - _reportDefaultPeriodMinutes).toDouble(),
     _reportHorizonMinutes.toDouble(),
   );
   Duration? selectedBarbInterval;
@@ -383,7 +560,7 @@ Future<void> showPerformanceReportPicker(
                       spacing: 6,
                       runSpacing: 4,
                       children: [
-                        for (final hours in const [1, 3, 6, 12, 24])
+                        for (final hours in const [1, 3, 6, 12, 24, 48])
                           ChoiceChip(
                             visualDensity: VisualDensity.compact,
                             label: Text('$hours h'),
@@ -417,6 +594,14 @@ Future<void> showPerformanceReportPicker(
                         showSelectedIcon: false,
                         segments: const [
                           ButtonSegment(value: null, label: Text('Auto')),
+                          ButtonSegment(
+                            value: Duration(minutes: 10),
+                            label: Text('10 min'),
+                          ),
+                          ButtonSegment(
+                            value: Duration(minutes: 15),
+                            label: Text('15 min'),
+                          ),
                           ButtonSegment(
                             value: Duration(minutes: 30),
                             label: Text('30 min'),
@@ -580,7 +765,17 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     _fetch();
   }
 
-  Future<List<GraphPoint>> _query(MetricDef def) async {
+  MetricDef? get _engineRpmMetric {
+    final runTimePath = widget.settings.sensorConfig.enginePath;
+    if (runTimePath == null || runTimePath.isEmpty) return null;
+    final base = runTimePath.replaceFirst(RegExp(r'\.runTime$'), '');
+    return MetricDef('$base.revolutions', 'RPM motor', 'rpm', scale: 60);
+  }
+
+  Future<List<GraphPoint>> _query(
+    MetricDef def, {
+    String aggregate = 'mean',
+  }) async {
     final s = widget.settings;
     final r = _range;
     Future<List<GraphPoint>> fromInflux() => influxQuery(
@@ -593,6 +788,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       start: widget.start,
       stop: widget.end,
       bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
+      aggFn: aggregate,
     );
     Future<List<GraphPoint>> fromSk() async => skHistoryQuery(
       host: _resolvedSkHost ?? s.host,
@@ -603,6 +799,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       resolution: parseAggEvery(r.agg),
       start: widget.start,
       stop: widget.end,
+      aggFn: aggregate == 'mean' ? 'average' : aggregate,
     );
     switch (s.historySource) {
       case 'influx':
@@ -618,15 +815,20 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
-  Future<List<GraphPoint>> _optionalQuery(MetricDef def) async {
+  Future<List<GraphPoint>> _optionalQuery(
+    MetricDef def, {
+    String aggregate = 'mean',
+  }) async {
     try {
-      return await _query(def);
+      return await _query(def, aggregate: aggregate);
     } catch (_) {
       return const [];
     }
   }
 
   List<({double lat, double lon, DateTime time})> _track = [];
+  int _gpsRawFixes = 0;
+  int _gpsDiscardedFixes = 0;
 
   Future<void> _fetch() async {
     setState(() {
@@ -638,8 +840,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       if (!widget.settings.demoMode) {
         _resolvedSkHost = await resolveHostOnce(widget.settings.host);
       }
+      final includeNavigation =
+          widget.kind != PerformanceReportKind.windAndSailing;
+      final includeSailing = widget.kind != PerformanceReportKind.navigation;
       if (widget.settings.demoMode) {
-        _series = {
+        _gpsRawFixes = 0;
+        _gpsDiscardedFixes = 0;
+        final generated = <String, List<GraphPoint>>{
           'sog': demoGraphSeries(
             mSog,
             r.flux,
@@ -690,27 +897,46 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             stop: widget.end,
           ),
         };
+        _series = {
+          'sog': generated['sog']!,
+          'stw': generated['stw']!,
+          if (includeSailing) ...{
+            'aws': generated['aws']!,
+            'tws': generated['tws']!,
+            'twd': generated['twd']!,
+            'heel': generated['heel']!,
+            'twa': generated['twa']!,
+            'awsPeak': generated['aws']!,
+            'twsPeak': generated['tws']!,
+          },
+        };
         _track = []; // No plausible synthetic track worth drawing.
       } else {
-        final results = await Future.wait([
-          _query(mSog),
-          _query(mStw),
-          _query(mAws),
-          _query(mTws),
-          _optionalQuery(mTwd),
-          _query(mHeel),
-          _query(mTwa),
-        ]);
-        _series = {
-          'sog': results[0],
-          'stw': results[1],
-          'aws': results[2],
-          'tws': results[3],
-          'twd': results[4],
-          'heel': results[5],
-          'twa': results[6],
+        final queries = <String, Future<List<GraphPoint>>>{
+          'sog': _optionalQuery(mSog),
+          'stw': _optionalQuery(mStw),
+          if (includeSailing) ...{
+            'aws': _optionalQuery(mAws),
+            'tws': _optionalQuery(mTws),
+            // Direction must not be arithmetically averaged across 359°/0°;
+            // the centred circular mean is applied later by sampleWindBarbs.
+            'twd': _optionalQuery(mTwd, aggregate: 'last'),
+            'heel': _optionalQuery(mHeel),
+            'twa': _optionalQuery(mTwa, aggregate: 'last'),
+            'awsPeak': _optionalQuery(mAws, aggregate: 'max'),
+            'twsPeak': _optionalQuery(mTws, aggregate: 'max'),
+            if (_engineRpmMetric case final rpmMetric?)
+              'rpm': _optionalQuery(rpmMetric, aggregate: 'max'),
+          },
         };
-        _track = await _fetchTrackPoints(results[0]);
+        final entries = queries.entries.toList();
+        final results = await Future.wait(entries.map((entry) => entry.value));
+        _series = {
+          for (var i = 0; i < entries.length; i++) entries[i].key: results[i],
+        };
+        _track = includeNavigation
+            ? await _fetchTrackPoints(_series['sog'] ?? const [])
+            : [];
       }
       if (mounted) setState(() => _loading = false);
     } catch (e) {
@@ -826,42 +1052,57 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         return best;
       }
 
-      final raw = <({double lat, double lon, DateTime time, bool moving})>[];
+      final raw = <ReportGpsSample>[];
       for (final lp in lats) {
         final lonP = nearest(lons, lp.time);
-        if (lonP == null || lp.value.abs() > 90 || lonP.value.abs() > 180) {
+        if (lonP == null ||
+            !lp.value.isFinite ||
+            !lonP.value.isFinite ||
+            lp.value.abs() > 90 ||
+            lonP.value.abs() > 180) {
           continue;
         }
         var moving = true;
+        double? sogKn;
         if (sog.isNotEmpty) {
           final sogP = nearest(sog, lp.time);
-          moving = sogP != null && sogP.value > 0.5;
+          sogKn = sogP?.value;
+          // Missing SOG is unknown, not proof that the boat was stationary.
+          moving = sogP == null || sogP.value > 0.5;
         }
         raw.add((
           lat: lp.value,
           lon: lonP.value,
           time: lp.time,
+          sogKn: sogKn,
           moving: moving,
         ));
       }
+      final filtered = filterImplausibleReportGps(raw);
+      _gpsRawFixes = raw.length;
+      _gpsDiscardedFixes = raw.length - filtered.length;
 
       final out = <({double lat, double lon, DateTime time})>[];
       var i = 0;
-      while (i < raw.length) {
-        if (raw[i].moving) {
-          out.add((lat: raw[i].lat, lon: raw[i].lon, time: raw[i].time));
+      while (i < filtered.length) {
+        if (filtered[i].moving) {
+          out.add((
+            lat: filtered[i].lat,
+            lon: filtered[i].lon,
+            time: filtered[i].time,
+          ));
           i++;
           continue;
         }
         var j = i;
         var sumLat = 0.0, sumLon = 0.0, n = 0;
-        while (j < raw.length && !raw[j].moving) {
-          sumLat += raw[j].lat;
-          sumLon += raw[j].lon;
+        while (j < filtered.length && !filtered[j].moving) {
+          sumLat += filtered[j].lat;
+          sumLon += filtered[j].lon;
           n++;
           j++;
         }
-        out.add((lat: sumLat / n, lon: sumLon / n, time: raw[i].time));
+        out.add((lat: sumLat / n, lon: sumLon / n, time: filtered[i].time));
         i = j;
       }
       return out;
@@ -901,7 +1142,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               pdfFileName: switch (widget.kind) {
                 PerformanceReportKind.navigation => 'rewind_navegacion.pdf',
                 PerformanceReportKind.windAndSailing =>
-                  'rewind_viento_y_vela.pdf',
+                  'rewind_viento_rendimiento_vela.pdf',
                 PerformanceReportKind.complete => 'rewind_informe_completo.pdf',
               },
               build: (_) => _buildReportPdf(),
@@ -910,27 +1151,28 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   }
 
   // ─── Stats ──────────────────────────────────────────────────────────────
-  double _avg(List<GraphPoint> pts) => pts.isEmpty
-      ? 0
-      : pts.map((p) => p.value).reduce((a, b) => a + b) / pts.length;
-  double _max(List<GraphPoint> pts) =>
-      pts.isEmpty ? 0 : pts.map((p) => p.value).reduce(math.max);
-  double _maxAbs(List<GraphPoint> pts) =>
-      pts.isEmpty ? 0 : pts.map((p) => p.value.abs()).reduce(math.max);
-
-  // Points are roughly evenly spaced at the range's aggregation interval, so
-  // distance ≈ Σ(speed · Δt) using that fixed interval as a stand-in for the
-  // real gap between samples — good enough for a summary report, not a
-  // navigation-grade log.
-  double _distanceNm(List<GraphPoint> sog, Duration interval) {
-    final hoursPerSample = interval.inSeconds / 3600.0;
-    return sog.fold(0.0, (a, p) => a + p.value * hoursPerSample);
+  double? _avg(List<GraphPoint> pts) {
+    final values = pts.map((p) => p.value).where((v) => v.isFinite).toList();
+    return values.isEmpty
+        ? null
+        : values.reduce((a, b) => a + b) / values.length;
   }
 
-  double _underwayFraction(List<GraphPoint> sog) {
-    if (sog.isEmpty) return 0;
-    return sog.where((p) => p.value > 0.5).length / sog.length;
+  double? _max(List<GraphPoint> pts) {
+    final values = pts.map((p) => p.value).where((v) => v.isFinite).toList();
+    return values.isEmpty ? null : values.reduce(math.max);
   }
+
+  double? _maxAbs(List<GraphPoint> pts) {
+    final values = pts
+        .map((p) => p.value.abs())
+        .where((v) => v.isFinite)
+        .toList();
+    return values.isEmpty ? null : values.reduce(math.max);
+  }
+
+  String _number(double? value, {int decimals = 1, String unit = ''}) =>
+      value == null ? 'Sin datos' : '${value.toStringAsFixed(decimals)}$unit';
 
   int _coveragePct(List<GraphPoint> points, Duration range, Duration step) {
     if (points.isEmpty || step.inSeconds <= 0) return 0;
@@ -950,6 +1192,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     List<GraphPoint> twa,
     List<GraphPoint> tws,
     List<GraphPoint> sog,
+    List<GraphPoint> rpm,
+    Duration interval,
   ) {
     const twaBandDeg = 10;
     final twaBands = [
@@ -962,6 +1206,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         twaBands: twaBands,
         avgStw: [for (final _ in twaBands) <double?>[]],
         counts: [for (final _ in twaBands) <int>[]],
+        minSamples: 0,
+        engineFilterAvailable: rpm.isNotEmpty,
       );
     }
     final twsValues = tws.map((p) => p.value).toList();
@@ -1006,10 +1252,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       ),
     );
 
-    final sums = [
-      for (final _ in twaBands) List<double>.filled(twsBinCount, 0),
+    final values = [
+      for (final _ in twaBands)
+        [for (var w = 0; w < twsBinCount; w++) <double>[]],
     ];
-    final counts = [for (final _ in twaBands) List<int>.filled(twsBinCount, 0)];
 
     for (final sp in stw) {
       final twaP = nearest(twa, sp.time, tol);
@@ -1020,6 +1266,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       // toward zero with samples that aren't actually sailing.
       final sogP = nearest(sog, sp.time, tol);
       if (sogP == null || sogP.value <= 0.5) continue;
+      final rpmP = rpm.isEmpty ? null : nearest(rpm, sp.time, tol);
+      if (rpmP != null && rpmP.value > 100) continue;
       final angle = twaP.value.abs().clamp(0, 180);
       final bandIdx = math.min(
         twaBands.length - 1,
@@ -1029,15 +1277,35 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ? math.min(twsBinCount - 1, ((twsP.value - twsLow) / step).floor())
           : 0;
       if (twsIdx < 0) continue;
-      sums[bandIdx][twsIdx] += sp.value;
-      counts[bandIdx][twsIdx]++;
+      if (sp.value.isFinite && sp.value >= 0) {
+        values[bandIdx][twsIdx].add(sp.value);
+      }
     }
+
+    final minSamples =
+        (const Duration(minutes: 5).inMilliseconds /
+                math.max(1, interval.inMilliseconds))
+            .ceil()
+            .clamp(3, 30);
+    final counts = [
+      for (var b = 0; b < twaBands.length; b++)
+        [for (var w = 0; w < twsBinCount; w++) values[b][w].length],
+    ];
 
     final avgStw = [
       for (var b = 0; b < twaBands.length; b++)
         [
           for (var w = 0; w < twsBinCount; w++)
-            counts[b][w] == 0 ? null : sums[b][w] / counts[b][w],
+            if (counts[b][w] < minSamples)
+              null
+            else
+              (() {
+                final sorted = List<double>.of(values[b][w])..sort();
+                final middle = sorted.length ~/ 2;
+                return sorted.length.isOdd
+                    ? sorted[middle]
+                    : (sorted[middle - 1] + sorted[middle]) / 2;
+              })(),
         ],
     ];
 
@@ -1046,6 +1314,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       twaBands: twaBands,
       avgStw: avgStw,
       counts: counts,
+      minSamples: minSamples,
+      engineFilterAvailable: rpm.isNotEmpty,
     );
   }
 
@@ -1060,16 +1330,20 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twd = _series['twd'] ?? [];
     final heel = _series['heel'] ?? [];
     final twa = _series['twa'] ?? [];
+    final rpm = _series['rpm'] ?? [];
+    final awsPeak = _series['awsPeak'] ?? [];
+    final twsPeak = _series['twsPeak'] ?? [];
     final interval = parseAggEvery(r.agg);
     final generatedAt = DateTime.now();
-    final polar = _realPolar(stw, twa, tws, sog);
+    final polar = _realPolar(stw, twa, tws, sog, rpm, interval);
 
     final rangeDur = widget.end.difference(widget.start);
-    final distanceNm = _distanceNm(sog, interval);
-    final underwayFrac = _underwayFraction(sog);
-    final underwayDur = Duration(
-      seconds: (rangeDur.inSeconds * underwayFrac).round(),
-    );
+    final navigationStats = calculateReportNavigationStats(sog, interval);
+    final underwayDur = navigationStats.underway;
+    final underwayFrac = rangeDur.inMilliseconds <= 0
+        ? 0.0
+        : underwayDur.inMilliseconds / rangeDur.inMilliseconds;
+    final avgStwUnderway = reportAverageStwUnderway(stw, sog, interval);
     final coverageParts = <String>[
       if (showNavigation) 'SOG ${_coveragePct(sog, rangeDur, interval)}%',
       if (showNavigation) 'STW ${_coveragePct(stw, rangeDur, interval)}%',
@@ -1124,6 +1398,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'Cobertura de muestras: ${coverageParts.join(' · ')}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
         ),
+        if (showNavigation && _gpsRawFixes > 0)
+          pw.Text(
+            'GPS: ${_track.length} puntos representados · $_gpsDiscardedFixes descartados de $_gpsRawFixes por posición o velocidad imposible',
+            style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+          ),
         pw.SizedBox(height: 6),
         pw.Divider(color: pdfGrid, height: 1, thickness: 0.6),
         pw.SizedBox(height: 10),
@@ -1160,8 +1439,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'Distancia',
-                      '${distanceNm.toStringAsFixed(1)} NM',
-                      'periodo completo',
+                      _number(navigationStats.distanceNm, unit: ' NM'),
+                      'integrada sin huecos largos',
                       pdfCyan,
                     ),
                   ),
@@ -1184,8 +1463,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'SOG',
-                      '${_avg(sog).toStringAsFixed(1)} kt media',
-                      'máx ${_max(sog).toStringAsFixed(1)} kt',
+                      navigationStats.avgSogUnderway == null
+                          ? 'Sin datos'
+                          : '${navigationStats.avgSogUnderway!.toStringAsFixed(1)} kt media navegando',
+                      navigationStats.maxSog == null
+                          ? 'máx: Sin datos'
+                          : 'máx ${navigationStats.maxSog!.toStringAsFixed(1)} kt',
                       pdfGreen,
                     ),
                   ),
@@ -1196,8 +1479,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'STW',
-                      '${_avg(stw).toStringAsFixed(1)} kt media',
-                      'máx ${_max(stw).toStringAsFixed(1)} kt',
+                      avgStwUnderway == null
+                          ? 'Sin datos'
+                          : '${avgStwUnderway.toStringAsFixed(1)} kt media navegando',
+                      _max(stw) == null
+                          ? 'máx: Sin datos'
+                          : 'máx ${_max(stw)!.toStringAsFixed(1)} kt',
                       pdfTeal,
                     ),
                   ),
@@ -1213,8 +1500,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'AWS',
-                      '${_avg(aws).toStringAsFixed(1)} kt media',
-                      'ráfaga máx ${_max(aws).toStringAsFixed(1)} kt',
+                      _avg(aws) == null
+                          ? 'Sin datos'
+                          : '${_avg(aws)!.toStringAsFixed(1)} kt media',
+                      _max(awsPeak) == null
+                          ? 'ráfaga: Sin datos'
+                          : 'ráfaga máx ${_max(awsPeak)!.toStringAsFixed(1)} kt',
                       pdfOrange,
                     ),
                   ),
@@ -1225,8 +1516,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'TWS',
-                      '${_avg(tws).toStringAsFixed(1)} kt media',
-                      'ráfaga máx ${_max(tws).toStringAsFixed(1)} kt',
+                      _avg(tws) == null
+                          ? 'Sin datos'
+                          : '${_avg(tws)!.toStringAsFixed(1)} kt media',
+                      _max(twsPeak) == null
+                          ? 'ráfaga: Sin datos'
+                          : 'ráfaga máx ${_max(twsPeak)!.toStringAsFixed(1)} kt',
                       pdfCyan,
                     ),
                   ),
@@ -1237,8 +1532,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'Escora',
-                      '${_maxAbs(heel).toStringAsFixed(0)}° máx',
-                      'media ${_avg(heel).toStringAsFixed(0)}°',
+                      _maxAbs(heel) == null
+                          ? 'Sin datos'
+                          : '${_maxAbs(heel)!.toStringAsFixed(0)}° máx',
+                      _avg(heel) == null
+                          ? 'media: Sin datos'
+                          : 'media ${_avg(heel)!.toStringAsFixed(0)}°',
                       pdfYellow,
                     ),
                   ),
@@ -1359,7 +1658,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           if (showWind) ...[
             if (showNavigation) pw.SizedBox(height: 16),
             pw.Text(
-              'Polar de datos reales - STW media (kt)',
+              'Polar observada - STW mediana (kt)',
               style: const pw.TextStyle(
                 color: pdfText,
                 fontSize: 12,
@@ -1367,10 +1666,18 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               ),
             ),
             pw.Text(
-              'Por ángulo de viento (TWA, 0 = proa) y franja de viento real (TWS) - mismos márgenes que la distribución de TWS. Excluye momentos parado (SOG<0.5kt). Sin curva objetivo con la que comparar, solo lo navegado en este periodo.',
+              'Datos realmente navegados por TWA y franja de TWS; no es la polar objetivo del fabricante. '
+              'Exige al menos ${polar.minSamples} muestras por punto y excluye SOG≤0.5 kt. '
+              '${polar.engineFilterAvailable ? 'Excluye también los intervalos con RPM>100.' : 'No hay RPM disponible: no se puede descartar el uso del motor.'}',
               style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
             ),
             pw.SizedBox(height: 8),
+            pdfObservedPolarChart(
+              polar: polar,
+              font: canvasFont,
+              width: contentWidth,
+            ),
+            pw.SizedBox(height: 12),
             pdfPolarTable(polar, pdfGreen),
           ],
         ],
@@ -1571,12 +1878,13 @@ pw.Widget pdfWindTimeline({
     );
   }
 
-  final interval =
-      barbInterval ??
-      windBarbInterval(
-        end.difference(start),
-        targetCount: math.max(1, (width / 30).floor()),
-      );
+  final interval = _selectedWindBarbInterval(
+    windBarbInterval(
+      end.difference(start),
+      targetCount: math.max(1, (width / 20).floor()),
+    ),
+    barbInterval,
+  );
   final barbs = sampleWindBarbs(
     tws: tws,
     twd: twd,
@@ -1606,7 +1914,7 @@ pw.Widget pdfWindTimeline({
     crossAxisAlignment: pw.CrossAxisAlignment.start,
     children: [
       pw.Text(
-        'Curva: TWS en nudos. Barbas: TWD/TWS cada ${formatWindBarbInterval(interval)}. '
+        'Curva: TWS en nudos. Barbas: media centrada ±3 min de TWD/TWS, cada ${formatWindBarbInterval(interval)}. '
         'Media barba = 5 kt; barba completa = 10 kt; triángulo = 50 kt.',
         style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
       ),
@@ -2016,20 +2324,6 @@ pw.Widget pdfTrackMap({
   // so several slots do not paint an unreadable pile of glyphs.
   final windBarbs = <({double x, double y, WindBarbSample barb})>[];
   if (tws.isNotEmpty && twd.isNotEmpty && projected.length > 1) {
-    GraphPoint? nearestIn(List<GraphPoint> s, DateTime t, Duration tol) {
-      GraphPoint? best;
-      Duration? bestDiff;
-      for (final p in s) {
-        final d = p.time.difference(t).abs();
-        if (d > tol) continue;
-        if (bestDiff == null || d < bestDiff) {
-          best = p;
-          bestDiff = d;
-        }
-      }
-      return best;
-    }
-
     Duration tolFor(List<GraphPoint> s) {
       if (s.length < 2) return const Duration(minutes: 30);
       final gaps = <int>[];
@@ -2044,33 +2338,36 @@ pw.Widget pdfTrackMap({
       return t < const Duration(minutes: 10) ? const Duration(minutes: 10) : t;
     }
 
-    final twsTol = tolFor(tws), twdTol = tolFor(twd);
     final canvasPts = [for (final f in projected) toCanvas(f)];
-    final interval =
-        barbInterval ??
-        windBarbInterval(
-          points.last.time.difference(points.first.time),
-          targetCount: math.max(3, (width / 78).floor()),
-        );
+    final interval = _selectedWindBarbInterval(
+      windBarbInterval(
+        points.last.time.difference(points.first.time),
+        targetCount: math.max(3, (width / 20).floor()),
+      ),
+      barbInterval,
+    );
     final trackTolerance = tolFor([
       for (final p in points) GraphPoint(time: p.time, value: 0),
     ]);
-    var slot = points.first.time;
+    final averagedBarbs = sampleWindBarbs(
+      tws: tws,
+      twd: twd,
+      start: points.first.time,
+      end: points.last.time,
+      interval: interval,
+    );
     (double, double)? previousCanvas;
-    while (!slot.isAfter(points.last.time)) {
+    for (final barb in averagedBarbs) {
       var idx = 0;
       Duration? bestTrackDiff;
       for (var i = 0; i < points.length; i++) {
-        final diff = points[i].time.difference(slot).abs();
+        final diff = points[i].time.difference(barb.time).abs();
         if (bestTrackDiff == null || diff < bestTrackDiff) {
           idx = i;
           bestTrackDiff = diff;
         }
       }
       if (bestTrackDiff != null && bestTrackDiff <= trackTolerance) {
-        final t = points[idx].time;
-        final sp = nearestIn(tws, t, twsTol);
-        final dir = nearestIn(twd, t, twdTol);
         final here = canvasPts[idx];
         final sufficientlySeparate =
             previousCanvas == null ||
@@ -2078,25 +2375,12 @@ pw.Widget pdfTrackMap({
                   math.pow(here.$1 - previousCanvas.$1, 2) +
                       math.pow(here.$2 - previousCanvas.$2, 2),
                 ) >=
-                18;
-        if (sufficientlySeparate &&
-            sp != null &&
-            dir != null &&
-            sp.value >= 0 &&
-            dir.value.isFinite) {
-          windBarbs.add((
-            x: here.$1,
-            y: here.$2,
-            barb: WindBarbSample(
-              time: t,
-              speedKnots: sp.value,
-              directionDeg: (dir.value % 360 + 360) % 360,
-            ),
-          ));
+                10;
+        if (sufficientlySeparate) {
+          windBarbs.add((x: here.$1, y: here.$2, barb: barb));
           previousCanvas = here;
         }
       }
-      slot = slot.add(interval);
     }
   }
 
@@ -2181,6 +2465,154 @@ pw.Widget pdfTrackMap({
   );
 }
 
+pw.Widget pdfObservedPolarChart({
+  required PolarData polar,
+  required PdfFont font,
+  required double width,
+  double height = 245,
+}) {
+  final binCount = polar.twsEdges.length - 1;
+  if (binCount < 1) {
+    return pw.Text(
+      'Sin datos suficientes para construir la polar observada.',
+      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+    );
+  }
+
+  final totals = [
+    for (var w = 0; w < binCount; w++)
+      (
+        index: w,
+        count: [
+          for (var b = 0; b < polar.twaBands.length; b++)
+            if (polar.avgStw[b][w] != null) polar.counts[b][w],
+        ].fold<int>(0, (sum, count) => sum + count),
+      ),
+  ]..sort((a, b) => b.count.compareTo(a.count));
+  final selected = totals.where((entry) => entry.count > 0).take(5).toList()
+    ..sort((a, b) => a.index.compareTo(b.index));
+  if (selected.isEmpty) {
+    return pw.Text(
+      'Sin celdas con la permanencia mínima necesaria para dibujar una curva.',
+      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+    );
+  }
+
+  final values = <double>[];
+  for (final entry in selected) {
+    for (var b = 0; b < polar.twaBands.length; b++) {
+      final value = polar.avgStw[b][entry.index];
+      if (value != null) values.add(value);
+    }
+  }
+  final maxStw = math.max(1.0, values.reduce(math.max).ceilToDouble());
+  const colors = [pdfCyan, pdfGreen, pdfOrange, pdfPurple, pdfRed];
+
+  return pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.start,
+    children: [
+      pw.Container(
+        width: width,
+        height: height,
+        padding: const pw.EdgeInsets.all(4),
+        decoration: pw.BoxDecoration(
+          color: const PdfColor.fromInt(0xfff5fafb),
+          border: pw.Border.all(color: pdfGrid, width: 0.6),
+          borderRadius: pw.BorderRadius.circular(5),
+        ),
+        child: pw.CustomPaint(
+          size: PdfPoint(width - 8, height - 8),
+          painter: (canvas, size) {
+            final cx = size.x / 2;
+            final cy = size.y / 2;
+            final radius = math.min(size.x / 2 - 34, size.y / 2 - 17);
+
+            for (var ring = 1; ring <= 4; ring++) {
+              final r = radius * ring / 4;
+              canvas
+                ..setStrokeColor(pdfGrid)
+                ..setLineWidth(0.45)
+                ..drawEllipse(cx - r, cy - r, r * 2, r * 2)
+                ..strokePath()
+                ..setFillColor(pdfMuted)
+                ..drawString(
+                  font,
+                  6.5,
+                  (maxStw * ring / 4).toStringAsFixed(1),
+                  cx + 2,
+                  cy + r - 7,
+                );
+            }
+            canvas
+              ..setStrokeColor(pdfGrid)
+              ..setLineWidth(0.45)
+              ..moveTo(cx, cy - radius)
+              ..lineTo(cx, cy + radius)
+              ..moveTo(cx - radius, cy)
+              ..lineTo(cx + radius, cy)
+              ..strokePath()
+              ..setFillColor(pdfMuted)
+              ..drawString(font, 7, '0', cx + 4, cy + radius - 2)
+              ..drawString(font, 7, '90', cx + radius + 3, cy - 2)
+              ..drawString(font, 7, '180', cx + 4, cy - radius - 5);
+
+            void drawSide(int windBin, PdfColor color, double side) {
+              canvas
+                ..setStrokeColor(color)
+                ..setLineWidth(1.5);
+              var started = false;
+              for (var b = 0; b < polar.twaBands.length; b++) {
+                final speed = polar.avgStw[b][windBin];
+                if (speed == null) {
+                  if (started) canvas.strokePath();
+                  started = false;
+                  continue;
+                }
+                final band = polar.twaBands[b];
+                final angle = (band.loDeg + band.hiDeg) / 2 * math.pi / 180;
+                final r = speed / maxStw * radius;
+                final x = cx + side * math.sin(angle) * r;
+                final y = cy + math.cos(angle) * r;
+                if (started) {
+                  canvas.lineTo(x, y);
+                } else {
+                  canvas.moveTo(x, y);
+                  started = true;
+                }
+              }
+              if (started) canvas.strokePath();
+            }
+
+            for (var i = 0; i < selected.length; i++) {
+              drawSide(selected[i].index, colors[i], -1);
+              drawSide(selected[i].index, colors[i], 1);
+            }
+          },
+        ),
+      ),
+      pw.SizedBox(height: 5),
+      pw.Wrap(
+        spacing: 12,
+        runSpacing: 3,
+        children: [
+          for (var i = 0; i < selected.length; i++)
+            pw.Row(
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                pw.Container(width: 10, height: 3, color: colors[i]),
+                pw.SizedBox(width: 3),
+                pw.Text(
+                  '${polar.twsEdges[selected[i].index]}-${polar.twsEdges[selected[i].index + 1]} kt TWS',
+                  style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
+                ),
+              ],
+            ),
+        ],
+      ),
+    ],
+  );
+}
+
 pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
   final twsBinCount = polar.twsEdges.length - 1;
   if (twsBinCount < 1) {
@@ -2235,8 +2667,8 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
                 ),
                 child: pw.Text(
                   polar.avgStw[b][w] == null
-                      ? '--'
-                      : polar.avgStw[b][w]!.toStringAsFixed(1),
+                      ? '--\n(n=${polar.counts[b][w]})'
+                      : '${polar.avgStw[b][w]!.toStringAsFixed(1)}\n(n=${polar.counts[b][w]})',
                   textAlign: pw.TextAlign.center,
                   style: pw.TextStyle(
                     color: polar.avgStw[b][w] == null ? pdfMuted : color,

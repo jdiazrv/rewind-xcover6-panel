@@ -412,50 +412,55 @@ String formatWindBarbInterval(Duration interval) {
   return '${interval.inMinutes} min';
 }
 
-Duration _medianGraphStep(List<GraphPoint> points) {
-  if (points.length < 2) return const Duration(minutes: 1);
-  final gaps = <int>[];
-  for (var i = 1; i < points.length; i++) {
-    final ms = points[i].time.difference(points[i - 1].time).inMilliseconds;
-    if (ms > 0) gaps.add(ms);
+double? _centeredWindMean(List<GraphPoint> points, DateTime slot) {
+  const halfWindow = Duration(minutes: 3);
+  final from = slot.subtract(halfWindow);
+  final to = slot.add(halfWindow);
+  var sum = 0.0;
+  var count = 0;
+  var hasBefore = false;
+  var hasAfter = false;
+  for (final point in points) {
+    if (point.time.isBefore(from) || point.time.isAfter(to)) continue;
+    if (!point.value.isFinite || point.value < 0) continue;
+    sum += point.value;
+    count++;
+    if (point.time.isBefore(slot)) hasBefore = true;
+    if (point.time.isAfter(slot)) hasAfter = true;
   }
-  if (gaps.isEmpty) return const Duration(minutes: 1);
-  gaps.sort();
-  return Duration(milliseconds: gaps[gaps.length ~/ 2]);
+  return count > 0 && hasBefore && hasAfter ? sum / count : null;
 }
 
-GraphPoint? _nearestGraphPoint(
-  List<GraphPoint> points,
-  DateTime time,
-  Duration tolerance,
-) {
-  if (points.isEmpty) return null;
-  var lo = 0, hi = points.length;
-  final target = time.millisecondsSinceEpoch;
-  while (lo < hi) {
-    final mid = (lo + hi) >> 1;
-    if (points[mid].time.millisecondsSinceEpoch < target) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
+double? _centeredWindDirection(List<GraphPoint> points, DateTime slot) {
+  const halfWindow = Duration(minutes: 3);
+  final from = slot.subtract(halfWindow);
+  final to = slot.add(halfWindow);
+  var sinSum = 0.0;
+  var cosSum = 0.0;
+  var count = 0;
+  var hasBefore = false;
+  var hasAfter = false;
+  for (final point in points) {
+    if (point.time.isBefore(from) || point.time.isAfter(to)) continue;
+    if (!point.value.isFinite) continue;
+    final radians = point.value * math.pi / 180;
+    sinSum += math.sin(radians);
+    cosSum += math.cos(radians);
+    count++;
+    if (point.time.isBefore(slot)) hasBefore = true;
+    if (point.time.isAfter(slot)) hasAfter = true;
   }
-  GraphPoint? best;
-  var bestMs = tolerance.inMilliseconds + 1;
-  for (final i in [lo - 1, lo]) {
-    if (i < 0 || i >= points.length) continue;
-    final delta = (points[i].time.millisecondsSinceEpoch - target).abs();
-    if (delta <= tolerance.inMilliseconds && delta < bestMs) {
-      best = points[i];
-      bestMs = delta;
-    }
-  }
-  return best;
+  if (count == 0 || !hasBefore || !hasAfter) return null;
+  // An almost-zero resultant means the directions cancel out and there is no
+  // honest representative direction for this six-minute window.
+  if (math.sqrt(sinSum * sinSum + cosSum * cosSum) / count < 0.05) return null;
+  return (math.atan2(sinSum, cosSum) * 180 / math.pi + 360) % 360;
 }
 
 /// Samples independent TWS and TWD histories on stable clock boundaries.
-/// The tolerance follows the real source cadence, so a long data outage stays
-/// visibly empty instead of being filled with a distant value.
+/// Each barb represents a centred six-minute window (three minutes before and
+/// after), rather than one potentially noisy instantaneous sample. Direction
+/// uses a circular mean so north-crossing values do not average to south.
 List<WindBarbSample> sampleWindBarbs({
   required List<GraphPoint> tws,
   required List<GraphPoint> twd,
@@ -464,37 +469,16 @@ List<WindBarbSample> sampleWindBarbs({
   required Duration interval,
 }) {
   if (tws.isEmpty || twd.isEmpty || !end.isAfter(start)) return const [];
-  final twsStep = _medianGraphStep(tws);
-  final twdStep = _medianGraphStep(twd);
-  final sourceStep = twsStep.inMilliseconds >= twdStep.inMilliseconds
-      ? twsStep
-      : twdStep;
-  final sourceTolerance = Duration(
-    milliseconds: math.max(30000, (sourceStep.inMilliseconds * 2.5).round()),
-  );
-  final slotTolerance = Duration(
-    milliseconds: (interval.inMilliseconds * 0.45).round(),
-  );
-  final tolerance = sourceTolerance < slotTolerance
-      ? sourceTolerance
-      : slotTolerance;
   final stepMs = interval.inMilliseconds;
   var slotMs = ((start.millisecondsSinceEpoch + stepMs - 1) ~/ stepMs) * stepMs;
   final out = <WindBarbSample>[];
   while (slotMs <= end.millisecondsSinceEpoch) {
     final slot = DateTime.fromMillisecondsSinceEpoch(slotMs, isUtc: true);
-    final speed = _nearestGraphPoint(tws, slot, tolerance);
-    final direction = _nearestGraphPoint(twd, slot, tolerance);
-    if (speed != null &&
-        direction != null &&
-        speed.value >= 0 &&
-        direction.value.isFinite) {
+    final speed = _centeredWindMean(tws, slot);
+    final direction = _centeredWindDirection(twd, slot);
+    if (speed != null && direction != null) {
       out.add(
-        WindBarbSample(
-          time: slot,
-          speedKnots: speed.value,
-          directionDeg: (direction.value % 360 + 360) % 360,
-        ),
+        WindBarbSample(time: slot, speedKnots: speed, directionDeg: direction),
       );
     }
     slotMs += stepMs;
@@ -547,6 +531,13 @@ const mPressure = MetricDef(
 const mOutdoorTemp = MetricDef(
   'environment.outside.temperature',
   'T. exterior',
+  'C',
+  offset: -273.15,
+  color: cCyan,
+);
+const mIndoorTemp = MetricDef(
+  'environment.interior.temperature',
+  'T. interior',
   'C',
   offset: -273.15,
   color: cCyan,
@@ -900,6 +891,12 @@ class SignalKModel {
   // calculation (whatever plugin/core feature is computing the route) —
   // we don't derive this ourselves, unlike VMG-to-wind below.
   double? courseVmgKn;
+  // Distancia y demora al waypoint activo, de la misma API de rumbo de
+  // Signal K que publica el VMG de arriba. Aparecen cuando el plóter tiene
+  // un GOTO y desaparecen al cancelarlo. Son lo que permite calcular el
+  // tiempo real de una travesía de ceñida (ver computeLegEstimate).
+  double? courseDistanceNm;
+  double? courseBearingTrueDeg;
   // Environment
   double? depthM;
   // Dedicated, not the shared navUpdate — depth arrives through a
@@ -1090,6 +1087,8 @@ class SignalKModel {
     gnssFixType = null;
     gnssMethodQuality = null;
     courseVmgKn = null;
+    courseDistanceNm = null;
+    courseBearingTrueDeg = null;
     depthM = null;
     depthMUpdate = null;
     waterTempK = null;
@@ -2091,10 +2090,13 @@ DemoScenario demoScenarioById(String id) => kDemoScenarios.firstWhere(
 /// caído y el mensaje culpaba a la contraseña).
 enum SkLoginOutcome {
   ok,
+
   /// El servidor contestó y rechazó las credenciales.
   badCredentials,
+
   /// No se pudo hablar con el servidor: apagado, fuera de la red, timeout.
   unreachable,
+
   /// Contestó, pero con algo que no es ni 200 ni un rechazo de credenciales.
   serverError,
 }
@@ -3116,9 +3118,9 @@ class SettingsModel {
   // discrete DM1 fault with no numeric equivalent, so no threshold to
   // configure, just the sound. Also not user-toggleable off.
   bool alarmEngineGlowPlugSound = true;
-  // "Simple" (current design: RPM + status + 5 lamps) vs "Completo" (adds
-  // numeric gauges for temp/oil/volt with their data source — DM1 or
-  // threshold — plus an undecoded-PGN diagnostics line) — see CFG >
+  // "Simple" (RPM + status + lamps) vs "Completo" (adds numeric gauges for
+  // refrigerante and voltage with their honest source; oil remains a
+  // discrete lamp because this MDI has no pressure sensor) — see CFG >
   // Sensores and PremiumMotorEnginePanel's `detailed` param. Ignored
   // (Motor screen never even joins the NAV swipe cycle) when
   // motorPanelEnabled is false.
@@ -3223,6 +3225,36 @@ class SettingsModel {
   // off by default since not everyone fondeando wants a battery readout
   // competing for space with viento/profundidad. Reported live 2026-09-06.
   bool anchorShowElectrical = false;
+  /// Polar activa: id del catálogo empotrado, 'custom' para una tabla
+  /// importada, o vacío para no usar ninguna. Ver lib/polars.dart.
+  String polarBoatId = '';
+
+  /// Qué porcentaje de la polar se toma como objetivo realista. El 100 %
+  /// es el barco del certificado — fondo limpio, velas nuevas, tripulación
+  /// completa — que no es el de nadie. Escala la VELOCIDAD, nunca los
+  /// ángulos.
+  double polarFactorPercent = 100;
+
+  /// Tabla importada por el usuario, serializada. Manda sobre el catálogo
+  /// cuando polarBoatId vale 'custom'.
+  String? polarCustomJson;
+
+  /// Lo anterior, guardado por servidor: el mismo APK sirve a varios
+  /// barcos y cada uno tiene su polar. Mismo patrón que sensorConfig.
+  Map<String, dynamic> polarConfigJsonByHost = {};
+
+  Map<String, dynamic> polarConfigToJson() => {
+    'boatId': polarBoatId,
+    'factor': polarFactorPercent,
+    if (polarCustomJson != null) 'custom': polarCustomJson,
+  };
+
+  void polarConfigFromJson(Map<String, dynamic> j) {
+    polarBoatId = j['boatId'] as String? ?? '';
+    polarFactorPercent = (j['factor'] as num?)?.toDouble() ?? 100;
+    polarCustomJson = j['custom'] as String?;
+  }
+
   bool demoMode = false;
 
   /// Escenario del DEMO: 'anchored' (fondeado en una cala) o 'sailing'

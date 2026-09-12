@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:latlong2/latlong.dart' as ll;
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
@@ -638,9 +640,58 @@ void showAisTargetDetail(
   double? tcpaMin,
   String? crossing,
 }) {
-  final t = target;
-  final hasMeaningfulCpa = tcpaMin != null && tcpaMin <= 30 && crossing != null;
-  Widget row(String k, String v) => Padding(
+  showDialog<void>(
+    context: context,
+    builder: (_) => _AisTargetDetailDialog(
+      target: target,
+      distNm: distNm,
+      bearingDeg: bearingDeg,
+      cpaNm: cpaNm,
+      tcpaMin: tcpaMin,
+      crossing: crossing,
+    ),
+  );
+}
+
+class _AisTargetDetailDialog extends StatefulWidget {
+  const _AisTargetDetailDialog({
+    required this.target,
+    required this.distNm,
+    required this.bearingDeg,
+    this.cpaNm,
+    this.tcpaMin,
+    this.crossing,
+  });
+
+  final AisTarget target;
+  final double distNm;
+  final double bearingDeg;
+  final double? cpaNm;
+  final double? tcpaMin;
+  final String? crossing;
+
+  @override
+  State<_AisTargetDetailDialog> createState() => _AisTargetDetailDialogState();
+}
+
+class _AisTargetDetailDialogState extends State<_AisTargetDetailDialog> {
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Widget _row(String k, String v) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 3),
     child: Row(
       children: [
@@ -661,119 +712,226 @@ void showAisTargetDetail(
       ],
     ),
   );
-  showDialog<void>(
-    context: context,
-    // `t` is the same mutable AisTarget kept in the target map — its fields
-    // (position, COG, SOG...) keep updating live as new AIS data arrives,
-    // even while this dialog is open. Without a refresh, a target tapped
-    // right after it first appeared (before all its fields had arrived)
-    // stayed frozen showing "--" until the dialog was closed and reopened.
-    // Refreshing here every 2s means it fills in / corrects on its own.
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setSt) {
-        Timer(const Duration(seconds: 2), () {
-          if (ctx.mounted) setSt(() {});
-        });
-        return AlertDialog(
-          backgroundColor: cPanel,
-          title: Text(
-            t.name ?? 'Sin nombre',
-            style: const TextStyle(color: cText),
-          ),
-          content: SizedBox(
-            width: 320,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (t.mmsi != null) AisTargetPhoto(mmsi: t.mmsi!),
-                row('MMSI', t.mmsi ?? '--'),
-                row(
-                  'Posición',
-                  t.lat != null && t.lon != null
-                      ? '${t.lat!.toStringAsFixed(4)}, ${t.lon!.toStringAsFixed(4)}'
-                      : '--',
-                ),
-                row(
-                  'Rumbo (COG)',
-                  t.cogDeg != null ? '${t.cogDeg!.round()}°' : '--',
-                ),
-                row(
-                  'Velocidad (SOG)',
-                  t.sogKn != null ? '${t.sogKn!.toStringAsFixed(1)} kt' : '--',
-                ),
-                row(
-                  'Distancia',
-                  '${distNm.toStringAsFixed(2)} nm · ${bearingDeg.round()}°',
-                ),
-                row(
-                  'CPA',
-                  cpaNm != null ? '${cpaNm.toStringAsFixed(2)} nm' : '--',
-                ),
-                row(
-                  'TCPA',
-                  tcpaMin != null ? '${tcpaMin.toStringAsFixed(0)} min' : '--',
-                ),
-                if (hasMeaningfulCpa) row('Cruce', crossing),
-                row(
-                  'Actualizado',
-                  t.lastUpdate != null
-                      ? 'hace ${DateTime.now().difference(t.lastUpdate!).inSeconds}s'
-                      : '--',
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cerrar'),
-            ),
-          ],
-        );
-      },
-    ),
-  );
-}
-
-/// Vessel photo by MMSI via MarineTraffic's public (unauthenticated) photo
-/// lookup — the same URL pattern several open-source AIS plotters (e.g.
-/// OpenCPN's AIS plugin) use for a "show target photo" button. Not every
-/// MMSI has a submitted photo, so failures are just hidden rather than
-/// shown as an error.
-class AisTargetPhoto extends StatelessWidget {
-  const AisTargetPhoto({super.key, required this.mmsi});
-  final String mmsi;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          'https://photos.marinetraffic.com/ais/showphoto.aspx?mmsi=$mmsi',
-          height: 140,
-          width: double.infinity,
-          fit: BoxFit.cover,
-          loadingBuilder: (context, child, progress) {
-            if (progress == null) return child;
-            return const SizedBox(
-              height: 140,
-              child: Center(
-                child: SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+    final t = widget.target;
+    final hasMeaningfulCpa =
+        widget.tcpaMin != null &&
+        widget.tcpaMin! <= 30 &&
+        widget.crossing != null;
+    return AlertDialog(
+      backgroundColor: cPanel,
+      title: Text(t.name ?? 'Sin nombre', style: const TextStyle(color: cText)),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (t.mmsi != null) _WikidataVesselPhoto(mmsi: t.mmsi!),
+            _row('MMSI', t.mmsi ?? '--'),
+            _row(
+              'Posición',
+              t.lat != null && t.lon != null
+                  ? '${t.lat!.toStringAsFixed(4)}, ${t.lon!.toStringAsFixed(4)}'
+                  : '--',
+            ),
+            _row(
+              'Rumbo (COG)',
+              t.cogDeg != null ? '${t.cogDeg!.round()}°' : '--',
+            ),
+            _row(
+              'Velocidad (SOG)',
+              t.sogKn != null ? '${t.sogKn!.toStringAsFixed(1)} kt' : '--',
+            ),
+            _row(
+              'Distancia',
+              '${widget.distNm.toStringAsFixed(2)} nm · ${widget.bearingDeg.round()}°',
+            ),
+            _row(
+              'CPA',
+              widget.cpaNm != null
+                  ? '${widget.cpaNm!.toStringAsFixed(2)} nm'
+                  : '--',
+            ),
+            _row(
+              'TCPA',
+              widget.tcpaMin != null
+                  ? '${widget.tcpaMin!.toStringAsFixed(0)} min'
+                  : '--',
+            ),
+            if (hasMeaningfulCpa) _row('Cruce', widget.crossing!),
+            _row(
+              'Actualizado',
+              t.lastUpdate != null
+                  ? 'hace ${DateTime.now().difference(t.lastUpdate!).inSeconds}s'
+                  : '--',
+            ),
+          ],
         ),
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cerrar'),
+        ),
+      ],
     );
   }
+}
+
+/// Best-effort vessel image keyed by MMSI. Wikidata exposes MMSI as P587 and
+/// the representative Wikimedia Commons image as P18, so this does not rely
+/// on scraping commercial sites or an undocumented image endpoint. It is
+/// queried only after the user opens a target detail dialog.
+class _WikidataVesselPhoto extends StatefulWidget {
+  const _WikidataVesselPhoto({required this.mmsi});
+
+  final String mmsi;
+
+  @override
+  State<_WikidataVesselPhoto> createState() => _WikidataVesselPhotoState();
+}
+
+class _WikidataVesselPhotoState extends State<_WikidataVesselPhoto> {
+  static final Map<String, ({String url, String label})?> _cache = {};
+  late final Future<({String url, String label})?> _photo = _load();
+
+  Future<({String url, String label})?> _load() async {
+    if (_cache.containsKey(widget.mmsi)) return _cache[widget.mmsi];
+    if (!RegExp(r'^\d{8,9}$').hasMatch(widget.mmsi)) {
+      return _cache[widget.mmsi] = null;
+    }
+    final query =
+        '''
+SELECT ?itemLabel ?image WHERE {
+  ?item wdt:P587 "${widget.mmsi}" .
+  ?item wdt:P18 ?image .
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "es,en". }
+} LIMIT 1
+''';
+    try {
+      final uri = Uri.https('query.wikidata.org', '/sparql', {
+        'query': query,
+        'format': 'json',
+      });
+      final response = await http
+          .get(
+            uri,
+            headers: const {
+              'Accept': 'application/sparql-results+json',
+              'User-Agent': 'REWIND-panel/1.0 (AIS vessel photo)',
+            },
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return await _loadCommonsSearch();
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final bindings =
+          ((decoded['results'] as Map?)?['bindings'] as List?) ?? const [];
+      if (bindings.isEmpty) return await _loadCommonsSearch();
+      final first = bindings.first as Map;
+      final rawUrl = ((first['image'] as Map?)?['value'])?.toString();
+      if (rawUrl == null || rawUrl.isEmpty) {
+        return await _loadCommonsSearch();
+      }
+      final result = (
+        // Special:FilePath accepts a width hint and redirects to a Commons
+        // thumbnail; avoid downloading a multi-megabyte original over the
+        // boat's network for a 140 px-high dialog image.
+        url: '${rawUrl.replaceFirst('http://', 'https://')}?width=800',
+        label:
+            ((first['itemLabel'] as Map?)?['value'])?.toString() ?? 'Buque AIS',
+      );
+      _cache[widget.mmsi] = result;
+      return result;
+    } catch (_) {
+      return _loadCommonsSearch();
+    }
+  }
+
+  Future<({String url, String label})?> _loadCommonsSearch() async {
+    try {
+      final uri = Uri.https('commons.wikimedia.org', '/w/api.php', {
+        'action': 'query',
+        'generator': 'search',
+        'gsrsearch': '"MMSI ${widget.mmsi}"',
+        'gsrnamespace': '6',
+        'gsrlimit': '1',
+        'prop': 'imageinfo',
+        'iiprop': 'url',
+        'iiurlwidth': '800',
+        'format': 'json',
+      });
+      final response = await http
+          .get(
+            uri,
+            headers: const {
+              'User-Agent': 'REWIND-panel/1.0 (AIS vessel photo)',
+            },
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return _cache[widget.mmsi] = null;
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final pages = ((decoded['query'] as Map?)?['pages'] as Map?);
+      if (pages == null || pages.isEmpty) return _cache[widget.mmsi] = null;
+      final page = pages.values.first as Map;
+      final imageInfo = page['imageinfo'] as List?;
+      if (imageInfo == null || imageInfo.isEmpty) {
+        return _cache[widget.mmsi] = null;
+      }
+      final info = imageInfo.first as Map;
+      final thumbUrl = info['thumburl']?.toString();
+      if (thumbUrl == null || thumbUrl.isEmpty) {
+        return _cache[widget.mmsi] = null;
+      }
+      final result = (
+        url: thumbUrl,
+        label:
+            page['title']?.toString().replaceFirst(RegExp(r'^File:'), '') ??
+            'Buque AIS',
+      );
+      _cache[widget.mmsi] = result;
+      return result;
+    } catch (_) {
+      return _cache[widget.mmsi] = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      FutureBuilder<({String url, String label})?>(
+        future: _photo,
+        builder: (context, snapshot) {
+          final photo = snapshot.data;
+          if (photo == null) return const SizedBox.shrink();
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    photo.url,
+                    height: 140,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${photo.label} · Wikimedia Commons',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: cMuted, fontSize: 9),
+                ),
+              ],
+            ),
+          );
+        },
+      );
 }
 
 class AisRelativeView extends StatefulWidget {
@@ -958,6 +1116,8 @@ class _AisRelativeViewState extends State<AisRelativeView>
           final ownHeading =
               widget.ownHeadingDeg ??
               (cogFallbackActive ? widget.ownCogDeg! : 0);
+          final headingReferenceAvailable = hasHeading || cogFallbackActive;
+          final effectiveHeadingUp = _headingUp && headingReferenceAvailable;
           final allPlots = _computeAisPlots(
             widget.targets.values.toList(),
             widget.ownLat,
@@ -967,13 +1127,13 @@ class _AisRelativeViewState extends State<AisRelativeView>
             widget.ownSogKn,
             size,
             rangeNm,
-            headingUp: _headingUp,
+            headingUp: effectiveHeadingUp,
             showTrail: _showTrail,
             relativeMotion: _relativeMotion,
             vectorMinutes: _vectorMinutes,
           );
           final plots = _applyQuickFilters(allPlots);
-          final viewRotDeg = _headingUp ? ownHeading : 0.0;
+          final viewRotDeg = effectiveHeadingUp ? ownHeading : 0.0;
           final ownScreenHeadingDeg = normalize360(ownHeading - viewRotDeg);
           final northScreenAngleDeg = normalize360(0 - viewRotDeg);
           final maxR = size.shortestSide / 2 - 24;
@@ -1062,12 +1222,16 @@ class _AisRelativeViewState extends State<AisRelativeView>
                     if (!_showList) ...[
                       const SizedBox(height: 10),
                       _pillChip(
-                        _headingUp
+                        !headingReferenceAvailable
+                            ? 'NORTE ARRIBA · SIN HDG'
+                            : _headingUp
                             ? (cogFallbackActive
                                   ? 'COG ARRIBA'
                                   : 'RUMBO ARRIBA')
                             : 'NORTE ARRIBA',
-                        () => setState(() => _headingUp = !_headingUp),
+                        headingReferenceAvailable
+                            ? () => setState(() => _headingUp = !_headingUp)
+                            : () {},
                       ),
                       const SizedBox(height: 8),
                       _pillChip(
@@ -1653,9 +1817,9 @@ class _AisRelativeViewState extends State<AisRelativeView>
                                     const SizedBox(width: 6),
                                     Expanded(
                                       child: Text(
-                                        p.target.name ?? p.target.mmsi ?? '?',
-                                        style: const TextStyle(
-                                          color: cText,
+                                        '${p.stale ? "OBSOLETO · " : ""}${p.target.name ?? p.target.mmsi ?? "?"}',
+                                        style: TextStyle(
+                                          color: p.stale ? cMagenta : cText,
                                           fontWeight: FontWeight.w600,
                                           fontSize: 13,
                                         ),

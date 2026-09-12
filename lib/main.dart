@@ -46,7 +46,9 @@ import 'models.dart';
 import 'performance_report.dart';
 import 'theme.dart';
 import 'widgets/anchor_native_view.dart';
+import 'polars.dart';
 import 'widgets/motor_premium_panel.dart';
+import 'widgets/polar_panel.dart';
 import 'widgets/ship_icon_picker.dart';
 import 'widgets/wind_premium_panel.dart';
 
@@ -1855,17 +1857,18 @@ class _DashboardState extends State<Dashboard> {
         muted: _mutedAlarms.contains(key),
       ));
     }
-    final voltV =
-        _freshEngine(
-          signalK.engineAlternatorV,
-          signalK.engineAlternatorVUpdate,
-          staleAfter: _engineSlowStaleAfter,
-        ) ??
-        _freshEngine(
-          signalK.engineSupplyV,
-          signalK.engineSupplyVUpdate,
-          staleAfter: _engineSlowStaleAfter,
-        );
+    final alternatorV = _freshEngine(
+      signalK.engineAlternatorV,
+      signalK.engineAlternatorVUpdate,
+      staleAfter: _engineSlowStaleAfter,
+    );
+    final mdiSupplyV = _freshEngine(
+      signalK.engineSupplyV,
+      signalK.engineSupplyVUpdate,
+      staleAfter: _engineSlowStaleAfter,
+    );
+    final voltV = alternatorV ?? mdiSupplyV;
+    final supplyOnly = alternatorV == null && mdiSupplyV != null;
     final freshLowVoltAlarm = _freshEngineFlag(
       signalK.engineLowVoltAlarm,
       signalK.engineLowVoltAlarmUpdate,
@@ -1880,7 +1883,9 @@ class _DashboardState extends State<Dashboard> {
       out.add((
         key: key,
         label: voltV == null
-            ? 'Motor: alternador sin cargar'
+            ? 'Motor: tensión baja'
+            : supplyOnly
+            ? 'Motor: alimentación MDI baja — ${voltV.toStringAsFixed(1)} V'
             : 'Motor: alternador sin cargar — ${voltV.toStringAsFixed(1)} V',
         sound: settings.alarmEngineVoltSound,
         muted: _mutedAlarms.contains(key),
@@ -2572,6 +2577,7 @@ class _DashboardState extends State<Dashboard> {
   Future<void> _boot() async {
     unawaited(_loadPackageInfo());
     await _loadSettings();
+    unawaited(_loadPolarCatalogue());
     // The first build() can run (and lazily create the CFG field
     // controllers, see _settingsPage) before this async load finishes —
     // refresh them now so they don't get stuck showing pre-load defaults.
@@ -3043,7 +3049,24 @@ class _DashboardState extends State<Dashboard> {
         /* keep empty if corrupted */
       }
     }
+    final polarByHostJson = prefs.getString('polarConfigByHostJson');
+    if (polarByHostJson != null) {
+      try {
+        settings.polarConfigJsonByHost =
+            (jsonDecode(polarByHostJson) as Map).cast<String, dynamic>();
+      } catch (_) {
+        /* keep empty if corrupted */
+      }
+    }
     final hostKey = _serverConfigKey;
+    final polarByHost = settings.polarConfigJsonByHost[hostKey];
+    if (polarByHost is Map) {
+      try {
+        settings.polarConfigFromJson(polarByHost.cast<String, dynamic>());
+      } catch (_) {
+        /* keep defaults if corrupted */
+      }
+    }
     final byHost = settings.sensorConfigJsonByHost[hostKey];
     if (byHost != null) {
       try {
@@ -3260,6 +3283,13 @@ class _DashboardState extends State<Dashboard> {
     await prefs.setString(
       'sensorConfigByHostJson',
       jsonEncode(settings.sensorConfigJsonByHost),
+    );
+    // La polar también es de cada barco, no del dispositivo.
+    settings.polarConfigJsonByHost[_serverConfigKey] = settings
+        .polarConfigToJson();
+    await prefs.setString(
+      'polarConfigByHostJson',
+      jsonEncode(settings.polarConfigJsonByHost),
     );
     await prefs.setString(
       'savedServers',
@@ -3744,6 +3774,7 @@ class _DashboardState extends State<Dashboard> {
         .toJson();
     settings.anchorConfigJsonByHost[outgoingKey] = settings.anchorConfig
         .toJson();
+    settings.polarConfigJsonByHost[outgoingKey] = settings.polarConfigToJson();
     settings.host = s.host;
     settings.port = s.port;
     settings.skUsername = s.skUsername;
@@ -3755,6 +3786,14 @@ class _DashboardState extends State<Dashboard> {
     // be treated as separate boats. Confirmed explicit request 2026-09-02.
     _currentServerConfigKey = s.name;
     final hostKey = _serverConfigKey;
+    final savedPolar = settings.polarConfigJsonByHost[hostKey];
+    if (savedPolar is Map) {
+      settings.polarConfigFromJson(savedPolar.cast<String, dynamic>());
+    } else {
+      settings.polarBoatId = '';
+      settings.polarFactorPercent = 100;
+      settings.polarCustomJson = null;
+    }
     final savedSensor = settings.sensorConfigJsonByHost[hostKey];
     settings.sensorConfig = savedSensor != null
         ? SensorConfig.fromJson(savedSensor)
@@ -4054,6 +4093,8 @@ class _DashboardState extends State<Dashboard> {
       'navigation.gnss.type',
       'navigation.gnss.methodQuality',
       'navigation.course.calcValues.velocityMadeGood',
+      'navigation.course.calcValues.distance',
+      'navigation.course.calcValues.bearingTrue',
       'environment.wind.speedApparent',
       'environment.wind.angleApparent',
       'environment.wind.angleTrueWater',
@@ -4514,6 +4555,17 @@ class _DashboardState extends State<Dashboard> {
         signalK.courseVmgKn = n == null ? null : n * 1.94384;
         signalK.courseUpdate = ts;
         return true;
+      case 'navigation.course.calcValues.distance':
+        // Signal K la publica en metros.
+        signalK.courseDistanceNm = n == null ? null : n / 1852.0;
+        signalK.courseUpdate = ts;
+        return true;
+      case 'navigation.course.calcValues.bearingTrue':
+        signalK.courseBearingTrueDeg = n == null
+            ? null
+            : normalize360(n * 180 / math.pi);
+        signalK.courseUpdate = ts;
+        return true;
       case 'navigation.attitude':
         if (settings.usePhoneHeel) return true;
         if (value is Map) {
@@ -4743,6 +4795,41 @@ class _DashboardState extends State<Dashboard> {
       _stopDemoMode();
       _connectSignalK();
     }
+  }
+
+  // Catálogo de polares empotrado (assets/polars/orc_polars.json), leído
+  // una vez. Son certificados ORC reales de 18 barcos; ver lib/polars.dart.
+  List<PolarTable> _polarCatalogue = const [];
+
+  Future<void> _loadPolarCatalogue() async {
+    try {
+      final raw = await rootBundle.loadString('assets/polars/orc_polars.json');
+      if (!mounted) return;
+      setState(() => _polarCatalogue = PolarTable.listFromAsset(raw));
+    } catch (_) {
+      /* sin catálogo la app funciona igual, solo sin página POLAR */
+    }
+  }
+
+  /// La polar en uso para ESTE servidor, o null si no hay ninguna elegida.
+  PolarTable? get _activePolar {
+    final id = settings.polarBoatId;
+    if (id.isEmpty) return null;
+    if (id == 'custom') {
+      final raw = settings.polarCustomJson;
+      if (raw == null) return null;
+      try {
+        return PolarTable.fromJson(
+          jsonDecode(raw) as Map<String, dynamic>,
+        );
+      } catch (_) {
+        return null;
+      }
+    }
+    for (final p in _polarCatalogue) {
+      if (p.id == id) return p;
+    }
+    return null;
   }
 
   DemoScenario get _demoScenario => demoScenarioById(settings.demoScenario);
@@ -5449,8 +5536,7 @@ class _DashboardState extends State<Dashboard> {
   // just check the username/password fields weren't empty, never that
   // they actually worked, so a typo could arm the watch locally while the
   // real Signal K publish silently failed from then on.
-  Future<bool> _loginToSignalK() async =>
-      (await _loginToSignalKResult()).ok;
+  Future<bool> _loginToSignalK() async => (await _loginToSignalKResult()).ok;
 
   /// Igual que [_loginToSignalK] pero diciendo POR QUÉ falló, para que ANC
   /// pueda distinguir "contraseña mala" de "el Pi no está" en vez de
@@ -6401,6 +6487,33 @@ class _DashboardState extends State<Dashboard> {
                       ),
                     ),
                   ),
+                if (settings.demoMode)
+                  Positioned(
+                    right: 10,
+                    bottom: 8,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: cOrange.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: cOrange),
+                        ),
+                        child: const Text(
+                          'DATOS SIMULADOS',
+                          style: TextStyle(
+                            color: cOrange,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -6410,10 +6523,12 @@ class _DashboardState extends State<Dashboard> {
     if (!useNight) return scaffold;
     return ColorFiltered(
       colorFilter: const ColorFilter.matrix([
-        //  R  G  B  A  +
-        1, 0, 0, 0, 0, // R → keep
-        0, 0, 0, 0, 0, // G → zero
-        0, 0, 0, 0, 0, // B → zero
+        // Warm-red night adaptation preserving luminance from all source
+        // colours. The old R-only matrix made green/cyan status lamps almost
+        // black and could hide a valid state.
+        .55, .85, .30, 0, 0,
+        .035, .055, .02, 0, 0,
+        .01, .01, .005, 0, 0,
         0, 0, 0, 1, 0, // A → keep
       ]),
       child: scaffold,
@@ -6487,6 +6602,229 @@ class _DashboardState extends State<Dashboard> {
     });
   }
 
+  /// Página POLAR del carrusel de VNT. Ver lib/widgets/polar_panel.dart:
+  /// la regla es enseñar el intercambio, nunca dar una orden.
+  /// CFG → Sensores → Polar del barco.
+  ///
+  /// Se guarda por servidor (ver polarConfigJsonByHost): el mismo APK
+  /// sirve a varios barcos y cada uno tiene la suya.
+  Widget _polarSettingsGroup(StateSetter setSt) {
+    final active = _activePolar;
+    final custom = settings.polarCustomJson != null;
+    return SettingsGroup(
+      title: 'POLAR DEL BARCO',
+      icon: Icons.speed_outlined,
+      children: [
+        const Text(
+          'Con una polar elegida aparece una página POLAR en VNT: qué '
+          'debería dar el barco con este viento, y —si el plóter tiene un '
+          'destino— las millas y el tiempo reales contando los bordos.',
+          style: TextStyle(color: cMuted, fontSize: 12, height: 1.4),
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<String>(
+          initialValue: settings.polarBoatId.isEmpty
+              ? ''
+              : settings.polarBoatId,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Barco',
+            isDense: true,
+          ),
+          items: [
+            const DropdownMenuItem(value: '', child: Text('Ninguna')),
+            if (custom)
+              const DropdownMenuItem(
+                value: 'custom',
+                child: Text('Importada de fichero'),
+              ),
+            for (final p in _polarCatalogue)
+              DropdownMenuItem(
+                value: p.id,
+                child: Text(
+                  '${p.name}${p.loa == null ? '' : '  ·  ${p.loa!.toStringAsFixed(1)} m'}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          onChanged: (v) {
+            setSt(() => settings.polarBoatId = v ?? '');
+            setState(() {});
+            unawaited(_saveSettings());
+          },
+        ),
+        if (active?.ref != null) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Certificado ORC ${active!.ref}'
+            '${active.year == null ? '' : ' · ${active.year}'}. Es la medida '
+            'de UN barco concreto de ese modelo, no una verdad del modelo.',
+            style: const TextStyle(color: cMuted, fontSize: 11, height: 1.35),
+          ),
+        ],
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            const Text(
+              'Rendimiento',
+              style: TextStyle(color: cText, fontSize: 14),
+            ),
+            const Spacer(),
+            Text(
+              '${settings.polarFactorPercent.round()} %',
+              style: const TextStyle(
+                color: cCyan,
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        Slider(
+          value: settings.polarFactorPercent.clamp(60, 105),
+          min: 60,
+          max: 105,
+          divisions: 45,
+          label: '${settings.polarFactorPercent.round()} %',
+          onChanged: (v) {
+            setSt(() => settings.polarFactorPercent = v.roundToDouble());
+            setState(() {});
+          },
+          onChangeEnd: (_) => unawaited(_saveSettings()),
+        ),
+        const Text(
+          'El 100 % es el barco del certificado: fondo limpio, velas nuevas '
+          'y tripulación completa, que no es el de nadie. En crucero suele '
+          'quedarse entre el 80 y el 90 %. Escala la velocidad objetivo, '
+          'nunca los ángulos: la suciedad quita nudos, no cambia el ángulo '
+          'de ceñida.',
+          style: TextStyle(color: cMuted, fontSize: 11, height: 1.4),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.content_paste, size: 17),
+            label: const Text('Pegar una polar propia'),
+            onPressed: () => _importPolarText(setSt),
+          ),
+        ),
+        const Text(
+          'Se pega el contenido de un .pol o .csv: primera fila con las '
+          'velocidades de viento y una fila por ángulo. Si tienes la polar '
+          'medida de tu barco, siempre irá mejor que la del certificado.',
+          style: TextStyle(color: cMuted, fontSize: 11, height: 1.4),
+        ),
+      ],
+    );
+  }
+
+  /// Importar pegando el texto en vez de con un selector de ficheros: no
+  /// añade dependencia ninguna y funciona igual en la webapp, donde un
+  /// selector nativo no existe.
+  Future<void> _importPolarText(StateSetter setSt) async {
+    final ctrl = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cPanel,
+        title: const Text('Pegar polar'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Primera fila: las velocidades de viento. Después, una fila '
+                'por ángulo. Separado por tabuladores, comas o punto y coma.',
+                style: TextStyle(color: cMuted, fontSize: 12, height: 1.35),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: ctrl,
+                maxLines: 10,
+                minLines: 6,
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  hintText: 'TWA\t6\t10\t15\n52\t5.5\t7.4\t8.1\n...',
+                  isDense: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+            child: const Text('Importar'),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (text == null || text.trim().isEmpty || !mounted) return;
+    final table = parsePolarTable(text, id: 'custom', name: 'Polar propia');
+    if (table == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se ha reconocido como tabla de polares. Se espera una '
+            'primera fila con las velocidades de viento y una fila por '
+            'ángulo.',
+          ),
+        ),
+      );
+      return;
+    }
+    setSt(() {
+      settings.polarCustomJson = jsonEncode(table.toJson());
+      settings.polarBoatId = 'custom';
+    });
+    setState(() {});
+    await _saveSettings();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Importada: ${table.twa.length} ángulos x ${table.tws.length} '
+          'vientos.',
+        ),
+      ),
+    );
+  }
+
+  Widget _polarPage(PolarTable polar) {
+    final stw = _freshStw;
+    final sog = _freshSog;
+    // La polar se mide por el agua. Si no hay corredera se tira del GPS,
+    // pero entonces la corriente entra en el dato y hay que decirlo.
+    final usingSog = stw == null && sog != null;
+    final twa = _freshWind(_dTwa, signalK.twaUpdate);
+    return PolarPanel(
+      polar: polar,
+      factorPercent: settings.polarFactorPercent,
+      twsKn: _freshWind(_dTws, signalK.twsUpdate),
+      twaDeg: twa,
+      boatSpeedKn: stw ?? sog,
+      usingSog: usingSog,
+      engineRunning: _engineRunning,
+      twdDeg:
+          _freshWind(_dTwd, signalK.twdUpdate) ??
+          trueWindDirection(twa, _freshHeading ?? _freshCog),
+      destinationDistanceNm: _courseFresh ? signalK.courseDistanceNm : null,
+      destinationBearingDeg: _courseFresh
+          ? signalK.courseBearingTrueDeg
+          : null,
+      now: DateTime.now(),
+    );
+  }
+
   Widget _windPage() {
     // TWD is a true compass bearing, never negative — normalize360
     // defensively in case the upstream value ever arrives as a small
@@ -6522,8 +6860,15 @@ class _DashboardState extends State<Dashboard> {
         shipIcon: _shipIcon,
       ),
       _windClassicGrid(),
+      // Página condicional, como Motor y Fondeado en NAV: quien no elija
+      // polar en CFG no ve nada nuevo.
+      if (_activePolar case final polar?) _polarPage(polar),
     ];
-    const pageLabels = ['CRUCERO', 'TÉCNICA'];
+    final pageLabels = <String>[
+      'CRUCERO',
+      'TÉCNICA',
+      if (_activePolar != null) 'POLAR',
+    ];
     final totalPages = pages.length;
     if (_windPageIndex >= totalPages) _windPageIndex = 0;
 
@@ -7642,10 +7987,9 @@ class _DashboardState extends State<Dashboard> {
   // Swaps wind/VMG for engine health — the sailing screen's headline
   // instruments stop mattering the moment the engine's turning. Every
   // number/lamp reads from real Signal K fields (see SignalKModel's engine
-  // block and _buildDynamicHandlers); _engineRunning itself is derived
-  // from actual propulsion.<id>.runTime deltas rather than a PGN of its
-  // own, so it never just sits frozen on "MOTOR PARADO" regardless of
-  // whether the engine is actually running.
+  // block and _buildDynamicHandlers); _engineRunning is derived only from
+  // fresh propulsion.<id>.revolutions, never from the lifetime runTime
+  // counter.
   Widget _navPremiumMotorPage() => PremiumMotorEnginePanel(
     engineHours: _navCardData('engineHours'),
     engineRunning: _engineRunning,
@@ -7741,6 +8085,7 @@ class _DashboardState extends State<Dashboard> {
     activeUnmutedAlarmCount: _activeAlarms
         .where((a) => _engineAlarmKeys.contains(a.key) && !a.muted)
         .length,
+    allowSimulation: settings.demoMode,
     onMuteAllAlarms: () {
       setState(() {
         for (final a in _activeAlarms) {
@@ -9996,6 +10341,7 @@ class _DashboardState extends State<Dashboard> {
                                 ),
                                 color: cCyan,
                                 zoom: _showZoom,
+                                graphMetrics: const [mIndoorTemp],
                               ),
                             ),
                           ],
@@ -10085,7 +10431,7 @@ class _DashboardState extends State<Dashboard> {
   }
 
   String _forecastSummaryTitle(int index) {
-    if (index == 0) return 'Ahora';
+    if (index == 0) return 'Pronóstico ahora';
     final point = elementAtOrNull(weather.summary, index);
     if (point == null) return '+${index * 24} h';
     return '${_marineDate(point.time)} · ${point.time.toLocal().hour.toString().padLeft(2, '0')}h';
@@ -10127,6 +10473,7 @@ class _DashboardState extends State<Dashboard> {
     final freshness = _weatherFreshness;
     return LayoutBuilder(
       builder: (ctx, c) {
+        final compactHeader = c.maxWidth < 850;
         final summaryHeight = ((c.maxHeight - _forecastHeaderHeight) * 0.42)
             .clamp(110.0, 168.0);
         return Column(
@@ -10185,16 +10532,17 @@ class _DashboardState extends State<Dashboard> {
                                     : cMuted,
                               ),
                               const SizedBox(width: 4),
-                              Text(
-                                'Cambiar ubicación',
-                                style: TextStyle(
-                                  color: _manualWeatherLat != null
-                                      ? cOrange
-                                      : cMuted,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                              if (!compactHeader)
+                                Text(
+                                  'Cambiar ubicación',
+                                  style: TextStyle(
+                                    color: _manualWeatherLat != null
+                                        ? cOrange
+                                        : cMuted,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
                             ],
                           ),
                         ),
@@ -10206,25 +10554,26 @@ class _DashboardState extends State<Dashboard> {
                       child: InkWell(
                         borderRadius: BorderRadius.circular(8),
                         onTap: () => _showModelComparison(context),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(
+                              const Icon(
                                 Icons.stacked_line_chart,
                                 size: 15,
                                 color: cCyan,
                               ),
-                              SizedBox(width: 5),
-                              Text(
-                                'Comparar modelos',
-                                style: TextStyle(
-                                  color: cCyan,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                              const SizedBox(width: 5),
+                              if (!compactHeader)
+                                Text(
+                                  'Comparar modelos',
+                                  style: const TextStyle(
+                                    color: cCyan,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
                             ],
                           ),
                         ),
@@ -10349,7 +10698,7 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  (String, Color) _marineComfort(MarinePoint point) {
+  (String, Color) _marineHeightState(MarinePoint point) {
     final wave = point.waveM;
     if (wave == null) return ('--', cMuted);
     if (wave < 1.0) return ('Cómodo', cGreen);
@@ -10390,7 +10739,7 @@ class _DashboardState extends State<Dashboard> {
               maxHour,
             );
             final point = _marinePointAt(currentHours);
-            final (comfort, comfortColor) = _marineComfort(point);
+            final (comfort, comfortColor) = _marineHeightState(point);
             final currentKn = point.currentKmh == null
                 ? null
                 : point.currentKmh! / 1.852;
@@ -10565,7 +10914,7 @@ class _DashboardState extends State<Dashboard> {
                               const SizedBox(width: 8),
                               Expanded(
                                 child: MarineGraphicCard(
-                                  title: 'Swell',
+                                  title: 'Mar de fondo',
                                   value: point.swellM,
                                   unit: 'm',
                                   subtitle:
@@ -10621,7 +10970,7 @@ class _DashboardState extends State<Dashboard> {
                               const SizedBox(width: 8),
                               Expanded(
                                 child: MetricCard(
-                                  title: 'Estado de mar',
+                                  title: 'Estado por altura',
                                   value: comfort,
                                   subtitle: _douglasState(point.waveM),
                                   // A 28 px el Douglas se iba a dos líneas
@@ -11472,6 +11821,12 @@ class _DashboardState extends State<Dashboard> {
               tab: 6,
             ),
             (
+              title: 'Abrir diagnóstico MDI',
+              section: 'DIAGNÓSTICO · Herramientas',
+              keywords: 'motor volvo mdi esp32 can j1939 pgn raw captura diagnostico web',
+              tab: 6,
+            ),
+            (
               title: 'Copiar diagnóstico JSON',
               section: 'DIAGNÓSTICO · Herramientas',
               keywords: 'copiar exportar json soporte informe diagnostico credenciales privacidad',
@@ -12275,6 +12630,7 @@ class _DashboardState extends State<Dashboard> {
                             ],
                           ),
                         ],
+                        _polarSettingsGroup(setSt),
                       ],
                     ),
                   ),
@@ -13198,7 +13554,7 @@ class _DashboardState extends State<Dashboard> {
                               ),
                               const SizedBox(height: 10),
                               const Text(
-                                'Alternador sin cargar',
+                                'Tensión de motor / alimentación MDI baja',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
@@ -13232,7 +13588,7 @@ class _DashboardState extends State<Dashboard> {
                               ),
                               const SizedBox(height: 10),
                               const Text(
-                                'Fallo de precalentamiento',
+                                'Fallo de calentadores o relé',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
@@ -13821,6 +14177,45 @@ class _DashboardState extends State<Dashboard> {
                                           : _connectSignalK,
                                       icon: const Icon(Icons.refresh, size: 17),
                                       label: const Text('Reconectar Signal K'),
+                                    ),
+                                    OutlinedButton.icon(
+                                      onPressed: () => showDialog<void>(
+                                        context: context,
+                                        builder: (_) => Dialog.fullscreen(
+                                          backgroundColor: cBg,
+                                          child: Stack(
+                                            children: [
+                                              const Positioned.fill(
+                                                child: _AnchorWebView(
+                                                  host: 'sh-esp32-volvo-mdi.local',
+                                                  port: 8080,
+                                                  path: '/',
+                                                  label: 'Diagnóstico MDI',
+                                                  fullscreen: true,
+                                                ),
+                                              ),
+                                              Positioned(
+                                                top: 8,
+                                                right: 8,
+                                                child: IconButton.filled(
+                                                  tooltip: 'Cerrar',
+                                                  onPressed: () =>
+                                                      Navigator.of(context)
+                                                          .pop(),
+                                                  icon: const Icon(Icons.close),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      icon: const Icon(
+                                        Icons.memory_outlined,
+                                        size: 17,
+                                      ),
+                                      label: const Text(
+                                        'Abrir diagnóstico MDI',
+                                      ),
                                     ),
                                     OutlinedButton.icon(
                                       onPressed: () async {
