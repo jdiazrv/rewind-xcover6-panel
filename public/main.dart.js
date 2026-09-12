@@ -154187,8 +154187,8 @@ aLl(b0,b1,b2){var s,r,q,p,o,n,m,l,k,j,i,h,g,f,e,d,c,b,a,a0,a1,a2,a3,a4,a5,a6,a7,
 if(this.x)if(a8!=null){a9=a8.length
 a9=a9<5||a9>6}if(a9)return
 s=a8.length
-r=b2*(s===6?1.08:0.92)
-q=b2*0.25
+r=b2*(s===6?1.08:0.92)*0.9
+q=b2*0.25*0.9
 a9=q*0.13
 p=A.fR(A.i1(b1.X(0,new A.c(0,-b2*0.35)),q,r),new A.aQ(a9,a9))
 $.U()

@@ -1981,8 +1981,12 @@ class _AnalogGaugePainter extends CustomPainter {
     // local RewindOdometer font supplies crisp tabular figures; the clipped
     // neighbours, highlights and shadows are what make them read as wheels
     // rather than six ordinary boxes of text.
-    final meterW = r * (wheels == 6 ? 1.08 : 0.92);
-    final meterH = r * 0.25;
+    // Todo el horómetro (marco, tambores y cifras) un 10 % menor. Mantener
+    // la tipografía en su proporción original dentro del marco evita aplicar
+    // la reducción dos veces a los dígitos.
+    const meterScale = 0.9;
+    final meterW = r * (wheels == 6 ? 1.08 : 0.92) * meterScale;
+    final meterH = r * 0.25 * meterScale;
     final meterCenter = center + Offset(0, -r * 0.35);
     final outer = RRect.fromRectAndRadius(
       Rect.fromCenter(center: meterCenter, width: meterW, height: meterH),
