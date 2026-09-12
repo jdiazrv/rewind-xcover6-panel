@@ -79,10 +79,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('3.8 L/h'), findsOneWidget);
-    await tester.tap(find.text('3.8 L/h'));
+    expect(find.text('2.7 L/h'), findsOneWidget);
+    await tester.tap(find.text('2.7 L/h'));
     await tester.pumpAndSettle();
+    expect(find.textContaining('Estimación práctica 70 %'), findsOneWidget);
     expect(find.textContaining('no plena carga de banco'), findsOneWidget);
+    expect(find.text('Fabricante (referencia)'), findsOneWidget);
     expect(find.byKey(const ValueKey('engine-fuel-curve')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

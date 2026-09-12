@@ -1,5 +1,14 @@
 import 'dart:math' as math;
 
+/// Punto de partida práctico común para todos los motores.
+///
+/// Las curvas "propeller load exp. 3" representan una hélice idealmente
+/// dimensionada que absorbe toda esa carga. Los consumos comunicados por
+/// propietarios de veleros de desplazamiento quedan normalmente por debajo.
+/// Se conserva la curva original y se muestra en la gráfica; este factor solo
+/// produce la estimación práctica de la tarjeta.
+const kDefaultPracticalFuelPercent = 70.0;
+
 /// Punto digitalizado de la curva de consumo con carga de hélice.
 ///
 /// No es la curva de plena carga del banco. Los fabricantes publican esta
@@ -29,13 +38,9 @@ class EngineFuelProfile {
 
   double get maxRpm => curve.last.rpm;
 
-  /// Interpolación lineal entre puntos de la curva de hélice del fabricante.
-  /// El ajuste es deliberadamente explícito: no se aplican coeficientes
-  /// ocultos por saildrive, eje o tipo de hélice, que sin diámetro/paso/casco
-  /// serían inventados.
-  double estimateLitersPerHour(double rpm, {double calibrationPercent = 100}) {
+  /// Interpolación de la curva original de carga de hélice del fabricante.
+  double manufacturerLitersPerHour(double rpm) {
     if (!rpm.isFinite || rpm <= 200) return 0;
-    final calibration = calibrationPercent.clamp(70, 130) / 100;
     final x = rpm.clamp(curve.first.rpm, curve.last.rpm).toDouble();
     for (var i = 1; i < curve.length; i++) {
       final b = curve[i];
@@ -45,11 +50,21 @@ class EngineFuelProfile {
       final fraction = span <= 0 ? 0.0 : (x - a.rpm) / span;
       return math.max(
         0,
-        (a.litersPerHour + (b.litersPerHour - a.litersPerHour) * fraction) *
-            calibration,
+        a.litersPerHour + (b.litersPerHour - a.litersPerHour) * fraction,
       );
     }
-    return curve.last.litersPerHour * calibration;
+    return curve.last.litersPerHour;
+  }
+
+  /// Porcentaje directo de la curva del fabricante. El 70 % recomendado se
+  /// aplica por omisión a todos los motores y CFG permite ajustarlo del 50 al
+  /// 120 %. No hay un segundo multiplicador oculto por transmisión o hélice.
+  double estimateLitersPerHour(
+    double rpm, {
+    double calibrationPercent = kDefaultPracticalFuelPercent,
+  }) {
+    final practicalFactor = calibrationPercent.clamp(50, 120) / 100;
+    return manufacturerLitersPerHour(rpm) * practicalFactor;
   }
 }
 
@@ -175,16 +190,19 @@ const engineFuelProfiles = <EngineFuelProfile>[
     id: 'volvo-d2-75',
     label: 'Volvo Penta D2-75',
     sourceLabel: 'Volvo Penta · calculated propeller load exp. 3',
-    sourceUrl:
-        'https://irp-cdn.multiscreensite.com/6566baff/files/uploaded/D2-75.pdf',
+    sourceUrl: 'https://www.dbmoteurs.fr/sites/default/files/DB-Moteurs-Caracteristiques-techniques-Volvo-Penta-D2-75_Technical-Data.pdf',
     curve: [
       EngineFuelPoint(800, 0.65),
       EngineFuelPoint(1200, 1.2),
-      EngineFuelPoint(1600, 2.7),
-      EngineFuelPoint(2000, 5.3),
-      EngineFuelPoint(2400, 9.5),
-      EngineFuelPoint(2700, 13.8),
-      EngineFuelPoint(3000, 18.8),
+      EngineFuelPoint(1400, 2.107),
+      EngineFuelPoint(1600, 2.655),
+      EngineFuelPoint(1800, 3.737),
+      EngineFuelPoint(2000, 4.795),
+      EngineFuelPoint(2200, 6.492),
+      EngineFuelPoint(2400, 8.077),
+      EngineFuelPoint(2600, 10.57),
+      EngineFuelPoint(2800, 13.55),
+      EngineFuelPoint(3000, 18.27),
     ],
   ),
 ];

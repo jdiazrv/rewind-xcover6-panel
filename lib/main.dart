@@ -13231,7 +13231,7 @@ class _DashboardState extends State<Dashboard> {
                               isExpanded: true,
                               decoration: const InputDecoration(
                                 labelText: 'Motor para estimar consumo',
-                                helperText: 'Usa la curva de carga de hélice, no la curva de banco.',
+                                helperText: 'Estimación práctica: 70 % de la curva de carga de hélice.',
                                 isDense: true,
                               ),
                               hint: const Text('Seleccionar motor'),
@@ -13320,7 +13320,7 @@ class _DashboardState extends State<Dashboard> {
                               children: [
                                 const Expanded(
                                   child: Text(
-                                    'Ajuste al consumo real',
+                                    'Porcentaje de la curva del fabricante',
                                     style: TextStyle(
                                       color: cText,
                                       fontSize: 12,
@@ -13341,10 +13341,10 @@ class _DashboardState extends State<Dashboard> {
                               value: settings
                                   .sensorConfig
                                   .engineFuelCalibrationPercent
-                                  .clamp(70, 130),
-                              min: 70,
-                              max: 130,
-                              divisions: 60,
+                                  .clamp(50, 120),
+                              min: 50,
+                              max: 120,
+                              divisions: 70,
                               label:
                                   '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
                               onChanged: (value) => setState(
@@ -13357,7 +13357,7 @@ class _DashboardState extends State<Dashboard> {
                               onChangeEnd: (_) => unawaited(_saveSettings()),
                             ),
                             const Text(
-                              'Eje/saildrive y tipo de hélice se guardan como contexto, pero no aplican un porcentaje oculto. Diámetro, paso, carena, desplazamiento y mar cambian la carga; calibra este ajuste comparando con repostajes o un caudalímetro.',
+                              'Recomendado: 70 %. Ajustable entre 50 % y 120 %. Eje/saildrive y tipo de hélice se guardan como contexto y no añaden otra reducción. Calibra comparando con repostajes o un caudalímetro.',
                               style: TextStyle(color: cMuted, fontSize: 10.5),
                             ),
                             const SizedBox(height: 10),

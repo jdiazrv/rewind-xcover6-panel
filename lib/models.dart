@@ -1328,7 +1328,7 @@ class SensorConfig {
   String engineModelId = '';
   String engineDriveType = '';
   String enginePropellerType = '';
-  double engineFuelCalibrationPercent = 100;
+  double engineFuelCalibrationPercent = 70;
   bool hasOutsideTemp = true;
   bool hasOutsidePressure = true;
   List<TankSlot> tanks = [
@@ -1383,7 +1383,9 @@ class SensorConfig {
     'engineModelId': engineModelId,
     'engineDriveType': engineDriveType,
     'enginePropellerType': enginePropellerType,
-    'engineFuelCalibrationPercent': engineFuelCalibrationPercent,
+    // Key v2: intentionally does not inherit the old experimental 100 %
+    // value, which predated the common real-world reduction.
+    'engineFuelPracticalPercent': engineFuelCalibrationPercent,
     'hasOutsideTemp': hasOutsideTemp,
     'hasOutsidePressure': hasOutsidePressure,
     'tanks': [for (final t in tanks) t.toJson()],
@@ -1418,8 +1420,8 @@ class SensorConfig {
     c.engineDriveType = j['engineDriveType'] as String? ?? '';
     c.enginePropellerType = j['enginePropellerType'] as String? ?? '';
     c.engineFuelCalibrationPercent =
-        ((j['engineFuelCalibrationPercent'] as num?)?.toDouble() ?? 100)
-            .clamp(70, 130)
+        ((j['engineFuelPracticalPercent'] as num?)?.toDouble() ?? 70)
+            .clamp(50, 120)
             .toDouble();
     c.hasOutsideTemp = j['hasOutsideTemp'] as bool? ?? true;
     c.hasOutsidePressure = j['hasOutsidePressure'] as bool? ?? true;

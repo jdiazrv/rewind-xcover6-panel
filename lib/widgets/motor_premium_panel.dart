@@ -93,7 +93,7 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.fuelProfile,
     this.fuelDriveType = '',
     this.fuelPropellerType = '',
-    this.fuelCalibrationPercent = 100,
+    this.fuelCalibrationPercent = kDefaultPracticalFuelPercent,
     this.engineTorquePercent,
     this.engineOilPressurePa,
     this.engineCoolantTempK,
@@ -1170,10 +1170,26 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
                   ],
                 ),
                 Text(
-                  'Curva con carga de hélice (no plena carga de banco) · '
+                  'Estimación práctica ${widget.fuelCalibrationPercent.round()} % de la curva de hélice · '
                   '$_driveLabel · $_propellerLabel · '
-                  'ajuste ${widget.fuelCalibrationPercent.round()} %',
+                  'sin factor adicional',
                   style: const TextStyle(color: cMuted, fontSize: 11),
+                ),
+                const SizedBox(height: 5),
+                const Wrap(
+                  spacing: 14,
+                  runSpacing: 3,
+                  children: [
+                    _FuelCurveLegend(
+                      color: cOrange,
+                      label: 'Estimación práctica',
+                    ),
+                    _FuelCurveLegend(
+                      color: cMuted,
+                      label: 'Fabricante (referencia)',
+                      dashed: true,
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 Expanded(
@@ -1197,6 +1213,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   ),
+                ),
+                const Text(
+                  'La referencia es carga de hélice, no plena carga de banco.',
+                  style: TextStyle(color: cMuted, fontSize: 10),
                 ),
                 Text(
                   'Fuente: ${profile.sourceLabel}',
@@ -1703,6 +1723,9 @@ class _FuelCurvePainter extends CustomPainter {
     );
     if (plot.width <= 0 || plot.height <= 0) return;
 
+    final manufacturer = profile.curve
+        .map((point) => profile.manufacturerLitersPerHour(point.rpm))
+        .toList();
     final adjusted = profile.curve
         .map(
           (point) => profile.estimateLitersPerHour(
@@ -1711,7 +1734,7 @@ class _FuelCurvePainter extends CustomPainter {
           ),
         )
         .toList();
-    final maxLph = adjusted.reduce(math.max) * 1.12;
+    final maxLph = manufacturer.reduce(math.max) * 1.12;
     final maxRpm = profile.maxRpm;
     double px(double rpm) => plot.left + plot.width * rpm / maxRpm;
     double py(double lph) => plot.bottom - plot.height * lph / maxLph;
@@ -1741,15 +1764,28 @@ class _FuelCurvePainter extends CustomPainter {
       );
     }
 
+    final referencePoints = <Offset>[];
     final path = Path();
     for (var i = 0; i < profile.curve.length; i++) {
       final point = profile.curve[i];
+      referencePoints.add(Offset(px(point.rpm), py(manufacturer[i])));
       final p = Offset(px(point.rpm), py(adjusted[i]));
       if (i == 0) {
         path.moveTo(p.dx, p.dy);
       } else {
         path.lineTo(p.dx, p.dy);
       }
+    }
+    for (var i = 1; i < referencePoints.length; i++) {
+      _drawDashedLine(
+        canvas,
+        referencePoints[i - 1],
+        referencePoints[i],
+        Paint()
+          ..color = cMuted.withValues(alpha: 0.75)
+          ..strokeWidth = 1.5
+          ..strokeCap = StrokeCap.round,
+      );
     }
     canvas.drawPath(
       path,
@@ -1784,6 +1820,20 @@ class _FuelCurvePainter extends CustomPainter {
     );
   }
 
+  void _drawDashedLine(Canvas canvas, Offset a, Offset b, Paint paint) {
+    final distance = (b - a).distance;
+    if (distance <= 0) return;
+    final direction = (b - a) / distance;
+    const dash = 7.0;
+    const gap = 5.0;
+    var travelled = 0.0;
+    while (travelled < distance) {
+      final end = math.min(travelled + dash, distance);
+      canvas.drawLine(a + direction * travelled, a + direction * end, paint);
+      travelled += dash + gap;
+    }
+  }
+
   void _paintText(
     Canvas canvas,
     String text,
@@ -1809,6 +1859,65 @@ class _FuelCurvePainter extends CustomPainter {
       oldDelegate.profile != profile ||
       oldDelegate.currentRpm != currentRpm ||
       oldDelegate.calibrationPercent != calibrationPercent;
+}
+
+class _FuelCurveLegend extends StatelessWidget {
+  const _FuelCurveLegend({
+    required this.color,
+    required this.label,
+    this.dashed = false,
+  });
+
+  final Color color;
+  final String label;
+  final bool dashed;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      SizedBox(
+        width: 25,
+        height: 8,
+        child: CustomPaint(
+          painter: _FuelLegendPainter(color: color, dashed: dashed),
+        ),
+      ),
+      const SizedBox(width: 5),
+      Text(label, style: const TextStyle(color: cMuted, fontSize: 10)),
+    ],
+  );
+}
+
+class _FuelLegendPainter extends CustomPainter {
+  const _FuelLegendPainter({required this.color, required this.dashed});
+
+  final Color color;
+  final bool dashed;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+    final y = size.height / 2;
+    if (!dashed) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+      return;
+    }
+    for (var x = 0.0; x < size.width; x += 8) {
+      canvas.drawLine(
+        Offset(x, y),
+        Offset(math.min(x + 4, size.width), y),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _FuelLegendPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.dashed != dashed;
 }
 
 // Realistic analog instrument — dial face, major/minor ticks, an optional
