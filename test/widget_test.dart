@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:rewind_xcover6_panel/main.dart';
+import 'package:rewind_xcover6_panel/engine_fuel.dart';
 import 'package:rewind_xcover6_panel/models.dart';
 import 'package:rewind_xcover6_panel/theme.dart';
 import 'package:rewind_xcover6_panel/widgets/motor_premium_panel.dart';
@@ -45,6 +46,44 @@ void main() {
 
     expect(find.byType(CustomPaint), findsWidgets);
     expect(find.text('HORAS MOTOR'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('estimated fuel opens the propeller-load curve', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PremiumMotorEnginePanel(
+            engineHours: const NavCardData(
+              id: 'engineHours',
+              title: 'Horas motor',
+              value: '1626.2',
+              color: cText,
+            ),
+            engineRunning: true,
+            engineContactOn: true,
+            engineRpm: 2000,
+            fuelProfile: engineFuelProfileById('volvo-d2-55'),
+            fuelDriveType: 'shaft',
+            fuelPropellerType: 'folding',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('3.8 L/h'), findsOneWidget);
+    await tester.tap(find.text('3.8 L/h'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('no plena carga de banco'), findsOneWidget);
+    expect(find.byKey(const ValueKey('engine-fuel-curve')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

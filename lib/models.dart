@@ -575,11 +575,31 @@ const mBowV = MetricDef(
   'V',
   color: cCyan,
 );
+
+/// Descarta lecturas de viento imposibles.
+///
+/// El informe llegó a enseñar "ráfaga máx 552,4 kt" (2026-09-12): basta un
+/// dato corrupto del sensor para envenenar un agregado `max`, que por
+/// definición se queda con el peor valor de toda la ventana. El récord
+/// mundial de racha en superficie ronda los 220 kt, y cualquier cosa por
+/// encima de 100 en un velero es un fallo de lectura, no viento.
+///
+/// Devolver null hace que el punto se DESCARTE (ver MetricDef.normalize),
+/// que es lo correcto aquí: un hueco es honesto, un 552 no.
+const kMaxPlausibleWindKn = 100.0;
+double? normalizeWindKn(double raw) {
+  if (!raw.isFinite || raw < 0 || raw > kMaxPlausibleWindKn) return null;
+  return raw;
+}
+
 const mTws = MetricDef(
   'environment.wind.speedTrue',
   'TWS',
   'kn',
   scale: 1.94384,
+  // Ver normalizeWindKn: un solo dato corrupto arruina el agregado max
+  // del informe de ráfagas.
+  normalize: normalizeWindKn,
   color: cCyan,
 );
 const mHeel = MetricDef(
@@ -594,6 +614,9 @@ const mAws = MetricDef(
   'AWS',
   'kn',
   scale: 1.94384,
+  // Ver normalizeWindKn: un solo dato corrupto arruina el agregado max
+  // del informe de ráfagas.
+  normalize: normalizeWindKn,
   color: cGreen,
 );
 const mAwa = MetricDef(
@@ -960,6 +983,7 @@ class SignalKModel {
   /// aunque sean antiguas", 2026-09-12).
   double? lastEngineHours;
   DateTime? lastEngineHoursAt;
+
   /// Cuándo se usó el motor por última vez y cuánto duró ese uso, deducido
   /// del propio cuentahoras: mientras el motor gira runTime sube, así que
   /// el último tramo en que subió ES el último uso. No hace falta ningún
@@ -1299,6 +1323,12 @@ class SensorConfig {
   // Signal K's standard cumulative engine run time, e.g.
   // "propulsion.main.runTime" — seconds since the engine's counter started.
   String? enginePath;
+  // Perfil de consumo estimado. Se guarda dentro de SensorConfig para que sea
+  // propio de cada barco/servidor, igual que el path de su motor.
+  String engineModelId = '';
+  String engineDriveType = '';
+  String enginePropellerType = '';
+  double engineFuelCalibrationPercent = 100;
   bool hasOutsideTemp = true;
   bool hasOutsidePressure = true;
   List<TankSlot> tanks = [
@@ -1350,6 +1380,10 @@ class SensorConfig {
     'fridgeAlarmC': fridgeAlarmC,
     'depthPath': depthPath,
     'enginePath': enginePath,
+    'engineModelId': engineModelId,
+    'engineDriveType': engineDriveType,
+    'enginePropellerType': enginePropellerType,
+    'engineFuelCalibrationPercent': engineFuelCalibrationPercent,
     'hasOutsideTemp': hasOutsideTemp,
     'hasOutsidePressure': hasOutsidePressure,
     'tanks': [for (final t in tanks) t.toJson()],
@@ -1380,6 +1414,13 @@ class SensorConfig {
     c.fridgeAlarmC = (j['fridgeAlarmC'] as num?)?.toDouble() ?? c.fridgeAlarmC;
     c.depthPath = j['depthPath'] as String?;
     c.enginePath = j['enginePath'] as String?;
+    c.engineModelId = j['engineModelId'] as String? ?? '';
+    c.engineDriveType = j['engineDriveType'] as String? ?? '';
+    c.enginePropellerType = j['enginePropellerType'] as String? ?? '';
+    c.engineFuelCalibrationPercent =
+        ((j['engineFuelCalibrationPercent'] as num?)?.toDouble() ?? 100)
+            .clamp(70, 130)
+            .toDouble();
     c.hasOutsideTemp = j['hasOutsideTemp'] as bool? ?? true;
     c.hasOutsidePressure = j['hasOutsidePressure'] as bool? ?? true;
     final rawTanks = j['tanks'];
@@ -3241,6 +3282,7 @@ class SettingsModel {
   // off by default since not everyone fondeando wants a battery readout
   // competing for space with viento/profundidad. Reported live 2026-09-06.
   bool anchorShowElectrical = false;
+
   /// Polar activa: id del catálogo empotrado, 'custom' para una tabla
   /// importada, o vacío para no usar ninguna. Ver lib/polars.dart.
   String polarBoatId = '';

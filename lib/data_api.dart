@@ -128,9 +128,7 @@ Future<List<GraphPoint>> influxQuery({
     final scaled = v * def.scale + def.offset;
     // A normalizer returning null means "implausible, drop it" — plotting
     // such a sample would drag the whole graph's scale to fit a glitch.
-    final normalized = def.normalize == null
-        ? scaled
-        : def.normalize!(scaled);
+    final normalized = def.normalize == null ? scaled : def.normalize!(scaled);
     if (normalized == null) continue;
     points.add(GraphPoint(time: dt, value: normalized));
   }
@@ -272,13 +270,134 @@ Future<List<GraphPoint>> skHistoryQuery({
     final scaled = v * def.scale + def.offset;
     // A normalizer returning null means "implausible, drop it" — plotting
     // such a sample would drag the whole graph's scale to fit a glitch.
-    final normalized = def.normalize == null
-        ? scaled
-        : def.normalize!(scaled);
+    final normalized = def.normalize == null ? scaled : def.normalize!(scaled);
     if (normalized == null) continue;
     points.add(GraphPoint(time: dt, value: normalized));
   }
   return _sortAndDedupe(points);
+}
+
+/// One continuous period during which the cumulative engine hour meter rose.
+class EngineRunSummary {
+  const EngineRunSummary({
+    required this.startedAt,
+    required this.endedAt,
+    required this.durationHours,
+  });
+
+  final DateTime startedAt;
+  final DateTime endedAt;
+  final double durationHours;
+}
+
+/// Finds the latest engine use from a history of cumulative run-time values.
+///
+/// Values must already be expressed in hours. The MDI does not necessarily
+/// publish every second: it can hold the same value for several minutes and
+/// then jump by the accumulated run time. Positive increments separated by a
+/// short gap therefore belong to the same use. Counter resets, mixed sources
+/// and implausibly large jumps are ignored instead of becoming a fictitious
+/// hundreds-of-hours trip.
+EngineRunSummary? latestEngineRunFromHistory(
+  List<GraphPoint> input, {
+  Duration sessionGap = const Duration(minutes: 15),
+}) {
+  if (input.length < 2) return null;
+  final points = _sortAndDedupe([...input]);
+  EngineRunSummary? latest;
+  DateTime? sessionStart;
+  DateTime? sessionEnd;
+  DateTime? lastIncrementAt;
+  var sessionHours = 0.0;
+
+  void finishSession() {
+    if (sessionStart != null && sessionEnd != null && sessionHours >= 0.005) {
+      latest = EngineRunSummary(
+        startedAt: sessionStart!,
+        endedAt: sessionEnd!,
+        durationHours: sessionHours,
+      );
+    }
+    sessionStart = null;
+    sessionEnd = null;
+    lastIncrementAt = null;
+    sessionHours = 0;
+  }
+
+  for (var i = 1; i < points.length; i++) {
+    final previous = points[i - 1];
+    final current = points[i];
+    final elapsed = current.time.difference(previous.time);
+    if (elapsed <= Duration.zero) continue;
+    final increment = current.value - previous.value;
+    if (!increment.isFinite || increment <= 0.0001) continue;
+
+    // A real cumulative clock cannot leap by many hours between adjacent
+    // samples. A 15-minute floor permits the MDI's bursty publication while
+    // still rejecting the ~400-hour jumps seen when two legacy sources wrote
+    // the same Signal K path.
+    final elapsedHours = elapsed.inMilliseconds / 3600000.0;
+    final largestPlausible = math.max(0.25, elapsedHours * 1.5);
+    if (increment > largestPlausible) continue;
+
+    if (lastIncrementAt != null &&
+        current.time.difference(lastIncrementAt!) > sessionGap) {
+      finishSession();
+    }
+    sessionStart ??= previous.time;
+    sessionEnd = current.time;
+    lastIncrementAt = current.time;
+    sessionHours += increment;
+  }
+  finishSession();
+  return latest;
+}
+
+/// Finds the latest running interval from RPM history.
+///
+/// RPM is preferable to changes in the hour meter for start/stop boundaries:
+/// the latter is published in accumulated jumps, while RPM tells us directly
+/// whether the crankshaft was turning. Values are expected in rpm, not Hz.
+EngineRunSummary? latestEngineRunFromRpmHistory(
+  List<GraphPoint> input, {
+  double runningThresholdRpm = 200,
+  Duration samplePeriod = const Duration(minutes: 1),
+}) {
+  if (input.isEmpty) return null;
+  final points = _sortAndDedupe([...input]);
+  final maxGap = samplePeriod * 3;
+  EngineRunSummary? latest;
+  DateTime? start;
+  DateTime? lastRunning;
+
+  void finish(DateTime end) {
+    if (start != null && end.isAfter(start!)) {
+      latest = EngineRunSummary(
+        startedAt: start!,
+        endedAt: end,
+        durationHours: end.difference(start!).inSeconds / 3600.0,
+      );
+    }
+    start = null;
+    lastRunning = null;
+  }
+
+  for (final point in points) {
+    final running = point.value.isFinite && point.value > runningThresholdRpm;
+    if (running) {
+      if (lastRunning != null && point.time.difference(lastRunning!) > maxGap) {
+        finish(lastRunning!.add(samplePeriod));
+      }
+      start ??= point.time;
+      lastRunning = point.time;
+    } else if (start != null) {
+      finish(point.time);
+    }
+  }
+  if (start != null && lastRunning != null) {
+    finish(lastRunning!.add(samplePeriod));
+  }
+  return latest;
 }
 
 // ─── DEMO mode: synthetic graph data (no InfluxDB call) ───────────────────────

@@ -5,6 +5,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../engine_fuel.dart';
 import '../models.dart';
 import '../theme.dart';
 
@@ -89,6 +90,10 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     required this.engineRunning,
     this.engineContactOn = false,
     this.engineRpm,
+    this.fuelProfile,
+    this.fuelDriveType = '',
+    this.fuelPropellerType = '',
+    this.fuelCalibrationPercent = 100,
     this.engineTorquePercent,
     this.engineOilPressurePa,
     this.engineCoolantTempK,
@@ -143,6 +148,10 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   // CONTACTO lamp uses this instead of [engineRunning].
   final bool engineContactOn;
   final double? engineRpm;
+  final EngineFuelProfile? fuelProfile;
+  final String fuelDriveType;
+  final String fuelPropellerType;
+  final double fuelCalibrationPercent;
   // Reserved for an ECU that really publishes engine load. The captured MDI
   // sends the EEC1 torque byte as unavailable, so live mode never displays it.
   final double? engineTorquePercent;
@@ -1045,12 +1054,169 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     );
   }
 
+  String get _driveLabel => switch (widget.fuelDriveType) {
+    'shaft' => 'Eje',
+    'saildrive' => 'Saildrive',
+    _ => 'Transmisión sin indicar',
+  };
+
+  String get _propellerLabel => switch (widget.fuelPropellerType) {
+    'fixed' => 'Hélice fija',
+    'folding' => 'Hélice plegable',
+    'feathering' => 'Hélice orientable',
+    _ => 'Hélice sin indicar',
+  };
+
+  Widget? _fuelBox() {
+    final profile = widget.fuelProfile;
+    if (profile == null ||
+        widget.fuelDriveType.isEmpty ||
+        widget.fuelPropellerType.isEmpty) {
+      return null;
+    }
+    final rpm = _displayRpm;
+    final consumption = rpm == null
+        ? null
+        : profile.estimateLitersPerHour(
+            rpm,
+            calibrationPercent: widget.fuelCalibrationPercent,
+          );
+    return Semantics(
+      button: true,
+      label: consumption == null
+          ? 'Consumo aproximado sin revoluciones actuales'
+          : 'Consumo aproximado ${consumption.toStringAsFixed(1)} litros por hora',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(9),
+        onTap: () => _showFuelCurve(profile),
+        child: _eInkBox(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.local_gas_station,
+                  size: 17,
+                  color: _kEInkText,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'CONSUMO APROX.',
+                        style: TextStyle(
+                          color: _kEInkText,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      Text(
+                        consumption == null
+                            ? '-- L/h'
+                            : '${consumption.toStringAsFixed(1)} L/h',
+                        style: const TextStyle(
+                          color: _kEInkText,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.show_chart, size: 18, color: _kEInkText),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showFuelCurve(EngineFuelProfile profile) async {
+    final rpm = _displayRpm;
+    final consumption = rpm == null
+        ? null
+        : profile.estimateLitersPerHour(
+            rpm,
+            calibrationPercent: widget.fuelCalibrationPercent,
+          );
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720, maxHeight: 520),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 12, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Consumo aproximado · ${profile.label}',
+                        style: Theme.of(dialogContext).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Cerrar',
+                      onPressed: () => Navigator.pop(dialogContext),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                Text(
+                  'Curva con carga de hélice (no plena carga de banco) · '
+                  '$_driveLabel · $_propellerLabel · '
+                  'ajuste ${widget.fuelCalibrationPercent.round()} %',
+                  style: const TextStyle(color: cMuted, fontSize: 11),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: CustomPaint(
+                    key: const ValueKey('engine-fuel-curve'),
+                    painter: _FuelCurvePainter(
+                      profile: profile,
+                      currentRpm: rpm,
+                      calibrationPercent: widget.fuelCalibrationPercent,
+                    ),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  rpm == null
+                      ? 'Sin RPM actual · estimación, no caudal medido'
+                      : '${rpm.round()} rpm · ${consumption!.toStringAsFixed(1)} L/h aprox. · no es caudal medido',
+                  style: const TextStyle(
+                    color: cText,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Text(
+                  'Fuente: ${profile.sourceLabel}',
+                  style: const TextStyle(color: cMuted, fontSize: 10),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _sideColumn() {
     if (!_isCompact) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           ?_lastRunStrip(),
+          if (_fuelBox() case final box?) ...[box, const SizedBox(height: 6)],
           if (_torqueBox() case final box?) ...[const SizedBox(height: 6), box],
           const SizedBox(height: 6),
           for (var i = 0; i < _motorLamps.length; i += 2) ...[
@@ -1114,6 +1280,8 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            ?_lastRunStrip(),
+            if (_fuelBox() case final box?) ...[box, const SizedBox(height: 4)],
             if (_torqueBox() case final box?) ...[box],
             const SizedBox(height: 6),
             Expanded(
@@ -1508,6 +1676,139 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       ],
     );
   }
+}
+
+class _FuelCurvePainter extends CustomPainter {
+  const _FuelCurvePainter({
+    required this.profile,
+    required this.currentRpm,
+    required this.calibrationPercent,
+  });
+
+  final EngineFuelProfile profile;
+  final double? currentRpm;
+  final double calibrationPercent;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 46.0;
+    const right = 14.0;
+    const top = 12.0;
+    const bottom = 30.0;
+    final plot = Rect.fromLTRB(
+      left,
+      top,
+      size.width - right,
+      size.height - bottom,
+    );
+    if (plot.width <= 0 || plot.height <= 0) return;
+
+    final adjusted = profile.curve
+        .map(
+          (point) => profile.estimateLitersPerHour(
+            point.rpm,
+            calibrationPercent: calibrationPercent,
+          ),
+        )
+        .toList();
+    final maxLph = adjusted.reduce(math.max) * 1.12;
+    final maxRpm = profile.maxRpm;
+    double px(double rpm) => plot.left + plot.width * rpm / maxRpm;
+    double py(double lph) => plot.bottom - plot.height * lph / maxLph;
+
+    final gridPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.1)
+      ..strokeWidth = 1;
+    for (var i = 0; i <= 4; i++) {
+      final y = plot.top + plot.height * i / 4;
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
+      final lph = maxLph * (1 - i / 4);
+      _paintText(
+        canvas,
+        '${lph.toStringAsFixed(lph < 10 ? 1 : 0)} L/h',
+        Offset(plot.left - 5, y),
+        alignRight: true,
+      );
+    }
+    for (var i = 0; i <= 4; i++) {
+      final x = plot.left + plot.width * i / 4;
+      canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), gridPaint);
+      _paintText(
+        canvas,
+        '${(maxRpm * i / 4).round()}',
+        Offset(x, plot.bottom + 6),
+        centered: true,
+      );
+    }
+
+    final path = Path();
+    for (var i = 0; i < profile.curve.length; i++) {
+      final point = profile.curve[i];
+      final p = Offset(px(point.rpm), py(adjusted[i]));
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = cOrange
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    final rpm = currentRpm;
+    if (rpm != null && rpm.isFinite) {
+      final boundedRpm = rpm.clamp(0, maxRpm).toDouble();
+      final lph = profile.estimateLitersPerHour(
+        boundedRpm,
+        calibrationPercent: calibrationPercent,
+      );
+      final point = Offset(px(boundedRpm), py(lph));
+      canvas.drawCircle(
+        point,
+        8,
+        Paint()..color = cCyan.withValues(alpha: 0.25),
+      );
+      canvas.drawCircle(point, 4.5, Paint()..color = cCyan);
+    }
+    _paintText(
+      canvas,
+      'RPM',
+      Offset(plot.right, plot.bottom + 19),
+      alignRight: true,
+    );
+  }
+
+  void _paintText(
+    Canvas canvas,
+    String text,
+    Offset anchor, {
+    bool alignRight = false,
+    bool centered = false,
+  }) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: const TextStyle(color: cMuted, fontSize: 10),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    var dx = anchor.dx;
+    if (alignRight) dx -= painter.width;
+    if (centered) dx -= painter.width / 2;
+    painter.paint(canvas, Offset(dx, anchor.dy - painter.height / 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _FuelCurvePainter oldDelegate) =>
+      oldDelegate.profile != profile ||
+      oldDelegate.currentRpm != currentRpm ||
+      oldDelegate.calibrationPercent != calibrationPercent;
 }
 
 // Realistic analog instrument — dial face, major/minor ticks, an optional

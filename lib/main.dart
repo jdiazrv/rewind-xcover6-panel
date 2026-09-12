@@ -40,6 +40,7 @@ import 'ais_view.dart';
 import 'attitude_sensor.dart';
 import 'boat_icons.dart';
 import 'data_api.dart';
+import 'engine_fuel.dart';
 import 'geocode.dart';
 import 'model_comparison.dart';
 import 'models.dart';
@@ -343,6 +344,11 @@ class _DashboardState extends State<Dashboard> {
           true;
 
   Timer? _engineContactExpiryTimer;
+  Timer? _engineRunRefreshTimer;
+  bool _engineWasRunning = false;
+  bool _engineHistoryLoading = false;
+  DateTime? _engineHistoryFetchedAt;
+  String? _engineHistoryFetchedFor;
 
   void _scheduleEngineContactExpiry() {
     _engineContactExpiryTimer?.cancel();
@@ -3066,8 +3072,8 @@ class _DashboardState extends State<Dashboard> {
     final polarByHostJson = prefs.getString('polarConfigByHostJson');
     if (polarByHostJson != null) {
       try {
-        settings.polarConfigJsonByHost =
-            (jsonDecode(polarByHostJson) as Map).cast<String, dynamic>();
+        settings.polarConfigJsonByHost = (jsonDecode(polarByHostJson) as Map)
+            .cast<String, dynamic>();
       } catch (_) {
         /* keep empty if corrupted */
       }
@@ -3655,6 +3661,19 @@ class _DashboardState extends State<Dashboard> {
       h['$base.revolutions'] = (v) {
         final n = _num(v);
         signalK.engineRpm = n == null ? null : n * 60;
+        final runningNow =
+            signalK.engineRpm != null && signalK.engineRpm! > 200;
+        // This is edge detection, not RPM smoothing/debouncing. It performs
+        // one history refresh only when a real running→stopped transition
+        // completes an engine use; the live RPM value itself is untouched.
+        if (_engineWasRunning && !runningNow) {
+          _engineRunRefreshTimer?.cancel();
+          _engineRunRefreshTimer = Timer(
+            const Duration(seconds: 20),
+            () => unawaited(_seedEngineHoursFromHistory(force: true)),
+          );
+        }
+        _engineWasRunning = runningNow;
       };
       h['$base.coolantTemperature'] = (v) {
         signalK.engineCoolantTempK = _num(v);
@@ -4664,10 +4683,13 @@ class _DashboardState extends State<Dashboard> {
       case 'navigation.anchor.bearingTrue':
         signalK.anchorBearingTrueDeg = n == null ? null : n * 57.2957795;
       case 'environment.wind.speedApparent':
-        signalK.awsKn = n == null ? null : n * 1.94384;
+        // Mismo filtro que en el histórico (ver normalizeWindKn): un dato
+        // corrupto no debe entrar ni en la lectura ni en el buffer de
+        // rachas, que se queda con el máximo y lo arrastraría horas.
+        signalK.awsKn = n == null ? null : normalizeWindKn(n * 1.94384);
         _dAws = _awsDamp.linear(signalK.awsKn);
         _awsHistory.add(signalK.awsKn);
-        signalK.awsUpdate = ts;
+        if (signalK.awsKn != null) signalK.awsUpdate = ts;
       case 'environment.wind.angleApparent':
         signalK.awaDeg = n == null ? null : n * 57.2957795;
         _dAwa = _awaDamp.angle(signalK.awaDeg);
@@ -4705,10 +4727,10 @@ class _DashboardState extends State<Dashboard> {
         _twdShiftHistory.add(_dTwd);
         signalK.twdUpdate = ts;
       case 'environment.wind.speedTrue':
-        signalK.twsKn = n == null ? null : n * 1.94384;
+        signalK.twsKn = n == null ? null : normalizeWindKn(n * 1.94384);
         _dTws = _twsDamp.linear(signalK.twsKn);
         _twsHistory.add(signalK.twsKn);
-        signalK.twsUpdate = ts;
+        if (signalK.twsKn != null) signalK.twsUpdate = ts;
       case 'environment.water.temperature':
         signalK.waterTempK = n;
       case 'environment.outside.temperature':
@@ -4889,9 +4911,7 @@ class _DashboardState extends State<Dashboard> {
       final raw = settings.polarCustomJson;
       if (raw == null) return null;
       try {
-        return PolarTable.fromJson(
-          jsonDecode(raw) as Map<String, dynamic>,
-        );
+        return PolarTable.fromJson(jsonDecode(raw) as Map<String, dynamic>);
       } catch (_) {
         return null;
       }
@@ -5334,7 +5354,7 @@ class _DashboardState extends State<Dashboard> {
         '/signalk/v2/api/history/paths',
         {
           'from': now
-              .subtract(const Duration(days: 90))
+              .subtract(const Duration(days: 365))
               .toIso8601String()
               .split('.')
               .first,
@@ -5369,71 +5389,149 @@ class _DashboardState extends State<Dashboard> {
   /// último valor, y además aguanta huecos en los datos. Así las horas
   /// están desde el primer arranque de la app aunque el puente del motor
   /// lleve días apagado.
-  Future<void> _seedEngineHoursFromHistory() async {
-    if (settings.demoMode) return;
-    if (signalK.engineHours != null || signalK.lastEngineHours != null) return;
-    var path = settings.sensorConfig.enginePath;
-    if (path == null || path.isEmpty) {
-      // La autodetección de sensores mira el árbol EN VIVO, y con el motor
-      // apagado propulsion ni siquiera existe (el servidor devuelve 404),
-      // así que la ruta se quedaba en blanco justo en el caso en que hace
-      // falta. El histórico sí la recuerda.
-      path = await _discoverEnginePathFromHistory();
-      if (path == null || !mounted) return;
-      setState(() => settings.sensorConfig.enginePath = path);
-      _buildDynamicHandlers();
-      _sendSignalKSubscription();
-      unawaited(_saveSettings());
+  Future<void> _seedEngineHoursFromHistory({bool force = false}) async {
+    if (settings.demoMode || _engineHistoryLoading) return;
+    final serverKey = _serverConfigKey;
+    final lastFetch = _engineHistoryFetchedAt;
+    if (!force &&
+        _engineHistoryFetchedFor == serverKey &&
+        lastFetch != null &&
+        DateTime.now().difference(lastFetch) < const Duration(minutes: 15)) {
+      return;
     }
+    _engineHistoryLoading = true;
+    var completed = false;
+    var path = settings.sensorConfig.enginePath;
     try {
-      final points = await skHistoryQuery(
+      if (path == null || path.isEmpty) {
+        // La autodetección de sensores mira el árbol EN VIVO, y con el motor
+        // apagado propulsion ni siquiera existe (el servidor devuelve 404),
+        // así que la ruta se quedaba en blanco justo en el caso en que hace
+        // falta. El histórico sí la recuerda.
+        path = await _discoverEnginePathFromHistory();
+        if (path == null || !mounted || serverKey != _serverConfigKey) return;
+        setState(() => settings.sensorConfig.enginePath = path);
+        _buildDynamicHandlers();
+        _sendSignalKSubscription();
+        unawaited(_saveSettings());
+      }
+
+      final def = MetricDef(path, 'Horas motor', 'h', scale: 1 / 3600.0);
+
+      // Coarse maximum over a long window recovers the cumulative counter
+      // even when the MDI has been off for weeks. Signal K drops the live REST
+      // node when the source disappears (confirmed against REWIND: HTTP 404),
+      // whereas its history provider keeps these samples.
+      final totals = await skHistoryQuery(
         host: settings.host,
         port: settings.port,
         authBase64: settings.authBase64,
-        def: MetricDef(path, 'Horas motor', 'h', scale: 1 / 3600.0),
-        range: const Duration(days: 30),
+        def: def,
+        range: const Duration(days: 365),
         resolution: const Duration(hours: 6),
         aggFn: 'max',
       );
-      if (!mounted || points.isEmpty) return;
-      var best = 0.0;
-      DateTime? at;
-      for (final p in points) {
-        if (p.value > best) {
-          best = p.value;
-          at = p.time;
+      if (!mounted || serverKey != _serverConfigKey) return;
+      var best = signalK.lastEngineHours ?? 0.0;
+      DateTime? bestAt = signalK.lastEngineHoursAt;
+      for (final point in totals) {
+        if (point.value > best ||
+            (point.value == best &&
+                (bestAt == null || point.time.isAfter(bestAt)))) {
+          best = point.value;
+          bestAt = point.time;
         }
       }
-      if (best <= 0) return;
-      // El último uso: el tramo final en el que el contador subió. Se
-      // recorre hacia atrás desde el máximo y se para en cuanto hay un
-      // hueco sin subida, que es el motor parado.
-      DateTime? runStart;
-      var runHours = 0.0;
-      final rising = [
-        for (final p in points)
-          if (p.value > 0) p,
-      ]..sort((a, b) => a.time.compareTo(b.time));
-      for (var i = rising.length - 1; i > 0; i--) {
-        final delta = rising[i].value - rising[i - 1].value;
-        if (delta <= 0.005) {
-          if (runStart != null) break; // el uso ya estaba cerrado
-          continue;
-        }
-        runHours += delta;
-        runStart = rising[i - 1].time;
+
+      // Commit the total immediately. The fine query below is optional and
+      // can be larger/slower; its failure must never make the already-found
+      // hour meter disappear from web or webapp.
+      if (best > 0) {
+        setState(() {
+          signalK.lastEngineHours = best;
+          signalK.lastEngineHoursAt = bestAt;
+        });
+        unawaited(_saveSettings());
+        completed = true;
       }
-      setState(() {
-        signalK.lastEngineHours = best;
-        signalK.lastEngineHoursAt = at;
-        if (runStart != null && runHours > 0.01) {
-          signalK.lastEngineRunAt = at;
-          signalK.lastEngineRunHours = runHours;
+
+      // A separate fine query is essential for the last use. Six-hour max
+      // buckets are excellent for the total but cannot distinguish a
+      // 40-minute trip from the rest of that six-hour block.
+      try {
+        final engineBase = path.replaceFirst(RegExp(r'\.runTime$'), '');
+        final rpmFine = await skHistoryQuery(
+          host: settings.host,
+          port: settings.port,
+          authBase64: settings.authBase64,
+          def: MetricDef(
+            '$engineBase.revolutions',
+            'RPM motor',
+            'rpm',
+            scale: 60,
+          ),
+          range: const Duration(days: 30),
+          resolution: const Duration(minutes: 1),
+        );
+        var lastRun = latestEngineRunFromRpmHistory(rpmFine);
+
+        // Some older history providers may have runTime but not RPM. In that
+        // case the cumulative counter still gives a useful duration, although
+        // its start/stop timestamps are less precise because it updates in
+        // bursts.
+        var fine = <GraphPoint>[];
+        if (lastRun == null) {
+          fine = await skHistoryQuery(
+            host: settings.host,
+            port: settings.port,
+            authBase64: settings.authBase64,
+            def: def,
+            range: const Duration(days: 30),
+            resolution: const Duration(minutes: 1),
+          );
+          lastRun = latestEngineRunFromHistory(fine);
         }
-      });
-      unawaited(_saveSettings());
-    } catch (_) {
+        if (lastRun == null) {
+          // Older boats may not have run during the last month. A five-minute
+          // fallback keeps a full year affordable while still giving a useful
+          // duration and date.
+          fine = await skHistoryQuery(
+            host: settings.host,
+            port: settings.port,
+            authBase64: settings.authBase64,
+            def: def,
+            range: const Duration(days: 365),
+            resolution: const Duration(minutes: 5),
+          );
+          lastRun = latestEngineRunFromHistory(
+            fine,
+            sessionGap: const Duration(minutes: 25),
+          );
+        }
+        if (!mounted || serverKey != _serverConfigKey) return;
+        final completedRun = lastRun;
+        if (completedRun != null) {
+          setState(() {
+            signalK.lastEngineRunAt = completedRun.endedAt;
+            signalK.lastEngineRunHours = completedRun.durationHours;
+          });
+          unawaited(_saveSettings());
+          completed = true;
+        }
+      } catch (error) {
+        debugPrint(
+          '[MOTOR] Horas recuperadas; último uso no disponible: $error',
+        );
+      }
+    } catch (error) {
+      debugPrint('[MOTOR] No se pudo recuperar runTime histórico: $error');
       /* sin histórico se sigue sin horas hasta que el motor publique */
+    } finally {
+      _engineHistoryLoading = false;
+      if (completed) {
+        _engineHistoryFetchedAt = DateTime.now();
+        _engineHistoryFetchedFor = serverKey;
+      }
     }
   }
 
@@ -6326,6 +6424,7 @@ class _DashboardState extends State<Dashboard> {
     _demoTimer?.cancel();
     _staleWatchdog?.cancel();
     _engineContactExpiryTimer?.cancel();
+    _engineRunRefreshTimer?.cancel();
     _anchorPublishTimer?.cancel();
     _ntfyTopicSyncDebounce?.cancel();
     _anchorPublishChannel?.sink.close();
@@ -6721,6 +6820,7 @@ class _DashboardState extends State<Dashboard> {
   // ─── NAV page ───────────────────────────────────────────────────────────────
   int _navPageIndex = 0;
   double _navDragOverscroll = 0;
+
   /// Un gesto, un salto de página.
   ///
   /// Al pasar de página el acumulado se ponía a cero pero el MISMO arrastre
@@ -6821,10 +6921,7 @@ class _DashboardState extends State<Dashboard> {
               ? ''
               : settings.polarBoatId,
           isExpanded: true,
-          decoration: const InputDecoration(
-            labelText: 'Barco',
-            isDense: true,
-          ),
+          decoration: const InputDecoration(labelText: 'Barco', isDense: true),
           items: [
             const DropdownMenuItem(value: '', child: Text('Ninguna')),
             if (custom)
@@ -7012,9 +7109,7 @@ class _DashboardState extends State<Dashboard> {
           _freshWind(_dTwd, signalK.twdUpdate) ??
           trueWindDirection(twa, _freshHeading ?? _freshCog),
       destinationDistanceNm: _courseFresh ? signalK.courseDistanceNm : null,
-      destinationBearingDeg: _courseFresh
-          ? signalK.courseBearingTrueDeg
-          : null,
+      destinationBearingDeg: _courseFresh ? signalK.courseBearingTrueDeg : null,
       now: DateTime.now(),
     );
   }
@@ -8219,6 +8314,10 @@ class _DashboardState extends State<Dashboard> {
     engineRunning: _engineRunning,
     engineContactOn: _engineContactOn,
     engineRpm: _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate),
+    fuelProfile: engineFuelProfileById(settings.sensorConfig.engineModelId),
+    fuelDriveType: settings.sensorConfig.engineDriveType,
+    fuelPropellerType: settings.sensorConfig.enginePropellerType,
+    fuelCalibrationPercent: settings.sensorConfig.engineFuelCalibrationPercent,
     engineTorquePercent: _freshEngine(
       signalK.engineTorquePercent,
       signalK.engineRpmUpdate,
@@ -11903,8 +12002,7 @@ class _DashboardState extends State<Dashboard> {
             (
               title: 'Pantalla del motor',
               section: 'PANTALLA · Apariencia y paneles',
-              keywords:
-                  'motor engine ninguno simple completo panel telemetria rpm',
+              keywords: 'motor engine ninguno simple completo panel telemetria rpm consumo combustible diesel yanmar volvo 4jh4 4jh5 d1 d2 helice plegable fija orientable eje shaft saildrive calibracion',
               tab: 3,
             ),
             (
@@ -13110,6 +13208,157 @@ class _DashboardState extends State<Dashboard> {
                                 ),
                                 tapTargetSize: MaterialTapTargetSize.padded,
                               ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'MOTOR Y CONSUMO',
+                              style: TextStyle(
+                                color: cMuted,
+                                fontSize: 10,
+                                letterSpacing: 1.1,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            DropdownButtonFormField<String>(
+                              initialValue:
+                                  engineFuelProfileById(
+                                        settings.sensorConfig.engineModelId,
+                                      ) ==
+                                      null
+                                  ? null
+                                  : settings.sensorConfig.engineModelId,
+                              isExpanded: true,
+                              decoration: const InputDecoration(
+                                labelText: 'Motor para estimar consumo',
+                                helperText: 'Usa la curva de carga de hélice, no la curva de banco.',
+                                isDense: true,
+                              ),
+                              hint: const Text('Seleccionar motor'),
+                              items: [
+                                for (final profile in engineFuelProfiles)
+                                  DropdownMenuItem(
+                                    value: profile.id,
+                                    child: Text(profile.label),
+                                  ),
+                              ],
+                              onChanged: (value) {
+                                setState(
+                                  () => settings.sensorConfig.engineModelId =
+                                      value ?? '',
+                                );
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            const Text('TRANSMISIÓN', style: lbl),
+                            const SizedBox(height: 5),
+                            SegmentedButton<String>(
+                              emptySelectionAllowed: true,
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'shaft',
+                                  label: Text('Eje'),
+                                ),
+                                ButtonSegment(
+                                  value: 'saildrive',
+                                  label: Text('Saildrive'),
+                                ),
+                              ],
+                              selected:
+                                  settings.sensorConfig.engineDriveType.isEmpty
+                                  ? const <String>{}
+                                  : {settings.sensorConfig.engineDriveType},
+                              onSelectionChanged: (values) {
+                                setState(
+                                  () => settings.sensorConfig.engineDriveType =
+                                      values.isEmpty ? '' : values.first,
+                                );
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            const Text('HÉLICE', style: lbl),
+                            const SizedBox(height: 5),
+                            SegmentedButton<String>(
+                              emptySelectionAllowed: true,
+                              segments: const [
+                                ButtonSegment(
+                                  value: 'fixed',
+                                  label: Text('Fija'),
+                                ),
+                                ButtonSegment(
+                                  value: 'folding',
+                                  label: Text('Plegable'),
+                                ),
+                                ButtonSegment(
+                                  value: 'feathering',
+                                  label: Text('Orientable'),
+                                ),
+                              ],
+                              selected:
+                                  settings
+                                      .sensorConfig
+                                      .enginePropellerType
+                                      .isEmpty
+                                  ? const <String>{}
+                                  : {settings.sensorConfig.enginePropellerType},
+                              onSelectionChanged: (values) {
+                                setState(
+                                  () =>
+                                      settings
+                                          .sensorConfig
+                                          .enginePropellerType = values.isEmpty
+                                      ? ''
+                                      : values.first,
+                                );
+                                unawaited(_saveSettings());
+                              },
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                const Expanded(
+                                  child: Text(
+                                    'Ajuste al consumo real',
+                                    style: TextStyle(
+                                      color: cText,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
+                                  style: const TextStyle(
+                                    color: cOrange,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Slider(
+                              value: settings
+                                  .sensorConfig
+                                  .engineFuelCalibrationPercent
+                                  .clamp(70, 130),
+                              min: 70,
+                              max: 130,
+                              divisions: 60,
+                              label:
+                                  '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
+                              onChanged: (value) => setState(
+                                () =>
+                                    settings
+                                            .sensorConfig
+                                            .engineFuelCalibrationPercent =
+                                        value,
+                              ),
+                              onChangeEnd: (_) => unawaited(_saveSettings()),
+                            ),
+                            const Text(
+                              'Eje/saildrive y tipo de hélice se guardan como contexto, pero no aplican un porcentaje oculto. Diámetro, paso, carena, desplazamiento y mar cambian la carga; calibra este ajuste comparando con repostajes o un caudalímetro.',
+                              style: TextStyle(color: cMuted, fontSize: 10.5),
                             ),
                             const SizedBox(height: 10),
                             const Text(
@@ -14700,14 +14949,21 @@ class _DashboardState extends State<Dashboard> {
                                       ),
                                       _diagRow(
                                         'Horas motor',
-                                        signalK.engineHours != null
-                                            ? '${signalK.engineHours!.toStringAsFixed(1)} h'
+                                        (signalK.engineHours ??
+                                                    signalK.lastEngineHours) !=
+                                                null
+                                            ? '${(signalK.engineHours ?? signalK.lastEngineHours)!.toStringAsFixed(1)} h'
                                             : '--',
-                                        signalK.engineHours != null
+                                        (signalK.engineHours ??
+                                                    signalK.lastEngineHours) !=
+                                                null
                                             ? cText
                                             : cMuted,
                                         path:
                                             sc.enginePath ?? '(sin configurar)',
+                                        updatedAt:
+                                            signalK.engineHoursUpdate ??
+                                            signalK.lastEngineHoursAt,
                                       ),
                                       _diagRow(
                                         'COG',
