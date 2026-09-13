@@ -140,7 +140,12 @@ double normalizeRelativeAngle(double value) {
           math.cos(lat2r) *
           math.sin(dLon / 2) *
           math.sin(dLon / 2);
-  final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  // Floating-point roundoff can put the theoretically bounded Haversine
+  // term a few ulps outside 0..1 (notably for almost antipodal fixes).
+  // Clamp before the square roots so one exotic GPS pair cannot turn every
+  // downstream distance — anchor alarm, AIS and report filtering — into NaN.
+  final boundedA = a.clamp(0.0, 1.0).toDouble();
+  final c = 2 * math.atan2(math.sqrt(boundedA), math.sqrt(1 - boundedA));
   final y = math.sin(dLon) * math.cos(lat2r);
   final x =
       math.cos(lat1r) * math.sin(lat2r) -
@@ -177,7 +182,8 @@ double normalizeRelativeAngle(double value) {
         math.sin(brgRad) * math.sin(distanceM / earthR) * math.cos(lat1),
         math.cos(distanceM / earthR) - math.sin(lat1) * math.sin(lat2),
       );
-  return (lat: lat2 * 180 / math.pi, lon: lon2 * 180 / math.pi);
+  final lonDeg = lon2 * 180 / math.pi;
+  return (lat: lat2 * 180 / math.pi, lon: ((lonDeg + 540) % 360) - 180);
 }
 
 /// Whether a point [distanceM] from the drop position, at true bearing
@@ -205,6 +211,9 @@ bool isOutsideWatchZone({
     return false;
   }
   final span = (sectorEndDeg - sectorStartDeg + 360) % 360;
+  // Equal ends are the natural serialized representation of a complete
+  // circle, not a zero-width sector that rejects every bearing except one.
+  if (span.abs() < 1e-9) return false;
   final rel = (bearingFromDropDeg - sectorStartDeg + 360) % 360;
   return rel > span;
 }
@@ -213,6 +222,34 @@ class GraphPoint {
   const GraphPoint({required this.time, required this.value});
   final DateTime time;
   final double value;
+}
+
+/// One centrally-qualified boat-speed reading.
+///
+/// STW is the physically correct input for water-referenced sailing maths.
+/// When the log is missing or has been positively diagnosed as stalled, SOG
+/// is a useful degraded fallback, but callers must retain [overGround] so it
+/// is never silently presented as a through-water measurement.
+typedef EffectiveBoatSpeed = ({
+  double? valueKn,
+  bool overGround,
+  bool degraded,
+});
+
+EffectiveBoatSpeed selectEffectiveBoatSpeed({
+  required double? stwKn,
+  required double? sogKn,
+  required bool logStalled,
+}) {
+  final validStw = stwKn != null && stwKn.isFinite && stwKn >= 0;
+  final validSog = sogKn != null && sogKn.isFinite && sogKn >= 0;
+  if (validStw && !logStalled) {
+    return (valueKn: stwKn, overGround: false, degraded: false);
+  }
+  if (validSog) {
+    return (valueKn: sogKn, overGround: true, degraded: true);
+  }
+  return (valueKn: null, overGround: false, degraded: logStalled);
 }
 
 /// Coerces a barometric reading to millibars/hPa whatever unit it arrived
@@ -306,7 +343,9 @@ SmoothedBand smoothSeriesWithBand(
   final mean = <GraphPoint>[];
   final low = <GraphPoint>[];
   final high = <GraphPoint>[];
-  // Two pointers over a time-sorted series — O(n) rather than O(n²).
+  // Two pointers avoid repeatedly searching the full series. The window
+  // statistics themselves still visit its samples (O(n*k)); history ranges
+  // are bounded, so this favours clear circular/min/max semantics.
   var lo = 0, hi = 0;
   for (var i = 0; i < points.length; i++) {
     final tMs = points[i].time.millisecondsSinceEpoch;
@@ -367,6 +406,7 @@ Duration smoothingWindowFor(Duration range, Duration sampleStep) {
   const ceiling = Duration(minutes: 10);
   var w = proportional < ceiling ? proportional : ceiling;
   if (w < floor) w = floor;
+  if (w > ceiling) w = ceiling;
   return w;
 }
 
@@ -1935,7 +1975,13 @@ class BatteryLoadEvent {
 /// batería de plomo llena en reposo da ~12,7 V, y flotación son ~13,2-13,8
 /// V. Por encima del umbral el porcentaje no debe mostrarse; por debajo y
 /// estable, la curva de reposo sí es válida.
-bool batteryOnFloat(double? volts) => volts != null && volts >= 13.0;
+bool batteryOnFloat(double? volts, {String chemistry = 'lead'}) {
+  if (volts == null) return false;
+  // LiFePO4 commonly rests around 13.0–13.3 V; calling that charger-imposed
+  // voltage hides the very curve the user asked to inspect.
+  final threshold = chemistry == 'lithium' ? 13.55 : 13.0;
+  return volts >= threshold;
+}
 
 /// Detecta episodios de carga fuerte a partir del voltaje.
 ///
@@ -1958,6 +2004,7 @@ class BatteryLoadWatcher {
   double? _baseline; // nivel estable antes del esfuerzo
   double? _minV; // mínimo del episodio en curso
   DateTime? _startedAt;
+  DateTime? _lastAt;
 
   /// Alimenta una lectura. Devuelve el evento si acaba de cerrarse uno.
   BatteryLoadEvent? add(double? volts, DateTime at) {
@@ -1965,8 +2012,11 @@ class BatteryLoadWatcher {
     final base = _baseline;
     if (base == null) {
       _baseline = volts;
+      _lastAt = at;
       return null;
     }
+    final previousAt = _lastAt;
+    _lastAt = at;
     if (_startedAt == null) {
       if (base - volts >= dropThresholdV) {
         // Empieza el esfuerzo.
@@ -1977,13 +2027,20 @@ class BatteryLoadWatcher {
         // ARRIBA de golpe y hacia abajo despacio, para que una bajada
         // lenta (consumo normal) no se coma el umbral y acabe ocultando
         // un esfuerzo real.
-        _baseline = volts > base ? volts : base - (base - volts) * 0.05;
+        final dtSeconds = previousAt == null
+            ? 1.0
+            : at.difference(previousAt).inMilliseconds.clamp(1, 60000) / 1000.0;
+        final alpha = 1 - math.exp(-dtSeconds / 20.0);
+        _baseline = volts > base ? volts : base + (volts - base) * alpha;
       }
       return null;
     }
     if (volts < (_minV ?? volts)) _minV = volts;
+    // A load that never recovers must not block all future detections. Close
+    // it honestly after five minutes with the observed duration/minimum.
+    final timedOut = at.difference(_startedAt!) >= const Duration(minutes: 5);
     // Recuperado: vuelve a menos de un tercio de la caída que lo disparó.
-    if (volts >= base - dropThresholdV / 3) {
+    if (volts >= base - dropThresholdV / 3 || timedOut) {
       final event = BatteryLoadEvent(
         at: _startedAt!,
         restingV: base,
@@ -2137,6 +2194,22 @@ DemoScenario demoScenarioById(String id) => kDemoScenarios.firstWhere(
   final aws = math.sqrt(x * x + y * y);
   final awa = math.atan2(y, x) * 180 / math.pi;
   return (aws, normalizeRelativeAngle(awa));
+}
+
+/// Inverse vector transform of [apparentFromTrue]. The returned angle is
+/// water-referenced only when [boatSpeedKn] is STW; feeding SOG yields an
+/// explicitly degraded ground approximation and callers must label it so.
+(double tws, double twa) trueWindFromApparent(
+  double awsKn,
+  double awaDeg,
+  double boatSpeedKn,
+) {
+  final awaRad = awaDeg * math.pi / 180;
+  final x = awsKn * math.cos(awaRad) - boatSpeedKn;
+  final y = awsKn * math.sin(awaRad);
+  final tws = math.sqrt(x * x + y * y);
+  final twa = math.atan2(y, x) * 180 / math.pi;
+  return (tws, normalizeRelativeAngle(twa));
 }
 
 /// Por qué falló (o no) un intento de login contra Signal K.
@@ -2327,7 +2400,7 @@ double effectiveWatchRadiusM(
 
 // Minimum points (since the current drop — see ANC's "Recolocar" use)
 // before a fit is even attempted.
-const kAnchorRefitMinPoints = 8;
+const kAnchorRefitMinPoints = 15;
 
 // Finds the anchor's true position from the boat's own swing track, given
 // a KNOWN (not fitted) chain-taut radius — config.radiusM, the anchor
@@ -2388,8 +2461,10 @@ const kAnchorRefitMinPoints = 8;
   // meant to catch; a real arc's own points cluster together by
   // construction and are unaffected).
   {
-    final cxRaw = xs.reduce((a, b) => a + b) / xs.length;
-    final cyRaw = ys.reduce((a, b) => a + b) / ys.length;
+    final sortedX = [...xs]..sort();
+    final sortedY = [...ys]..sort();
+    final cxRaw = sortedX[sortedX.length ~/ 2];
+    final cyRaw = sortedY[sortedY.length ~/ 2];
     final dists = [
       for (var i = 0; i < xs.length; i++)
         math.sqrt(
@@ -2844,13 +2919,29 @@ YawAnalysisResult computeYawAnalysis({
   // (properly boundary-ordered) polygon, gives the actual occupied area
   // instead.
   final cosLat = math.cos(anchorLat * math.pi / 180);
-  final xy = [
+  var xy = [
     for (final p in points)
       (
         x: (p.lon - anchorLon) * cosLat * 111320,
         y: (p.lat - anchorLat) * 110540,
       ),
   ];
+  // A convex hull is deliberately sensitive to extremes. Remove only gross
+  // radial GPS outliers with a median/MAD gate before asking it for area;
+  // normal asymmetric swing arcs remain untouched.
+  if (xy.length >= 8) {
+    final radii = [for (final p in xy) math.sqrt(p.x * p.x + p.y * p.y)];
+    final sortedR = [...radii]..sort();
+    final medianR = sortedR[sortedR.length ~/ 2];
+    final deviations = [for (final r in radii) (r - medianR).abs()]..sort();
+    final mad = deviations[deviations.length ~/ 2];
+    final maxAccepted = medianR + math.max(10.0, mad * 6);
+    final filtered = [
+      for (var i = 0; i < xy.length; i++)
+        if (radii[i] <= maxAccepted) xy[i],
+    ];
+    if (filtered.length >= 4) xy = filtered;
+  }
   final sweptAreaM2 = _convexHullArea(xy);
 
   // ── Guiñada — the boat's HEADING oscillating around the rode line ────────
@@ -2916,8 +3007,25 @@ YawAnalysisResult computeYawAnalysis({
     for (var i = 0; i < tautPoints.length; i++)
       (t: tautPoints[i].t, deg: smoothedGuinada[i]),
   ];
-  final guinadaAmplitudeDeg =
-      smoothedGuinada.reduce(math.max) - smoothedGuinada.reduce(math.min);
+  final sortedGuinada = [...smoothedGuinada]..sort();
+  final lowIdx = ((sortedGuinada.length - 1) * 0.05).round();
+  final highIdx = ((sortedGuinada.length - 1) * 0.95).round();
+  final guinadaAmplitudeDeg = sortedGuinada[highIdx] - sortedGuinada[lowIdx];
+  // Period detection needs a genuinely zero-centred signal. A persistent
+  // heading/rode bias must not make a perfectly real oscillation disappear.
+  final sinSum = smoothedGuinada.fold<double>(
+    0,
+    (sum, value) => sum + math.sin(value * math.pi / 180),
+  );
+  final cosSum = smoothedGuinada.fold<double>(
+    0,
+    (sum, value) => sum + math.cos(value * math.pi / 180),
+  );
+  final centerDeg = math.atan2(sinSum, cosSum) * 180 / math.pi;
+  final centeredGuinada = [
+    for (final value in smoothedGuinada)
+      normalizeRelativeAngle(value - centerDeg),
+  ];
 
   return YawAnalysisResult(
     samples: points.length,
@@ -2928,7 +3036,7 @@ YawAnalysisResult computeYawAnalysis({
     guinadaSamples: tautPoints.length,
     guinadaSeries: guinadaSeries,
     guinadaAmplitudeDeg: guinadaAmplitudeDeg,
-    guinadaPeriod: _oscillationPeriod(smoothedGuinada, [
+    guinadaPeriod: _oscillationPeriod(centeredGuinada, [
       for (final p in tautPoints) p.t,
     ], guinadaAmplitudeDeg),
   );

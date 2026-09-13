@@ -12,7 +12,8 @@ void main() {
 
   setUpAll(() {
     final raw = File('assets/polars/orc_polars.json').readAsStringSync();
-    dehler47 = PolarTable.listFromAsset(raw).firstWhere((b) => b.id == 'dehler47');
+    dehler47 = PolarTable.listFromAsset(raw)
+        .firstWhere((b) => b.id == 'dehler47');
   });
 
   Future<void> pump(
@@ -24,9 +25,7 @@ void main() {
     t.view.devicePixelRatio = 1;
     addTearDown(t.view.resetPhysicalSize);
     addTearDown(t.view.resetDevicePixelRatio);
-    await t.pumpWidget(
-      MaterialApp(home: Scaffold(body: panel)),
-    );
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: panel)));
     await t.pumpAndSettle();
   }
 
@@ -39,6 +38,7 @@ void main() {
     double? destNm,
     double? destBrg,
     double twd = 0,
+    double? cog,
     double factor = 100,
   }) => PolarPanel(
     polar: dehler47,
@@ -51,6 +51,7 @@ void main() {
     twdDeg: twd,
     destinationDistanceNm: destNm,
     destinationBearingDeg: destBrg,
+    currentCogDeg: cog ?? twa,
     now: DateTime.utc(2026, 9, 12, 10, 0),
   );
 
@@ -142,12 +143,12 @@ void main() {
       // Navegando casi al ángulo óptimo, la mejora cabe en el margen del
       // propio cálculo: decirla sería fingir precisión.
       await pump(t, panel(destNm: 12, destBrg: 0, twa: 41));
-      expect(find.textContaining('prácticamente igual'), findsOneWidget);
+      expect(find.textContaining('coincide con la estimación'), findsOneWidget);
     });
 
     testWidgets('cuando sí hay diferencia, la da en minutos', (t) async {
       await pump(t, panel(destNm: 12, destBrg: 0, twa: 70));
-      expect(find.textContaining('min más que a'), findsOneWidget);
+      expect(find.textContaining('min más que la estimación'), findsOneWidget);
     });
 
     testWidgets('dice en qué no se puede confiar', (t) async {

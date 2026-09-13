@@ -52,6 +52,61 @@ void main() {
     expect(back.bearingDeg, closeTo(45, 0.5));
   });
 
+  test('antipodal distance remains finite and destination wraps longitude', () {
+    final antipodal = bearingDistanceMeters(0, 0, 0, 180);
+    expect(antipodal.distanceM.isFinite, isTrue);
+    final wrapped = destinationPoint(0, 179.99, 5000, 90);
+    expect(wrapped.lon, inInclusiveRange(-180, 180));
+  });
+
+  test('equal sector ends represent a full circle', () {
+    expect(
+      isOutsideWatchZone(
+        distanceM: 10,
+        radiusM: 20,
+        shape: 'sector',
+        bearingFromDropDeg: 190,
+        sectorStartDeg: 45,
+        sectorEndDeg: 45,
+      ),
+      isFalse,
+    );
+  });
+
+  test('biased yaw still produces an oscillation period', () {
+    const anchorLat = 37.0, anchorLon = 23.0, radiusM = 40.0;
+    final start = DateTime.utc(2026, 9, 13, 12);
+    final points = <AnchorYawPoint>[];
+    for (var second = 0; second <= 360; second += 5) {
+      final bearing = 10 * math.sin(2 * math.pi * second / 90);
+      final position = destinationPoint(anchorLat, anchorLon, radiusM, bearing);
+      final toAnchor = bearingDistanceMeters(
+        position.lat,
+        position.lon,
+        anchorLat,
+        anchorLon,
+      ).bearingDeg;
+      points.add(
+        AnchorYawPoint(
+          t: start.add(Duration(seconds: second)),
+          lat: position.lat,
+          lon: position.lon,
+          headingDeg: normalize360(
+            toAnchor + 18 + 8 * math.sin(2 * math.pi * second / 90),
+          ),
+        ),
+      );
+    }
+    final result = computeYawAnalysis(
+      points: points,
+      anchorLat: anchorLat,
+      anchorLon: anchorLon,
+      radiusM: radiusM,
+    );
+    expect(result.guinadaPeriod, isNotNull);
+    expect(result.guinadaPeriod!.inSeconds, closeTo(90, 15));
+  });
+
   test('reused anchor trace includes only accepted and current windows', () {
     final base = DateTime.utc(2026, 9, 6, 8);
     final points = [

@@ -362,6 +362,7 @@ EngineRunSummary? latestEngineRunFromRpmHistory(
   List<GraphPoint> input, {
   double runningThresholdRpm = 200,
   Duration samplePeriod = const Duration(minutes: 1),
+  DateTime? now,
 }) {
   if (input.isEmpty) return null;
   final points = _sortAndDedupe([...input]);
@@ -370,7 +371,9 @@ EngineRunSummary? latestEngineRunFromRpmHistory(
   DateTime? start;
   DateTime? lastRunning;
 
+  final upperBound = now ?? DateTime.now().toUtc();
   void finish(DateTime end) {
+    if (end.isAfter(upperBound)) end = upperBound;
     if (start != null && end.isAfter(start!)) {
       latest = EngineRunSummary(
         startedAt: start!,

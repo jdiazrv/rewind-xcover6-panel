@@ -29,6 +29,7 @@ class PolarPanel extends StatelessWidget {
     this.twdDeg,
     this.destinationDistanceNm,
     this.destinationBearingDeg,
+    this.currentCogDeg,
     this.now,
   });
 
@@ -47,9 +48,11 @@ class PolarPanel extends StatelessWidget {
   final double? twdDeg;
   final double? destinationDistanceNm;
   final double? destinationBearingDeg;
+  final double? currentCogDeg;
   final DateTime? now;
 
   double get _factor => factorPercent / 100;
+  double _relativeAngle(double degrees) => ((degrees + 540) % 360) - 180;
 
   /// Velocidad objetivo ya ajustada al porcentaje del barco.
   double? get _target {
@@ -152,7 +155,10 @@ class PolarPanel extends StatelessWidget {
       children: [
         Expanded(flex: 4, child: _speedRow(target, speed)),
         const SizedBox(height: 8),
-        Expanded(flex: 5, child: leg == null ? _noDestination(tws) : _legCard(leg, tws, twa)),
+        Expanded(
+          flex: 5,
+          child: leg == null ? _noDestination(tws) : _legCard(leg, tws, twa),
+        ),
       ],
     );
   }
@@ -247,9 +253,7 @@ class PolarPanel extends StatelessWidget {
 
   // ── Con destino ───────────────────────────────────────────────────────
   Widget _legCard(LegEstimate leg, double tws, double twa) {
-    final eta = now?.add(
-      Duration(seconds: (leg.hours * 3600).round()),
-    );
+    final eta = now?.add(Duration(seconds: (leg.hours * 3600).round()));
     final children = <Widget>[];
 
     if (leg.isZigzag) {
@@ -271,7 +275,7 @@ class PolarPanel extends StatelessWidget {
         _big(
           _hm(leg.hours),
           'a ${leg.sailAngle.round()}°, avanzando '
-          '${leg.madeGoodKn.toStringAsFixed(1)} kn hacia el destino'
+          '${leg.routeMadeGoodKn.toStringAsFixed(1)} kn hacia el destino'
           '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
         ),
       );
@@ -284,7 +288,7 @@ class PolarPanel extends StatelessWidget {
         _big(
           '${leg.directNm.toStringAsFixed(1)} M · ${_hm(leg.hours)}',
           'al objetivo de ${leg.madeGoodKn.toStringAsFixed(1)} kn'
-          '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
+              '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
         ),
       );
       final actual = boatSpeedKn!;
@@ -330,41 +334,45 @@ class PolarPanel extends StatelessWidget {
   /// este tramo, y se calla cuando la diferencia está por debajo del ruido
   /// del propio cálculo.
   String? _compareWithCurrent(LegEstimate leg, double tws, double twa) {
-    final v = polar.speedAt(tws, twa);
-    if (v == null) return null;
-    final a = twa.abs() * math.pi / 180;
-    final madeGood = (v * _factor) * (leg.mode == LegMode.beat ? math.cos(a) : -math.cos(a));
-    if (madeGood <= 0.05) {
-      return 'Al ángulo que llevas (${twa.abs().round()}°) no se avanza '
-          'hacia el destino.';
+    final actual = boatSpeedKn;
+    final bearing = destinationBearingDeg;
+    final cog = currentCogDeg;
+    if (actual == null || actual <= 0.05 || bearing == null || cog == null) {
+      return null;
     }
-    final along = leg.hours * leg.madeGoodKn;
-    final hoursNow = along / madeGood;
+    final routeVmg =
+        actual * math.cos(_relativeAngle(cog - bearing) * math.pi / 180);
+    if (routeVmg <= 0.05) {
+      return 'El movimiento real sobre fondo no está reduciendo la distancia al destino.';
+    }
+    final hoursNow = leg.directNm / routeVmg;
     final deltaMin = (hoursNow - leg.hours) * 60;
     final noiseMin = math.max(3.0, leg.hours * 60 * 0.04);
     if (deltaMin.abs() < noiseMin) {
-      return 'A los ${twa.abs().round()}° que llevas sale prácticamente '
-          'igual: la diferencia cabe dentro del margen del cálculo.';
+      return 'El avance real sobre fondo coincide con la estimación dentro de su margen.';
     }
-    return 'A los ${twa.abs().round()}° que llevas, '
-        '${deltaMin.round()} min más que a ${leg.sailAngle.round()}°.';
+    return deltaMin > 0
+        ? 'Al avance real sobre fondo: ${deltaMin.round()} min más que la estimación.'
+        : 'Al avance real sobre fondo: ${deltaMin.abs().round()} min menos que la estimación.';
   }
 
   /// Hecho comprobable, no instrucción: si este bordo acerca o aleja.
   Widget _tackLine(LegEstimate leg, double twa) {
     final b = destinationBearingDeg, twd = twdDeg;
     if (b == null || twd == null) return const SizedBox.shrink();
-    // El rumbo que se lleva, reconstruido del viento y del ángulo.
-    final heading = (twd + twa) % 360;
-    var off = (b - heading) % 360;
+    // Whether this tack actually closes the destination is a ground-motion
+    // fact. Prefer current COG; only reconstruct heading as a labelled
+    // approximation when COG is unavailable.
+    final course = currentCogDeg ?? (twd + twa) % 360;
+    var off = (b - course) % 360;
     if (off > 180) off -= 360;
     final closing = off.abs() < 90;
     return _line(
       closing
           ? 'Este bordo te acerca: el destino queda ${off.abs().round()}° '
-                'de tu rumbo.'
+                'de tu ${currentCogDeg == null ? 'rumbo estimado' : 'COG'}.'
           : 'Este bordo te aleja: el destino queda ${off.abs().round()}° '
-                'de tu rumbo, por detrás del través.',
+                'de tu ${currentCogDeg == null ? 'rumbo estimado' : 'COG'}, por detrás del través.',
     );
   }
 

@@ -452,6 +452,7 @@ class _DashboardState extends State<Dashboard> {
   double? _lastTrustedAnchorDistanceM;
   double? _autoRaiseCandidateLat;
   double? _autoRaiseCandidateLon;
+  DateTime? _autoRaiseCandidateAt;
   int _autoRaiseFarStreak = 0;
   double? _autoRaisedAnchorDistanceM;
   bool _autoRaiseInProgress = false;
@@ -702,7 +703,7 @@ class _DashboardState extends State<Dashboard> {
       };
       var lat = _anchorEffectiveLat ?? signalK.latitude;
       var lon = _anchorEffectiveLon ?? signalK.longitude;
-      final heading = _freshHeading;
+      final heading = _freshTrueHeading;
       // navigation.position is the GPS antenna's fix — this path is
       // literally named distanceFromBow, so on a boat where the antenna
       // sits meaningfully aft of the bow (settings.anchorGpsToBowM),
@@ -1305,19 +1306,37 @@ class _DashboardState extends State<Dashboard> {
   // instant snapshot, so this is tracked across ticks of _staleWatchdog
   // rather than computed fresh inside the _activeAlarms getter.
   DateTime? _correderaSince;
+  DateTime? _correderaRecoverySince;
   bool _correderaActive = false;
   void _checkCorredera() {
     if (!settings.alarmCorrederaEnabled) {
       _correderaSince = null;
+      _correderaRecoverySince = null;
       _correderaActive = false;
       return;
     }
     final sog = signalK.sogKn;
     final stw = signalK.stwKn;
-    final condition = sog != null && sog > 2 && stw != null && stw == 0;
-    if (!condition) {
+    final moving = sog != null && sog > 2;
+    final stalled = moving && stw != null && stw < 0.2;
+    final recovered = moving && stw != null && stw > 0.4;
+    if (_correderaActive) {
+      if (!recovered) {
+        _correderaRecoverySince = null;
+        return;
+      }
+      _correderaRecoverySince ??= DateTime.now();
+      if (DateTime.now().difference(_correderaRecoverySince!) >=
+          const Duration(seconds: 5)) {
+        _correderaActive = false;
+        _correderaSince = null;
+        _correderaRecoverySince = null;
+      }
+      return;
+    }
+    if (!stalled) {
       _correderaSince = null;
-      _correderaActive = false;
+      _correderaRecoverySince = null;
       return;
     }
     _correderaSince ??= DateTime.now();
@@ -1414,6 +1433,7 @@ class _DashboardState extends State<Dashboard> {
       _lastTrustedAnchorDistanceM = null;
       _autoRaiseCandidateLat = null;
       _autoRaiseCandidateLon = null;
+      _autoRaiseCandidateAt = null;
       _autoRaiseFarStreak = 0;
       // Also invalidates the re-entrancy memo below — a fresh drop always
       // needs its first sample evaluated for real, even on the (unlikely
@@ -1506,6 +1526,7 @@ class _DashboardState extends State<Dashboard> {
       if (distanceM != null && distanceM <= _anchorAutoRaiseDistanceM) {
         _autoRaiseCandidateLat = null;
         _autoRaiseCandidateLon = null;
+        _autoRaiseCandidateAt = null;
         _autoRaiseFarStreak = 0;
       }
       return;
@@ -1529,9 +1550,25 @@ class _DashboardState extends State<Dashboard> {
               _lastRawAnchorLon!,
             ).distanceM <=
             _glitchConfirmToleranceM;
-    _autoRaiseFarStreak = agreesWithCandidate ? _autoRaiseFarStreak + 1 : 1;
+    final now = DateTime.now();
+    if (!agreesWithCandidate) {
+      _autoRaiseFarStreak = 1;
+      _autoRaiseCandidateLat = _lastRawAnchorLat;
+      _autoRaiseCandidateLon = _lastRawAnchorLon;
+      _autoRaiseCandidateAt = now;
+      return;
+    }
+    // Two fixes emitted in one burst are not independent corroboration.
+    if (_autoRaiseCandidateAt == null ||
+        now.difference(_autoRaiseCandidateAt!) < const Duration(seconds: 3)) {
+      return;
+    }
+    // Reject explicitly poor GNSS geometry when the server provides HDOP.
+    if (signalK.gnssHdop != null && signalK.gnssHdop! > 5) return;
+    _autoRaiseFarStreak++;
     _autoRaiseCandidateLat = _lastRawAnchorLat;
     _autoRaiseCandidateLon = _lastRawAnchorLon;
+    _autoRaiseCandidateAt = now;
     if (_autoRaiseFarStreak < _anchorAutoRaiseConfirmStreak) return;
     final confirmedDistanceM = distanceM!;
 
@@ -6534,6 +6571,24 @@ class _DashboardState extends State<Dashboard> {
         );
         return normalize360(magnetic + (variation ?? 0));
       })();
+  double? get _freshTrueHeading {
+    final direct = _freshEngine(
+      signalK.headingTrueDeg,
+      signalK.headingTrueDegUpdate,
+    );
+    if (direct != null) return direct;
+    final magnetic = _freshEngine(
+      signalK.headingMagneticDeg,
+      signalK.headingMagneticDegUpdate,
+    );
+    final variation = _freshEngine(
+      signalK.magneticVariationDeg,
+      signalK.magneticVariationUpdate,
+    );
+    return magnetic == null || variation == null
+        ? null
+        : normalize360(magnetic + variation);
+  }
 
   String get _headingSourceLabel =>
       _freshEngine(signalK.headingTrueDeg, signalK.headingTrueDegUpdate) != null
@@ -6555,6 +6610,23 @@ class _DashboardState extends State<Dashboard> {
       _freshEngine(signalK.cogTrueDeg, signalK.cogTrueDegUpdate);
   double? get _freshSog => _freshEngine(signalK.sogKn, signalK.sogKnUpdate);
   double? get _freshStw => _freshEngine(signalK.stwKn, signalK.stwKnUpdate);
+  EffectiveBoatSpeed get _effectiveBoatSpeed => selectEffectiveBoatSpeed(
+    stwKn: _freshStw,
+    sogKn: _freshSog,
+    logStalled: _correderaActive,
+  );
+
+  double? get _freshTwaWater {
+    final direct = _freshWind(signalK.twaWaterDeg, signalK.twaWaterUpdate);
+    if (direct != null) return direct;
+    final aws = _freshWind(_dAws, signalK.awsUpdate);
+    final awa = _freshWind(_dAwa, signalK.awaUpdate);
+    final stw = _freshStw;
+    if (_correderaActive || aws == null || awa == null || stw == null) {
+      return null;
+    }
+    return trueWindFromApparent(aws, awa, stw).$2;
+  }
 
   // Named point of sail for the VMG viento card — was a crude sign check
   // (cos(TWA) >= 0 → "Ciñendo", else "Empopada"), collapsing every angle
@@ -7091,23 +7163,26 @@ class _DashboardState extends State<Dashboard> {
   }
 
   Widget _polarPage(PolarTable polar) {
-    final stw = _freshStw;
-    final sog = _freshSog;
+    final speed = _effectiveBoatSpeed;
     // La polar se mide por el agua. Si no hay corredera se tira del GPS,
     // pero entonces la corriente entra en el dato y hay que decirlo.
-    final usingSog = stw == null && sog != null;
-    final twa = _freshWind(_dTwa, signalK.twaUpdate);
+    final twd = _freshWind(_dTwd, signalK.twdUpdate);
+    final cog = _freshCog;
+    final waterTwa = _freshTwaWater;
+    final groundTwa = twd != null && cog != null
+        ? normalizeRelativeAngle(twd - cog)
+        : _freshWind(signalK.twaGroundDeg, signalK.twaGroundUpdate);
+    final twa = speed.overGround ? groundTwa : waterTwa;
     return PolarPanel(
       polar: polar,
       factorPercent: settings.polarFactorPercent,
       twsKn: _freshWind(_dTws, signalK.twsUpdate),
       twaDeg: twa,
-      boatSpeedKn: stw ?? sog,
-      usingSog: usingSog,
+      boatSpeedKn: speed.valueKn,
+      usingSog: speed.overGround,
       engineRunning: _engineRunning,
-      twdDeg:
-          _freshWind(_dTwd, signalK.twdUpdate) ??
-          trueWindDirection(twa, _freshHeading ?? _freshCog),
+      twdDeg: twd ?? trueWindDirection(twa, _freshTrueHeading ?? _freshCog),
+      currentCogDeg: cog,
       destinationDistanceNm: _courseFresh ? signalK.courseDistanceNm : null,
       destinationBearingDeg: _courseFresh ? signalK.courseBearingTrueDeg : null,
       now: DateTime.now(),
@@ -7125,7 +7200,7 @@ class _DashboardState extends State<Dashboard> {
     final twdShiftTrail = _twdShiftHistory.trail();
     final canUseCogForWind = (_freshSog ?? 0) > 2;
     final trueWindReference =
-        _freshHeading ?? (canUseCogForWind ? _freshCog : null);
+        _freshTrueHeading ?? (canUseCogForWind ? _freshCog : null);
     final derivedTwa = _dTwa == null
         ? relativeWindAngle(_dTwd, trueWindReference)
         : null;
@@ -7741,7 +7816,7 @@ class _DashboardState extends State<Dashboard> {
   NavCardData _navCardData(String id) {
     final sog = _freshSog;
     final stw = _freshStw;
-    final heading = _freshHeading;
+    final heading = _freshTrueHeading;
     final cog = _freshCog;
     final depth = _freshEngine(signalK.depthM, signalK.depthMUpdate);
     final heel = _fresh(signalK.heelDeg);
@@ -7876,19 +7951,24 @@ class _DashboardState extends State<Dashboard> {
           color: cText,
         );
       case 'vmgWind':
-        final twaForVmg = _freshWind(_dTwa, signalK.twaUpdate);
+        final effectiveSpeed = _effectiveBoatSpeed;
+        final twaForVmg = _freshTwaWater;
         final twdForVmg = _freshWind(_dTwd, signalK.twdUpdate);
         final cogForVmg = _freshCog;
-        final usesWaterReference = stw != null && twaForVmg != null;
+        final usesWaterReference =
+            !effectiveSpeed.overGround &&
+            effectiveSpeed.valueKn != null &&
+            twaForVmg != null;
         // Keep speed and angle in the same reference frame. With STW use
         // TWA; the fallback uses SOG and the ground angle TWD-COG.
         final groundWindAngle = twdForVmg != null && cogForVmg != null
             ? normalizeRelativeAngle(twdForVmg - cogForVmg)
             : null;
         final vmgWind = usesWaterReference
-            ? stw * math.cos(twaForVmg * math.pi / 180)
-            : (sog != null && groundWindAngle != null)
-            ? sog * math.cos(groundWindAngle * math.pi / 180)
+            ? effectiveSpeed.valueKn! * math.cos(twaForVmg * math.pi / 180)
+            : (effectiveSpeed.valueKn != null && groundWindAngle != null)
+            ? effectiveSpeed.valueKn! *
+                  math.cos(groundWindAngle * math.pi / 180)
             : null;
         // Point of sail is named off AWA, not TWA — falls back to TWA only
         // if AWA specifically isn't available, so the label doesn't just
@@ -8454,7 +8534,7 @@ class _DashboardState extends State<Dashboard> {
         _anchorEffectiveLat != null ||
         _anchorEffectiveLon != null ||
         signalK.anchorDistanceFromBowM != null;
-    final heading = _freshHeading;
+    final heading = _freshTrueHeading;
     if (lat == null ||
         lon == null ||
         cfg.dropLat == null ||
@@ -9772,7 +9852,7 @@ class _DashboardState extends State<Dashboard> {
   // Vela/Motor/Fondeado.
   Widget _windClassicGrid() {
     final computedTwa = _freshWind(
-      _dTwa ?? relativeWindAngle(_dTwd, _freshHeading ?? _freshCog),
+      _dTwa ?? relativeWindAngle(_dTwd, _freshTrueHeading ?? _freshCog),
       _dTwa != null ? signalK.twaUpdate : signalK.twdUpdate,
     );
     final aws = _freshWind(_dAws, signalK.awsUpdate),
@@ -10158,7 +10238,10 @@ class _DashboardState extends State<Dashboard> {
                     // used to be a separate TEMP-page card.
                     subtitle:
                         (signalK.bowthrusterTempK == null
-                            ? (batteryOnFloat(signalK.bowthrusterV)
+                            ? (batteryOnFloat(
+                                    signalK.bowthrusterV,
+                                    chemistry: settings.batteryChemistryBow,
+                                  )
                                   ? 'batería proa · en flotación'
                                   : 'batería proa')
                             : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}') +
@@ -10187,7 +10270,7 @@ class _DashboardState extends State<Dashboard> {
                     unit: 'V',
                     subtitle:
                         '${settings.sensorConfig.batteryStartId}'
-                        '${batteryOnFloat(signalK.startV) ? ' · en flotación' : ''}'
+                        '${batteryOnFloat(signalK.startV, chemistry: settings.batteryChemistryStart) ? ' · en flotación' : ''}'
                         '${_staleSuffix(startPath)}',
                     color: startColor,
                     customIcon: StarterMotorGlyph(color: startColor),
@@ -11370,7 +11453,7 @@ class _DashboardState extends State<Dashboard> {
       // frozen compass value makes the hull keep pointing in a direction we
       // no longer know. NativeAnchorView already has the safer fallback: it
       // points the bow at the anchor when this becomes null.
-      headingDeg: _freshHeading,
+      headingDeg: _freshTrueHeading,
       sogKn: _freshSog,
       depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
       bowRollerHeightM: settings.anchorBowRollerHeightM,
@@ -11384,7 +11467,7 @@ class _DashboardState extends State<Dashboard> {
       twdDeg: switch (_freshWind(_dTwd, signalK.twdUpdate) ??
           trueWindDirection(
             _freshWind(_dTwa, signalK.twaUpdate),
-            _freshHeading,
+            _freshTrueHeading,
           )) {
         null => null,
         final v => normalize360(v),
@@ -11540,7 +11623,7 @@ class _DashboardState extends State<Dashboard> {
   // reverting to the COG fallback or "--", since nothing ever nulled it.
   Widget _aisPage() => AisRelativeView(
     targets: _visibleAisTargets,
-    ownHeadingDeg: _freshHeading,
+    ownHeadingDeg: _freshTrueHeading,
     ownCogDeg: _freshCog,
     ownSogKn: _freshSog,
     ownLat: _timestampFresh(signalK.positionUpdate) ? signalK.latitude : null,
@@ -14994,18 +15077,26 @@ class _DashboardState extends State<Dashboard> {
                                       _diagRow(
                                         'VMG viento',
                                         () {
-                                          final twaForVmg = _freshWind(
-                                            _dTwa,
-                                            signalK.twaUpdate,
+                                          final twaForVmg = _freshTwaWater;
+                                          final speed = _effectiveBoatSpeed;
+                                          final twdForVmg = _freshWind(
+                                            _dTwd,
+                                            signalK.twdUpdate,
                                           );
-                                          final speedForVmg =
-                                              _freshStw ?? _freshSog;
+                                          final angle = speed.overGround
+                                              ? (twdForVmg != null &&
+                                                        _freshCog != null
+                                                    ? normalizeRelativeAngle(
+                                                        twdForVmg - _freshCog!,
+                                                      )
+                                                    : null)
+                                              : twaForVmg;
                                           final v =
-                                              (twaForVmg != null &&
-                                                  speedForVmg != null)
-                                              ? speedForVmg *
+                                              angle != null &&
+                                                  speed.valueKn != null
+                                              ? speed.valueKn! *
                                                     math.cos(
-                                                      twaForVmg * math.pi / 180,
+                                                      angle * math.pi / 180,
                                                     )
                                               : null;
                                           return v != null

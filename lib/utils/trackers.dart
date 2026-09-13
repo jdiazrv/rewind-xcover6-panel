@@ -57,7 +57,7 @@ class _DepthTrendTracker {
   double? _confirmedAt;
   int direction = 0; // -1 bajando, 0 sin tendencia clara, 1 subiendo
   static const _thresholdM = 0.3;
-  static const _alpha = 0.15;
+  DateTime? _lastAt;
 
   /// Borra la tendencia acumulada. Al entrar o salir del DEMO hay que
   /// tirarla: mezclar una serie simulada con la real da tendencias que no
@@ -66,13 +66,20 @@ class _DepthTrendTracker {
     _smoothed = null;
     _confirmedAt = null;
     direction = 0;
+    _lastAt = null;
   }
 
   void add(double? depth) {
     if (depth == null) return;
+    final now = DateTime.now();
+    final dt = _lastAt == null
+        ? 1.0
+        : now.difference(_lastAt!).inMilliseconds.clamp(1, 60000) / 1000.0;
+    _lastAt = now;
+    final alpha = 1 - math.exp(-dt / 6.0);
     _smoothed = _smoothed == null
         ? depth
-        : _smoothed! + (depth - _smoothed!) * _alpha;
+        : _smoothed! + (depth - _smoothed!) * alpha;
     _confirmedAt ??= _smoothed;
     final delta = _smoothed! - _confirmedAt!;
     if (delta.abs() >= _thresholdM) {
@@ -93,7 +100,7 @@ class _VoltageTrendTracker {
   double? _confirmedAt;
   int direction = 0; // -1 descargando, 0 en reposo / sin datos, 1 cargando
   static const _thresholdV = 0.08;
-  static const _alpha = 0.1;
+  DateTime? _lastAt;
 
   /// Borra la tendencia acumulada. Al entrar o salir del DEMO hay que
   /// tirarla: mezclar una serie simulada con la real da tendencias que no
@@ -102,13 +109,20 @@ class _VoltageTrendTracker {
     _smoothed = null;
     _confirmedAt = null;
     direction = 0;
+    _lastAt = null;
   }
 
   void add(double? voltage) {
     if (voltage == null) return;
+    final now = DateTime.now();
+    final dt = _lastAt == null
+        ? 1.0
+        : now.difference(_lastAt!).inMilliseconds.clamp(1, 60000) / 1000.0;
+    _lastAt = now;
+    final alpha = 1 - math.exp(-dt / 10.0);
     _smoothed = _smoothed == null
         ? voltage
-        : _smoothed! + (voltage - _smoothed!) * _alpha;
+        : _smoothed! + (voltage - _smoothed!) * alpha;
     _confirmedAt ??= _smoothed;
     final delta = _smoothed! - _confirmedAt!;
     if (delta.abs() >= _thresholdV) {
@@ -146,15 +160,25 @@ class _WindHistory {
   static const _gustAbsoluteFloorKn = 5 / 0.514444; // 5 m/s in knots
 
   ({double? meanKn, double? stddevKn})? _baselineStats(DateTime now) {
+    final baselineEnd = now.subtract(_gustPeakWindow);
+    final baselineStart = now.subtract(_gustBaselineWindow);
     final baseline = [
       for (final s in _samples)
-        if (!s.$1.isBefore(now.subtract(_gustBaselineWindow))) s.$2,
+        if (!s.$1.isBefore(baselineStart) && s.$1.isBefore(baselineEnd)) s,
     ];
-    // Not enough history yet to trust a standard deviation.
-    if (baseline.length < 30) return null;
-    final mean = baseline.reduce((a, b) => a + b) / baseline.length;
+    // Count alone is not coverage: 30 high-rate frames can arrive in three
+    // seconds. Require almost the full meteorological baseline as well.
+    if (baseline.length < 30 ||
+        baseline.last.$1.difference(baseline.first.$1) <
+            const Duration(minutes: 9)) {
+      return null;
+    }
+    final mean =
+        baseline.map((s) => s.$2).reduce((a, b) => a + b) / baseline.length;
     final variance =
-        baseline.map((v) => (v - mean) * (v - mean)).reduce((a, b) => a + b) /
+        baseline
+            .map((s) => (s.$2 - mean) * (s.$2 - mean))
+            .reduce((a, b) => a + b) /
         baseline.length;
     return (meanKn: mean, stddevKn: math.sqrt(variance));
   }
@@ -176,7 +200,15 @@ class _WindHistory {
     if (stats == null || uMax == null) return;
     final mean = stats.meanKn!, stddev = stats.stddevKn!;
     if (uMax >= mean + 3 * stddev && uMax - mean >= _gustAbsoluteFloorKn) {
-      _confirmedGusts.add((now, uMax));
+      // Update one active episode instead of appending the same gust for
+      // every high-rate frame during its three-second peak.
+      if (_confirmedGusts.isNotEmpty &&
+          now.difference(_confirmedGusts.last.$1) <= _gustPeakWindow) {
+        final previous = _confirmedGusts.removeLast();
+        _confirmedGusts.add((now, math.max(previous.$2, uMax)));
+      } else {
+        _confirmedGusts.add((now, uMax));
+      }
     }
   }
 
@@ -400,15 +432,22 @@ class _WindCircularDamper {
   final double tau; // time constant in seconds (higher = more smoothing)
   double? _s, _c; // sin / cos accumulators (for circular angles)
   double? _v; // linear accumulator (for speeds)
+  DateTime? _lastAt;
 
   _WindCircularDamper({this.tau = 5.0});
 
-  double get _alpha => 1.0 - math.exp(-1.0 / tau);
+  double _alphaAt(DateTime now) {
+    final previous = _lastAt;
+    _lastAt = now;
+    if (previous == null) return 1;
+    final dt = now.difference(previous).inMicroseconds / 1000000.0;
+    return 1.0 - math.exp(-dt.clamp(0.001, tau * 10) / tau);
+  }
 
   // Feed a circular angle (degrees, any range). Returns smoothed degrees.
   double? angle(double? deg) {
     if (deg == null) return _toDeg();
-    final a = _alpha;
+    final a = _alphaAt(DateTime.now());
     final rad = deg * math.pi / 180;
     _s = _s == null ? math.sin(rad) : _s! + a * (math.sin(rad) - _s!);
     _c = _c == null ? math.cos(rad) : _c! + a * (math.cos(rad) - _c!);
@@ -423,7 +462,8 @@ class _WindCircularDamper {
   // Feed a linear value (speed, temperature, etc.).
   double? linear(double? val) {
     if (val == null) return _v;
-    _v = _v == null ? val : _v! + _alpha * (val - _v!);
+    final a = _alphaAt(DateTime.now());
+    _v = _v == null ? val : _v! + a * (val - _v!);
     return _v;
   }
 
@@ -431,5 +471,6 @@ class _WindCircularDamper {
     _s = null;
     _c = null;
     _v = null;
+    _lastAt = null;
   }
 }

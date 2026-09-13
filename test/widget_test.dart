@@ -264,7 +264,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Navegación y singladura'), findsOneWidget);
-    expect(find.text('Viento y rendimiento a vela'), findsOneWidget);
+    expect(find.text('Viento y navegación a vela'), findsOneWidget);
     expect(find.text('Informe completo'), findsOneWidget);
     expect(find.text('−72 h'), findsOneWidget);
     expect(find.text('ahora'), findsOneWidget);

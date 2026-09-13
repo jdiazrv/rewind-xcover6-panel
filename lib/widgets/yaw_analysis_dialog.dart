@@ -127,42 +127,60 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   Duration _skResolution(bool last24h) =>
       last24h ? const Duration(minutes: 2) : const Duration(seconds: 2);
 
-  Future<List<GraphPoint>> _fetchInfluxMetric(MetricDef def, bool last24h) =>
-      influxQuery(
-        host: widget.influxHost,
-        org: widget.influxOrg,
-        token: widget.influxToken,
-        def: def,
-        fluxRange: _fluxRange(last24h),
-        aggEvery: _aggEvery(last24h),
-        bucket: widget.bucket,
-      );
+  Future<List<GraphPoint>> _fetchInfluxMetric(
+    MetricDef def,
+    bool last24h, {
+    String aggregate = 'mean',
+  }) => influxQuery(
+    host: widget.influxHost,
+    org: widget.influxOrg,
+    token: widget.influxToken,
+    def: def,
+    fluxRange: _fluxRange(last24h),
+    aggEvery: _aggEvery(last24h),
+    bucket: widget.bucket,
+    aggFn: aggregate,
+  );
 
-  Future<List<GraphPoint>> _fetchSkMetric(MetricDef def, bool last24h) =>
-      skHistoryQuery(
-        host: widget.skHost,
-        port: widget.skPort,
-        authBase64: widget.skAuthBase64,
-        def: def,
-        range: _skRange(last24h),
-        resolution: _skResolution(last24h),
-      );
+  Future<List<GraphPoint>> _fetchSkMetric(
+    MetricDef def,
+    bool last24h, {
+    String aggregate = 'average',
+  }) => skHistoryQuery(
+    host: widget.skHost,
+    port: widget.skPort,
+    authBase64: widget.skAuthBase64,
+    def: def,
+    range: _skRange(last24h),
+    resolution: _skResolution(last24h),
+    aggFn: aggregate,
+  );
 
-  Future<List<GraphPoint>> _metric(MetricDef def, bool last24h) async {
+  Future<List<GraphPoint>> _metric(
+    MetricDef def,
+    bool last24h, {
+    bool angular = false,
+  }) async {
+    final influxAggregate = angular ? 'last' : 'mean';
+    final skAggregate = angular ? 'last' : 'average';
     switch (widget.historySource) {
       case 'sk':
-        return _fetchSkMetric(def, last24h);
+        return _fetchSkMetric(def, last24h, aggregate: skAggregate);
       case 'influx':
-        return _fetchInfluxMetric(def, last24h);
+        return _fetchInfluxMetric(def, last24h, aggregate: influxAggregate);
       default: // 'auto' — same preference order as GraphDialog
         try {
-          final points = await _fetchInfluxMetric(def, last24h);
+          final points = await _fetchInfluxMetric(
+            def,
+            last24h,
+            aggregate: influxAggregate,
+          );
           if (points.isNotEmpty) return points;
         } catch (_) {
           // Try Signal K below. An unavailable source and an available but
           // empty source are equivalent in automatic mode.
         }
-        return _fetchSkMetric(def, last24h);
+        return _fetchSkMetric(def, last24h, aggregate: skAggregate);
     }
   }
 
@@ -178,9 +196,13 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   // though they succeeded. Wrapping each in its own try/catch so a
   // failure in one just means that field stays empty, not that the
   // fetch as a whole fails.
-  Future<List<GraphPoint>> _safeMetric(MetricDef def, bool last24h) async {
+  Future<List<GraphPoint>> _safeMetric(
+    MetricDef def,
+    bool last24h, {
+    bool angular = false,
+  }) async {
     try {
-      return await _metric(def, last24h);
+      return await _metric(def, last24h, angular: angular);
     } catch (_) {
       return const [];
     }
@@ -361,8 +383,8 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
   }) async {
     final results = await Future.wait([
       _safePosition(last24h),
-      _safeMetric(mHeading, last24h),
-      _safeMetric(mCog, last24h),
+      _safeMetric(mHeading, last24h, angular: true),
+      _safeMetric(mCog, last24h, angular: true),
     ]);
     var pos = results[0] as ({List<GraphPoint> lat, List<GraphPoint> lon});
     final heading = results[1] as List<GraphPoint>;

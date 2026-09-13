@@ -90,11 +90,30 @@ void main() {
       smoothingWindowFor(const Duration(hours: 24), const Duration(minutes: 2)),
       const Duration(minutes: 10),
     );
-    // ...unless the source's own step is coarser, where averaging fewer
-    // than a few samples would be pointless.
+    // A coarse source cannot force the meteorological window over 10 min.
     expect(
       smoothingWindowFor(const Duration(days: 30), const Duration(hours: 1)),
-      const Duration(hours: 3),
+      const Duration(minutes: 10),
     );
+  });
+
+  test('effective speed falls back to SOG when the log is stalled', () {
+    expect(selectEffectiveBoatSpeed(stwKn: 6, sogKn: 7, logStalled: false), (
+      valueKn: 6,
+      overGround: false,
+      degraded: false,
+    ));
+    expect(selectEffectiveBoatSpeed(stwKn: 0, sogKn: 7, logStalled: true), (
+      valueKn: 7,
+      overGround: true,
+      degraded: true,
+    ));
+  });
+
+  test('apparent/true vector transforms round-trip', () {
+    final apparent = apparentFromTrue(14, -42, 6.5);
+    final restored = trueWindFromApparent(apparent.$1, apparent.$2, 6.5);
+    expect(restored.$1, closeTo(14, 1e-9));
+    expect(restored.$2, closeTo(-42, 1e-9));
   });
 }

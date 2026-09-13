@@ -80,6 +80,7 @@ function isOutsideZone(dropLat, dropLon, lat, lon, zone) {
   const end = Number(zone.endDeg);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
   const span = ((end - start) % 360 + 360) % 360;
+  if (Math.abs(span) < 1e-9) return false;
   const rel = ((bearingDeg - start) % 360 + 360) % 360;
   return rel > span;
 }

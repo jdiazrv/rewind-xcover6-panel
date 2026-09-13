@@ -212,12 +212,14 @@ class PhoneHeelTracker {
   StreamSubscription<AccelerometerEvent>? _sub;
   Vec3? _smoothed;
   int _sampleCount = 0;
+  DateTime? _lastSampleAt;
 
   bool get isRunning => _sub != null;
 
   void start() {
     if (_sub != null) return;
     _sampleCount = 0;
+    _lastSampleAt = null;
     _sub = accelerometerEventStream(
       samplingPeriod: const Duration(milliseconds: 100),
     ).listen(_onEvent);
@@ -227,17 +229,26 @@ class PhoneHeelTracker {
     _sub?.cancel();
     _sub = null;
     _smoothed = null;
+    _lastSampleAt = null;
   }
 
   void _onEvent(AccelerometerEvent e) {
     final raw = Vec3(e.x, e.y, e.z);
+    if (!raw.length.isFinite || raw.length < 1e-6) return;
     // Exponential smoothing — heel/pitch themselves change slowly, but a
     // hand-held or slap-mounted device picks up a lot of higher-frequency
     // vibration at 10 Hz, so a ~1s time constant damps that while still
     // tracking real attitude changes.
+    final now = DateTime.now();
+    final dt = _lastSampleAt == null
+        ? 0.1
+        : now.difference(_lastSampleAt!).inMicroseconds.clamp(1000, 1000000) /
+              1000000.0;
+    _lastSampleAt = now;
+    final alpha = 1 - math.exp(-dt / 0.65);
     _smoothed = _smoothed == null
         ? raw
-        : _smoothed! + (raw - _smoothed!) * 0.15;
+        : _smoothed! + (raw - _smoothed!) * alpha;
     // Only push a UI update every ~300ms (every 3rd sample) — 10 Hz worth
     // of setState calls would be wasted work for a value this slow-moving.
     _sampleCount++;

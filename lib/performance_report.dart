@@ -15,7 +15,6 @@ import 'models.dart';
 import 'pdf/pdf_theme.dart';
 import 'theme.dart';
 
-
 typedef ReportGpsSample = ({
   DateTime time,
   double lat,
@@ -169,9 +168,15 @@ double? reportAverageStwUnderway(
     final midpoint = stw[i - 1].time.add(
       Duration(milliseconds: dt.inMilliseconds ~/ 2),
     );
-    if ((nearestSog(midpoint)?.value ?? 0) <= 0.5) continue;
+    final midpointSog = nearestSog(midpoint)?.value;
+    if ((midpointSog ?? 0) <= 0.5) continue;
+    final segmentStw = (stw[i - 1].value + stw[i].value) / 2;
+    // A fresh zero from a blocked paddlewheel is data loss, not a real
+    // through-water average. SOG remains the explicitly ground-referenced
+    // fallback elsewhere in the report.
+    if (midpointSog! > 2 && segmentStw < 0.2) continue;
     final segmentSeconds = dt.inMilliseconds / 1000;
-    weightedSpeed += (stw[i - 1].value + stw[i].value) / 2 * segmentSeconds;
+    weightedSpeed += segmentStw * segmentSeconds;
     seconds += segmentSeconds;
   }
   return seconds == 0 ? null : weightedSpeed / seconds;
@@ -182,7 +187,7 @@ enum PerformanceReportKind { navigation, windAndSailing, complete }
 extension PerformanceReportKindLabel on PerformanceReportKind {
   String get label => switch (this) {
     PerformanceReportKind.navigation => 'Navegación y singladura',
-    PerformanceReportKind.windAndSailing => 'Viento y rendimiento a vela',
+    PerformanceReportKind.windAndSailing => 'Viento y navegación a vela',
     PerformanceReportKind.complete => 'Informe completo',
   };
 
@@ -190,9 +195,9 @@ extension PerformanceReportKindLabel on PerformanceReportKind {
     PerformanceReportKind.navigation =>
       'Distancia, tiempo real navegando, velocidades y traza GPS',
     PerformanceReportKind.windAndSailing =>
-      'Viento, barbas, escora y polar observada',
+      'Viento, barbas, escora y velocidades observadas',
     PerformanceReportKind.complete =>
-      'Navegación, viento y rendimiento a vela en un único PDF',
+      'Navegación, viento y velocidades observadas en un único PDF',
   };
 
   IconData get icon => switch (this) {
@@ -757,13 +762,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     _fetch();
   }
 
-  MetricDef? get _engineRpmMetric {
-    final runTimePath = widget.settings.sensorConfig.enginePath;
-    if (runTimePath == null || runTimePath.isEmpty) return null;
-    final base = runTimePath.replaceFirst(RegExp(r'\.runTime$'), '');
-    return MetricDef('$base.revolutions', 'RPM motor', 'rpm', scale: 60);
-  }
-
   Future<List<GraphPoint>> _query(
     MetricDef def, {
     String aggregate = 'mean',
@@ -917,8 +915,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             'twa': _optionalQuery(mTwa, aggregate: 'last'),
             'awsPeak': _optionalQuery(mAws, aggregate: 'max'),
             'twsPeak': _optionalQuery(mTws, aggregate: 'max'),
-            if (_engineRpmMetric case final rpmMetric?)
-              'rpm': _optionalQuery(rpmMetric, aggregate: 'max'),
           },
         };
         final entries = queries.entries.toList();
@@ -1171,7 +1167,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final expected = math.max(1, range.inSeconds / step.inSeconds);
     return (points.length / expected * 100).round().clamp(0, 100);
   }
-
 
   Future<Uint8List> _buildReportPdf() async {
     final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
@@ -1872,6 +1867,7 @@ pw.Widget pdfWindTimeline({
 class TrackMapResult {
   final List<Uint8List> tiles; // row-major, length == cols * rows
   final int cols, rows, z, startX, startY;
+  final double longitudeReference;
   TrackMapResult({
     required this.tiles,
     required this.cols,
@@ -1879,13 +1875,16 @@ class TrackMapResult {
     required this.z,
     required this.startX,
     required this.startY,
+    required this.longitudeReference,
   });
 
   /// Top-down fractions (0,0 = top-left of the grid image) for a point.
   (double, double) project(double lat, double lon) {
     final n = math.pow(2, z).toDouble();
-    final latRad = lat * math.pi / 180;
-    final x = (lon + 180) / 360 * n;
+    final safeLat = lat.clamp(-85.05112878, 85.05112878).toDouble();
+    final latRad = safeLat * math.pi / 180;
+    final unwrappedLon = lon + 360 * ((longitudeReference - lon) / 360).round();
+    final x = (unwrappedLon + 180) / 360 * n;
     final y =
         (1 - math.log(math.tan(latRad) + 1 / math.cos(latRad)) / math.pi) /
         2 *
@@ -1916,12 +1915,16 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
   if (points.length < 2) return null;
   try {
     var minLat = points.first.lat, maxLat = points.first.lat;
-    var minLon = points.first.lon, maxLon = points.first.lon;
+    final longitudeReference = points.first.lon;
+    double unwrapLon(double lon) =>
+        lon + 360 * ((longitudeReference - lon) / 360).round();
+    var minLon = unwrapLon(points.first.lon), maxLon = minLon;
     for (final p in points) {
       if (p.lat < minLat) minLat = p.lat;
       if (p.lat > maxLat) maxLat = p.lat;
-      if (p.lon < minLon) minLon = p.lon;
-      if (p.lon > maxLon) maxLon = p.lon;
+      final lon = unwrapLon(p.lon);
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
     }
     // Pad so the track doesn't touch the tile grid's edges.
     final latPad = math.max((maxLat - minLat) * 0.12, 0.002);
@@ -1939,7 +1942,8 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
     // the equator.
     double mercX(double lon) => (lon + 180) / 360;
     double mercY(double lat) {
-      final r = lat * math.pi / 180;
+      final safeLat = lat.clamp(-85.05112878, 85.05112878).toDouble();
+      final r = safeLat * math.pi / 180;
       return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2;
     }
 
@@ -2012,6 +2016,7 @@ Future<TrackMapResult?> _fetchTrackMapTiles(
         z: z,
         startX: startX,
         startY: startY,
+        longitudeReference: longitudeReference,
       );
     }
     return null;
@@ -2300,4 +2305,3 @@ pw.Widget pdfTrackMap({
     ),
   );
 }
-

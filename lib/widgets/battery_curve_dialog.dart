@@ -41,7 +41,7 @@ class BatteryCurveDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final v = voltage;
-    final onFloat = batteryOnFloat(v);
+    final onFloat = batteryOnFloat(v, chemistry: chemistry);
     final soc = (v == null || onFloat) ? null : socFromVoltage(v, chemistry);
     final chemLabel = batteryChemistryLabels[chemistry] ?? 'Plomo-ácido';
     return Dialog(

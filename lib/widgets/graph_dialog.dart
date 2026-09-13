@@ -563,15 +563,30 @@ class _GraphDialogState extends State<GraphDialog> {
       final elapsedHours =
           _points.last.time.difference(_points.first.time).inSeconds.abs() /
           3600.0;
-      final q = math.max(1, values.length ~/ 4);
-      final early = values.take(q).fold(0.0, (a, b) => a + b) / q;
-      final late =
-          values.skip(values.length - q).fold(0.0, (a, b) => a + b) / q;
-      final usefulChange = _def.tankDangerWhenHigh
-          ? late - early
-          : early - late;
+      // Linear trend against the real timestamps. The previous first/last
+      // quarter method divided their change by the whole range even though
+      // the two quarter centres are only ~75% of that range apart, biasing
+      // every consumption estimate low by roughly 25%.
+      final origin = _points.first.time;
+      final xs = [
+        for (final p in _points)
+          p.time.difference(origin).inMilliseconds / 3600000.0,
+      ];
+      final meanX = xs.reduce((a, b) => a + b) / xs.length;
+      final meanY = values.reduce((a, b) => a + b) / values.length;
+      var covariance = 0.0, varianceX = 0.0;
+      for (var i = 0; i < values.length; i++) {
+        final dx = xs[i] - meanX;
+        covariance += dx * (values[i] - meanY);
+        varianceX += dx * dx;
+      }
+      final slopePctHour = varianceX <= 0 ? 0.0 : covariance / varianceX;
+      final usefulRateHour = _def.tankDangerWhenHigh
+          ? slopePctHour
+          : -slopePctHour;
+      final usefulChange = usefulRateHour * elapsedHours;
       final reliable = elapsedHours >= 3 && usefulChange >= 2;
-      final ratePctDay = reliable ? usefulChange / elapsedHours * 24 : null;
+      final ratePctDay = reliable ? usefulRateHour * 24 : null;
       final remainingPct = _def.tankDangerWhenHigh
           ? (100 - current).clamp(0, 100)
           : current.clamp(0, 100);

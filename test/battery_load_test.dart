@@ -14,6 +14,17 @@ void main() {
       expect(batteryOnFloat(12.7), isFalse);
       expect(batteryOnFloat(12.1), isFalse);
       expect(batteryOnFloat(null), isFalse);
+      expect(batteryOnFloat(13.2, chemistry: 'lithium'), isFalse);
+      expect(batteryOnFloat(13.7, chemistry: 'lithium'), isTrue);
+    });
+
+    test('cierra un esfuerzo que nunca recupera para no bloquearse', () {
+      final w = BatteryLoadWatcher();
+      w.add(13.4, DateTime.utc(2026, 9, 8, 12));
+      w.add(10.5, DateTime.utc(2026, 9, 8, 12, 0, 1));
+      final event = w.add(10.8, DateTime.utc(2026, 9, 8, 12, 6));
+      expect(event, isNotNull);
+      expect(event!.recoverySeconds, greaterThanOrEqualTo(5 * 60));
     });
   });
 

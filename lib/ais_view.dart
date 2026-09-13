@@ -118,7 +118,8 @@ List<_AisPlot> _computeAisPlots(
   // viewRotRad drives what's "up" on screen — the two only coincide in heading-up mode.
   final headingRad = ownHeadingDeg * math.pi / 180;
   final viewRotRad = headingUp ? headingRad : 0.0;
-  final ownCogRad = (ownCogDeg ?? ownHeadingDeg) * math.pi / 180;
+  final ownMotionKnown = ownCogDeg != null && ownSogKn != null;
+  final ownCogRad = (ownCogDeg ?? 0) * math.pi / 180;
   final ownSog = ownSogKn ?? 0;
   final ownVN = ownSog * math.cos(ownCogRad),
       ownVE = ownSog * math.sin(ownCogRad);
@@ -149,7 +150,13 @@ List<_AisPlot> _computeAisPlots(
         vE = 0; // relative velocity — always used for CPA/crossing math
     double dispVN = 0,
         dispVE = 0; // vector actually drawn — relative or true motion
-    final hasVelocity = t.sogKn != null && t.cogDeg != null;
+    final targetMotionFresh =
+        t.cogUpdate != null &&
+        t.sogUpdate != null &&
+        now.difference(t.cogUpdate!) < const Duration(minutes: 6) &&
+        now.difference(t.sogUpdate!) < const Duration(minutes: 6);
+    final hasVelocity =
+        targetMotionFresh && t.sogKn != null && t.cogDeg != null;
     if (hasVelocity) {
       final tRad = t.cogDeg! * math.pi / 180;
       final tVN = t.sogKn! * math.cos(tRad), tVE = t.sogKn! * math.sin(tRad);
@@ -162,7 +169,9 @@ List<_AisPlot> _computeAisPlots(
     // complete triplet is recent. The NAV alarm service already applied this
     // gate, but this list/radar did not, so a stopped plugin could leave a
     // frozen value driving the sort indefinitely.
-    final ownCpa = _cpa(relN, relE, vN, vE);
+    final ownCpa = hasVelocity && ownMotionKnown
+        ? _cpa(relN, relE, vN, vE)
+        : null;
     final pluginCpaFresh =
         t.pluginCpaUpdate != null &&
         now.difference(t.pluginCpaUpdate!) < const Duration(seconds: 120);
@@ -172,7 +181,7 @@ List<_AisPlot> _computeAisPlots(
     final tcpaMin = pluginCpaFresh
         ? (t.pluginTcpaMin ?? ownCpa?.tcpaMin)
         : ownCpa?.tcpaMin;
-    final crossing = hasVelocity
+    final crossing = hasVelocity && ownMotionKnown
         ? _crossingLabel(relN, relE, vN, vE, headingRad)
         : null;
     final lookaheadH = vectorMinutes / 60.0;

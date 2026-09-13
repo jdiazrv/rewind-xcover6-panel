@@ -180,6 +180,7 @@ class NativeAnchorView extends StatefulWidget {
   // as "trust the fields", the old behavior) — always provided in
   // practice (see main.dart's _loginToSignalK).
   final Future<SkLoginResult> Function()? onVerifyLogin;
+
   /// "host:puerto" al que se intenta entrar, para poder nombrarlo cuando
   /// el problema es de alcance y no de contraseña.
   final String? loginTargetLabel;
@@ -293,7 +294,20 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     final oldest = _distanceSamples.first;
     final elapsedMin = now.difference(oldest.$1).inSeconds / 60.0;
     if (elapsedMin < 0.25) return null; // not enough time span to trust yet
-    return (distanceM - oldest.$2) / elapsedMin;
+    final xs = [
+      for (final sample in _distanceSamples)
+        sample.$1.difference(oldest.$1).inMilliseconds / 60000.0,
+    ];
+    final ys = [for (final sample in _distanceSamples) sample.$2];
+    final meanX = xs.reduce((a, b) => a + b) / xs.length;
+    final meanY = ys.reduce((a, b) => a + b) / ys.length;
+    var covariance = 0.0, varianceX = 0.0;
+    for (var i = 0; i < xs.length; i++) {
+      final dx = xs[i] - meanX;
+      covariance += dx * (ys[i] - meanY);
+      varianceX += dx * dx;
+    }
+    return varianceX <= 0 ? null : covariance / varianceX;
   }
 
   bool get _usingDeviceGpsAsSource =>
@@ -946,6 +960,15 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     HapticFeedback.mediumImpact();
     final depth = widget.depthM;
     final heading = widget.headingDeg;
+    double horizontalScope(double ratio) {
+      if (depth == null || depth <= 0) return 0;
+      final chain = depth * ratio;
+      final vertical = depth + widget.bowRollerHeightM;
+      return chain > vertical
+          ? math.sqrt(chain * chain - vertical * vertical)
+          : chain;
+    }
+
     // navigation.position is the GPS ANTENNA's fix, not the bow roller
     // the anchor actually drops from — on a boat where they're several
     // meters apart (mast/cockpit-mounted GPS, common), using the antenna
@@ -958,7 +981,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
     // Chain scope (5:1) laid out along the boat's heading from the BOW
     // gives a more realistic initial drop point than from the antenna.
     final ll.LatLng dropPoint = (depth != null && heading != null)
-        ? _destinationPoint(bowPoint, depth * 5, heading)
+        ? _destinationPoint(bowPoint, horizontalScope(5), heading)
         : bowPoint;
     final reusable = _reusablePreviousTrack(dropPoint);
     final reusePrevious =
@@ -982,7 +1005,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       c.reusedTrackUntil = reusePrevious ? reusable.entry.raisedAt : null;
       c.chainOutM = null;
       // 7:1 swing radius is the initial watch-circle size on drop.
-      c.radiusM = depth != null ? (depth * 7).clamp(15, 150) : 30;
+      c.radiusM = depth != null ? horizontalScope(7).clamp(15, 150) : 30;
       c.initialRadiusM = c.radiusM;
       // 10s grace period before the drag alarm can fire — the drop itself
       // (or a GPS fix settling in) shouldn't immediately read as garreo.
@@ -3240,10 +3263,12 @@ class _LoginDialog extends StatefulWidget {
   });
   final String initialUser;
   final String initialPass;
+
   /// Por qué falló el intento anterior, si lo hubo. Se enseña DENTRO del
   /// diálogo en vez de en un aviso que se va solo, para poder leerlo
   /// mientras se corrige.
   final String? errorText;
+
   /// Solo cuando el fallo no es de credenciales: si el servidor no está,
   /// reescribir la contraseña no arregla nada y quedarse sin poder fondear
   /// sería peor que fondear sin publicar.
@@ -3268,7 +3293,9 @@ class _LoginDialogState extends State<_LoginDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     backgroundColor: cPanel,
-    title: Text(widget.errorText == null ? 'Iniciar sesión' : 'No se ha podido entrar'),
+    title: Text(
+      widget.errorText == null ? 'Iniciar sesión' : 'No se ha podido entrar',
+    ),
     content: Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,

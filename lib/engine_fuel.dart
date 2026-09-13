@@ -41,17 +41,25 @@ class EngineFuelProfile {
   /// Interpolación de la curva original de carga de hélice del fabricante.
   double manufacturerLitersPerHour(double rpm) {
     if (!rpm.isFinite || rpm <= 200) return 0;
+    // Avoid the old discontinuity from 0 L/h at 200 rpm straight to the
+    // first tabulated idle value at 201 rpm.
+    if (rpm < curve.first.rpm) {
+      final fraction = (rpm - 200) / (curve.first.rpm - 200);
+      return math.max(0, curve.first.litersPerHour * fraction);
+    }
     final x = rpm.clamp(curve.first.rpm, curve.last.rpm).toDouble();
+    var monotonicA = curve.first.litersPerHour;
     for (var i = 1; i < curve.length; i++) {
       final b = curve[i];
-      if (x > b.rpm) continue;
+      final monotonicB = math.max(monotonicA, b.litersPerHour);
+      if (x > b.rpm) {
+        monotonicA = monotonicB;
+        continue;
+      }
       final a = curve[i - 1];
       final span = b.rpm - a.rpm;
       final fraction = span <= 0 ? 0.0 : (x - a.rpm) / span;
-      return math.max(
-        0,
-        a.litersPerHour + (b.litersPerHour - a.litersPerHour) * fraction,
-      );
+      return math.max(0, monotonicA + (monotonicB - monotonicA) * fraction);
     }
     return curve.last.litersPerHour;
   }

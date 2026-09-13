@@ -275,9 +275,7 @@ PolarTable? parsePolarTable(String text, {required String id, String? name}) {
   // ficheros abren directamente con la primera velocidad.
   final headerNums = [for (final h in header) num_(h)];
   final skipFirst = headerNums.first == null;
-  final tws = [
-    for (final v in headerNums.skip(skipFirst ? 1 : 0)) ?v,
-  ];
+  final tws = [for (final v in headerNums.skip(skipFirst ? 1 : 0)) ?v];
   if (tws.length < 2) return null;
 
   final twa = <double>[];
@@ -287,9 +285,7 @@ PolarTable? parsePolarTable(String text, {required String id, String? name}) {
     if (c.length < tws.length + 1) continue;
     final a = num_(c.first);
     if (a == null) continue;
-    final row = [
-      for (final s in c.skip(1).take(tws.length)) num_(s) ?? 0.0,
-    ];
+    final row = [for (final s in c.skip(1).take(tws.length)) num_(s) ?? 0.0];
     if (row.length != tws.length) continue;
     twa.add(a);
     speeds.add(row);
@@ -343,6 +339,12 @@ class LegEstimate {
 
   /// Cuánto se alarga el camino respecto a la línea recta.
   double get detourFactor => directNm <= 0 ? 1 : sailedNm / directNm;
+
+  /// Velocidad equivalente sobre la línea directa al destino. In beat/run
+  /// [madeGoodKn] is the polar VMG on the wind axis, not on the destination
+  /// bearing; distance/time is the quantity the UI actually calls "hacia el
+  /// destino".
+  double get routeMadeGoodKn => hours <= 0 ? 0 : directNm / hours;
 }
 
 /// Tiempo y distancia reales hasta un destino, contando los bordos.

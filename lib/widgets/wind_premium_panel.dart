@@ -851,26 +851,37 @@ class _WindCompassPainter extends CustomPainter {
     // Port (red) / starboard (green) bands only across 25°-60° each side —
     // the typical close-hauled/no-go zone highlight on a real wind
     // instrument, not a full-side band.
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: bandOuter),
-      _screenRad(-60),
-      35 * math.pi / 180,
-      false,
-      Paint()
-        ..color = cRed.withValues(alpha: 0.85)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = s * 0.02,
-    );
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: bandOuter),
-      _screenRad(25),
-      35 * math.pi / 180,
-      false,
-      Paint()
-        ..color = cGreen.withValues(alpha: 0.85)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = s * 0.02,
-    );
+    void drawCloseHauledSector(double fromDeg, double toDeg, Color color) {
+      final outer = bandOuter;
+      final inner = tickOuter - s * 0.004;
+      final start = _screenRad(fromDeg);
+      final sweep = (toDeg - fromDeg) * math.pi / 180;
+      // A filled annular sector gives deliberately square radial ends. The
+      // previous stroked arcs inherited rounded-looking antialiasing where
+      // they met the grey dial ring, leaving two soft pills floating on it.
+      final path = Path()
+        ..arcTo(
+          Rect.fromCircle(center: center, radius: outer),
+          start,
+          sweep,
+          true,
+        )
+        ..lineTo(
+          center.dx + math.cos(start + sweep) * inner,
+          center.dy + math.sin(start + sweep) * inner,
+        )
+        ..arcTo(
+          Rect.fromCircle(center: center, radius: inner),
+          start + sweep,
+          -sweep,
+          false,
+        )
+        ..close();
+      canvas.drawPath(path, Paint()..color = color.withValues(alpha: 0.88));
+    }
+
+    drawCloseHauledSector(-60, -25, cRed);
+    drawCloseHauledSector(25, 60, cGreen);
 
     // Bow marks — two short white lines meeting in a peak at dead ahead,
     // like a stylized bow/sail outline, instead of a solid arrowhead.

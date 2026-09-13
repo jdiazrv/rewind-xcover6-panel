@@ -22,9 +22,9 @@ class _ClosestApproachService {
     final ownLat = _s.signalK.latitude;
     final ownLon = _s.signalK.longitude;
     final ownPositionFresh = _s._timestampFresh(_s.signalK.positionUpdate);
-    final ownHeading = _s._freshHeading;
-    final ownCog = _s._freshCog ?? ownHeading;
-    final ownSog = _s._freshSog ?? 0;
+    final ownHeading = _s._freshTrueHeading;
+    final ownCog = _s._freshCog;
+    final ownSog = _s._freshSog;
     ({
       AisTarget target,
       double? cpaNm,
@@ -80,6 +80,7 @@ class _ClosestApproachService {
 
         if ((cpaNm == null || tcpaMin == null) &&
             ownCog != null &&
+            ownSog != null &&
             targetMotionFresh &&
             target.cogDeg != null &&
             target.sogKn != null) {
