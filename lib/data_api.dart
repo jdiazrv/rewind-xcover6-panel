@@ -277,6 +277,53 @@ Future<List<GraphPoint>> skHistoryQuery({
   return _sortAndDedupe(points);
 }
 
+/// Como [skHistoryQuery], pero para caminos cuyo valor es texto, como
+/// `navigation.anchor.state` ("on"/"off"). InfluxDB no puede promediar texto
+/// —con el agregado por defecto responde "unsupported mean iterator"—, así
+/// que se pide con un agregado que sí lo admite, `first` por defecto.
+Future<List<({DateTime time, String value})>> skHistoryStateQuery({
+  required String host,
+  required int port,
+  required String authBase64,
+  required String path,
+  required DateTime start,
+  required DateTime stop,
+  required Duration resolution,
+  String aggFn = 'first',
+}) async {
+  final url = Uri.http('$host:$port', '/signalk/v2/api/history/values', {
+    'context': 'vessels.self',
+    'paths': '$path:$aggFn',
+    'from': start.toUtc().toIso8601String(),
+    'to': stop.toUtc().toIso8601String(),
+    'resolution': resolution.inSeconds.clamp(1, 1 << 30).toString(),
+  });
+  final response = await http
+      .get(
+        url,
+        headers: authBase64.isEmpty
+            ? {}
+            : {'Authorization': 'Basic $authBase64'},
+      )
+      .timeout(const Duration(seconds: 15));
+  if (response.statusCode != 200) {
+    throw Exception('HTTP ${response.statusCode}');
+  }
+  final doc = jsonDecode(response.body);
+  final data = doc is Map<String, dynamic> ? doc['data'] : null;
+  if (data is! List) return [];
+  final out = <({DateTime time, String value})>[];
+  for (final row in data) {
+    if (row is! List || row.length < 2) continue;
+    final dt = DateTime.tryParse(row[0]?.toString() ?? '');
+    final value = row[1];
+    if (dt == null || value is! String) continue;
+    out.add((time: dt, value: value));
+  }
+  out.sort((a, b) => a.time.compareTo(b.time));
+  return out;
+}
+
 /// One continuous period during which the cumulative engine hour meter rose.
 class EngineRunSummary {
   const EngineRunSummary({

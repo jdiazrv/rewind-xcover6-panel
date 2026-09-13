@@ -191,6 +191,32 @@ ReportNavigationStats calculateReportNavigationStats(
 /// Integrates the time for which the engine is demonstrably running. RPM is
 /// deliberately required; a stale runTime/hour counter must never paint a
 /// sailing segment as motoring.
+/// ¿Iba el barco a motor en [time]? Misma regla que la traza GPS:
+/// - sin ninguna telemetría de motor en el periodo no se puede contrastar,
+///   así que no se considera motor;
+/// - con telemetría, es motor si hay RPM ≥ [runningRpm] a menos de [window];
+///   si no hay RPM cerca es que el motor estaba apagado (al apagarlo deja de
+///   publicar), o sea vela.
+bool reportSampleUnderEngine(
+  List<GraphPoint> rpm,
+  DateTime time, {
+  Duration window = const Duration(minutes: 10),
+  double runningRpm = 200,
+}) {
+  GraphPoint? best;
+  Duration? bestDiff;
+  for (final p in rpm) {
+    if (!p.value.isFinite) continue;
+    final diff = p.time.difference(time).abs();
+    if (diff > window) continue;
+    if (bestDiff == null || diff < bestDiff) {
+      best = p;
+      bestDiff = diff;
+    }
+  }
+  return best != null && best.value >= runningRpm;
+}
+
 Duration reportEngineRunningDuration(List<GraphPoint> rpm, Duration expectedStep) {
   if (rpm.length < 2) return Duration.zero;
   final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
@@ -383,6 +409,115 @@ Future<List<GraphPoint>> loadReportHorizonSog(
   } catch (_) {
     return const [];
   }
+}
+
+/// Cómo se clasifica una parada del barco en el informe.
+enum ReportStopKind {
+  /// El ancla estaba armada en la app durante la parada: es seguro.
+  anchored,
+
+  /// Parado más de una hora sin rastro de fondeo. Lo más probable es una
+  /// marina, pero no es seguro: a veces se fondea sin armar el ancla.
+  anchoredOrMarina,
+}
+
+typedef ReportStop = ({
+  DateTime start,
+  DateTime end,
+  ReportStopKind kind,
+  double? lat,
+  double? lon,
+});
+
+/// Duración de una parada: horas con un decimal ("18.4 h"), y días con un
+/// decimal ("3.3 días") solo cuando pasa de 3 días, que en horas ya no se
+/// lee de un vistazo.
+String reportStopDurationLabel(Duration duration) {
+  final hours = duration.inMinutes / 60;
+  if (hours > 72) return '${(hours / 24).toStringAsFixed(1)} días';
+  return '${hours.toStringAsFixed(1)} h';
+}
+
+String reportStopKindLabel(ReportStopKind kind) => switch (kind) {
+  ReportStopKind.anchored => 'Fondeado',
+  ReportStopKind.anchoredOrMarina => 'Fondeado/marina',
+};
+
+/// Paradas del barco en el periodo del informe.
+///
+/// Una parada es un tramo continuo con SOG ≤ [stationaryKn]. Un hueco de
+/// datos entre dos muestras de barco parado cuenta como parte de la parada:
+/// en marina es habitual apagar los instrumentos, y el barco no se ha movido
+/// si antes y después estaba quieto. Se clasifica como [ReportStopKind.anchored]
+/// si el ancla estuvo armada en algún momento de la parada (con [minAnchoredStop]
+/// para no marcar un roce del estado), o como
+/// [ReportStopKind.anchoredOrMarina] si dura al menos [minMarinaStop] sin
+/// rastro de fondeo. Las paradas más cortas no se marcan.
+List<ReportStop> detectReportStops({
+  required List<GraphPoint> sog,
+  required List<({DateTime time, bool anchored})> anchorStates,
+  required List<({double lat, double lon, DateTime time})> track,
+  Duration minMarinaStop = const Duration(hours: 1),
+  Duration minAnchoredStop = const Duration(minutes: 10),
+  Duration anchorTolerance = const Duration(minutes: 30),
+  double stationaryKn = 0.5,
+}) {
+  final samples = sog.where((p) => p.value.isFinite).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  final intervals = <({DateTime start, DateTime end})>[];
+  DateTime? openStart;
+  DateTime? lastStationary;
+  for (final p in samples) {
+    if (p.value <= stationaryKn) {
+      openStart ??= p.time;
+      lastStationary = p.time;
+    } else if (openStart != null) {
+      intervals.add((start: openStart, end: lastStationary!));
+      openStart = null;
+      lastStationary = null;
+    }
+  }
+  if (openStart != null) intervals.add((start: openStart, end: lastStationary!));
+
+  ({double lat, double lon})? locationNear(DateTime time) {
+    ({double lat, double lon, DateTime time})? best;
+    Duration? bestDiff;
+    for (final point in track) {
+      final diff = point.time.difference(time).abs();
+      if (bestDiff == null || diff < bestDiff) {
+        best = point;
+        bestDiff = diff;
+      }
+    }
+    return best == null ? null : (lat: best.lat, lon: best.lon);
+  }
+
+  final stops = <ReportStop>[];
+  for (final interval in intervals) {
+    final duration = interval.end.difference(interval.start);
+    final from = interval.start.subtract(anchorTolerance);
+    final to = interval.end.add(anchorTolerance);
+    final anchored = anchorStates.any(
+      (a) => a.anchored && !a.time.isBefore(from) && !a.time.isAfter(to),
+    );
+    final ReportStopKind kind;
+    if (anchored && duration >= minAnchoredStop) {
+      kind = ReportStopKind.anchored;
+    } else if (duration >= minMarinaStop) {
+      kind = ReportStopKind.anchoredOrMarina;
+    } else {
+      continue;
+    }
+    final where = locationNear(interval.start);
+    stops.add((
+      start: interval.start,
+      end: interval.end,
+      kind: kind,
+      lat: where?.lat,
+      lon: where?.lon,
+    ));
+  }
+  return stops;
 }
 
 double? reportAverageStwUnderway(
@@ -1192,6 +1327,30 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     }
   }
 
+  // Estado del ancla ("on"/"off") en el periodo del informe, para marcar
+  // en la traza las paradas que fueron fondeo seguro.
+  List<({DateTime time, bool anchored})> _anchorStates = const [];
+
+  Future<List<({DateTime time, bool anchored})>> _fetchAnchorStates() async {
+    try {
+      final s = widget.settings;
+      final rows = await skHistoryStateQuery(
+        host: _resolvedSkHost ?? s.host,
+        port: s.port,
+        authBase64: s.authBase64,
+        path: 'navigation.anchor.state',
+        start: widget.start,
+        stop: widget.end,
+        resolution: parseAggEvery(_range.agg),
+      );
+      return [for (final r in rows) (time: r.time, anchored: r.value == 'on')];
+    } catch (_) {
+      // Sin histórico del ancla las paradas largas quedan como
+      // "Fondeado/marina": se dice lo que no se sabe, no se inventa.
+      return const [];
+    }
+  }
+
   List<({double lat, double lon, DateTime time})> _track = [];
   int _gpsRawFixes = 0;
   int _gpsDiscardedFixes = 0;
@@ -1278,6 +1437,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           },
         };
         _track = []; // No plausible synthetic track worth drawing.
+        _anchorStates = const [];
       } else {
         final queries = <String, Future<List<GraphPoint>>>{
           'sog': _optionalQuery(mSog),
@@ -1303,6 +1463,9 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         _track = includeNavigation
             ? await _fetchTrackPoints(_series['sog'] ?? const [])
             : [];
+        _anchorStates = includeNavigation
+            ? await _fetchAnchorStates()
+            : const [];
       }
       if (mounted) setState(() => _loading = false);
     } catch (e) {
@@ -1584,6 +1747,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     List<GraphPoint> twa,
     List<GraphPoint> tws,
     List<GraphPoint> sog,
+    List<GraphPoint> rpm,
   ) {
     const bandWidth = 10;
     final bands = [
@@ -1641,6 +1805,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ground.value <= 0.5) {
         continue;
       }
+      // A motor la STW no dice nada del rendimiento a vela: navegar a motor
+      // contra el viento a 30° y 6,5 kt aparecería como una ceñida
+      // excelente. Se descarta con la misma regla que colorea la traza.
+      if (reportSampleUnderEngine(rpm, speed.time)) continue;
       final twaBand = (angle.value.abs().clamp(0, 180) / bandWidth).floor();
       final windBand = span <= 0
           ? 0
@@ -1680,6 +1848,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
 
     final rangeDur = widget.end.difference(widget.start);
     final navigationStats = calculateReportNavigationStats(sog, interval);
+    final stops = detectReportStops(
+      sog: sog,
+      anchorStates: _anchorStates,
+      track: _track,
+    );
     final underwayDur = navigationStats.underway;
     // Medias y máximos desde que el barco empieza a navegar (SOG > 0.5 kt),
     // no sobre todo el periodo elegido: con un informe de 48 h y 5 h de
@@ -1690,7 +1863,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final stwMaximum = reportMaxSpeedUnderway(stw, sog, interval);
     final engineDuration = reportEngineRunningDuration(rpm, interval);
     final rpmBands = reportEngineRpmBands(rpm, interval);
-    final polar = _realPolar(stw, twa, tws, sog);
+    final polar = _realPolar(stw, twa, tws, sog, rpm);
     final coverageParts = <String>[
       if (showNavigation) 'SOG ${_coveragePct(sog, rangeDur, interval)}%',
       if (showNavigation) 'STW ${_coveragePct(stw, rangeDur, interval)}%',
@@ -2044,7 +2217,81 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               twd: twd,
               rpm: rpm,
               barbInterval: widget.barbInterval,
+              stops: stops,
+              font: canvasFont,
             ),
+            if (stops.isNotEmpty) ...[
+              pw.SizedBox(height: 12),
+              pw.Text(
+                'Paradas',
+                style: const pw.TextStyle(
+                  color: pdfText,
+                  fontSize: 12,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 4),
+              for (var n = 0; n < stops.length; n++)
+                pw.Padding(
+                  padding: const pw.EdgeInsets.only(bottom: 3),
+                  child: pw.Row(
+                    children: [
+                      pdfStopBadge(stops[n].kind, size: 14),
+                      pw.SizedBox(width: 6),
+                      pw.SizedBox(
+                        width: 14,
+                        child: pw.Text(
+                          '${n + 1}',
+                          style: pw.TextStyle(
+                            color: pdfText,
+                            fontSize: 9,
+                            fontWeight: pw.FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      pw.SizedBox(
+                        width: 90,
+                        child: pw.Text(
+                          reportStopKindLabel(stops[n].kind),
+                          style: const pw.TextStyle(
+                            color: pdfText,
+                            fontSize: 9,
+                          ),
+                        ),
+                      ),
+                      pw.Expanded(
+                        child: pw.Text(
+                          reportNavigationSpanLabel(
+                            stops[n].start,
+                            stops[n].end,
+                          ),
+                          style: const pw.TextStyle(
+                            color: pdfMuted,
+                            fontSize: 9,
+                          ),
+                        ),
+                      ),
+                      pw.Text(
+                        reportStopDurationLabel(
+                          stops[n].end.difference(stops[n].start),
+                        ),
+                        style: pw.TextStyle(
+                          color: pdfText,
+                          fontSize: 9,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              pw.SizedBox(height: 2),
+              pw.Text(
+                'Fondeado: el ancla estaba armada en la app. Fondeado/marina: '
+                'parado más de 1 h sin fondeo registrado; lo normal es una '
+                'marina, pero también puede ser un fondeo sin armar el ancla.',
+                style: const pw.TextStyle(color: pdfMuted, fontSize: 7.5),
+              ),
+            ],
           ],
           if (showWind) ...[
             if (showNavigation) pw.SizedBox(height: 16),
@@ -2057,7 +2304,9 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               ),
             ),
             pw.Text(
-              'TWA por franjas de 10° y TWS real. Solo datos navegando; no es una polar objetivo.',
+              rpm.isNotEmpty
+                  ? 'TWA por franjas de 10° y TWS real. Solo datos navegando a vela: se excluyen los tramos a motor. No es una polar objetivo.'
+                  : 'TWA por franjas de 10° y TWS real. Solo datos navegando; no es una polar objetivo.',
               style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
             ),
             pw.SizedBox(height: 8),
@@ -2740,6 +2989,9 @@ pw.Widget pdfTrackMap({
   List<GraphPoint> twd = const [],
   List<GraphPoint> rpm = const [],
   Duration? barbInterval,
+  // Paradas numeradas: ancla si fue fondeo seguro, noray si pudo ser marina.
+  List<ReportStop> stops = const [],
+  PdfFont? font,
 }) {
   if (map == null || points.length < 2) {
     return pw.Container(
@@ -2924,9 +3176,10 @@ pw.Widget pdfTrackMap({
     }
   }
 
-  // Sin telemetría de motor no se puede saber si un tramo fue a vela o a
-  // motor, así que no se pinta como vela: va en un color neutro y la
-  // leyenda lo dice. Lo mismo para tramos concretos sin RPM cerca.
+  // Si en el periodo no hay NINGUNA telemetría de motor, no se puede
+  // contrastar vela contra motor: la traza va en un solo color y la leyenda
+  // no menciona ni vela ni motor. Si la hay, un tramo sin RPM es motor
+  // apagado —al apagarlo deja de publicar—, así que es vela, no "sin datos".
   const unknownTrackColor = PdfColor.fromInt(0xff1d4e89);
   final hasEngineTelemetry = rpm.isNotEmpty;
 
@@ -2948,7 +3201,6 @@ pw.Widget pdfTrackMap({
     if (!hasEngineTelemetry) return _TrackSegmentKind.unknown;
     final before = nearestEngineRpm(points[i - 1].time);
     final after = nearestEngineRpm(points[i].time);
-    if (before == null && after == null) return _TrackSegmentKind.unknown;
     final motor = (before?.value ?? 0) >= 200 || (after?.value ?? 0) >= 200;
     return motor ? _TrackSegmentKind.motor : _TrackSegmentKind.sail;
   }
@@ -2968,14 +3220,20 @@ pw.Widget pdfTrackMap({
     ],
   );
 
+  pw.Widget legendGlyph(ReportStopKind kind, String label) => pw.Row(
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pdfStopBadge(kind, size: 13),
+      pw.SizedBox(width: 3),
+      pw.Text(label, style: const pw.TextStyle(color: pdfText, fontSize: 7)),
+    ],
+  );
+
+  final stopKinds = {for (final stop in stops) stop.kind};
   final legendItems = <pw.Widget>[
     if (!hasEngineTelemetry) ...[
       legendSwatch(unknownTrackColor, 'Traza'),
-      pw.SizedBox(width: 6),
-      pw.Text(
-        'Sin telemetría de motor: no se distingue vela de motor',
-        style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
-      ),
+      pw.SizedBox(width: 8),
     ] else ...[
       if (presentKinds.contains(_TrackSegmentKind.sail)) ...[
         legendSwatch(pdfCyan, 'Vela'),
@@ -2985,9 +3243,13 @@ pw.Widget pdfTrackMap({
         legendSwatch(pdfOrange, 'Motor'),
         pw.SizedBox(width: 8),
       ],
-      if (presentKinds.contains(_TrackSegmentKind.unknown))
-        legendSwatch(unknownTrackColor, 'Sin datos de motor'),
     ],
+    if (stopKinds.contains(ReportStopKind.anchored)) ...[
+      legendGlyph(ReportStopKind.anchored, 'Fondeado'),
+      pw.SizedBox(width: 8),
+    ],
+    if (stopKinds.contains(ReportStopKind.anchoredOrMarina))
+      legendGlyph(ReportStopKind.anchoredOrMarina, 'Fondeado/marina'),
   ];
 
   return pw.Container(
@@ -3049,20 +3311,46 @@ pw.Widget pdfTrackMap({
                   ..strokePath();
               }
 
+              // Inicio y fin, a la mitad del tamaño anterior. drawEllipse
+              // recibe centro y radios: antes se le pasaba una esquina
+              // (x - 3, y - 3) como si fuera un rectángulo, y el punto quedaba
+              // desplazado respecto al arranque real de la traza.
               void marker((double, double) frac, PdfColor color) {
                 final (x, y) = toCanvas(frac);
                 canvas
                   ..setFillColor(color)
-                  ..drawEllipse(x - 3, y - 3, 6, 6)
+                  ..drawEllipse(x, y, 3, 3)
                   ..fillPath()
                   ..setStrokeColor(PdfColors.white)
-                  ..setLineWidth(1)
-                  ..drawEllipse(x - 4.5, y - 4.5, 9, 9)
+                  ..setLineWidth(0.75)
+                  ..drawEllipse(x, y, 4.5, 4.5)
                   ..strokePath();
               }
 
               marker(projected.first, pdfGreen);
               marker(projected.last, pdfRed);
+
+              // Paradas: ancla si el fondeo es seguro, noray si pudo ser
+              // marina, con su número (el mismo de la tabla de paradas) y
+              // la duración al lado.
+              for (var n = 0; n < stops.length; n++) {
+                final stop = stops[n];
+                if (stop.lat == null || stop.lon == null) continue;
+                final (sx, sy) = toCanvas(map.project(stop.lat!, stop.lon!));
+                _drawStopBadge(canvas, sx, sy, stop.kind);
+                if (font != null) {
+                  final label =
+                      '${n + 1} · ${reportStopDurationLabel(stop.end.difference(stop.start))}';
+                  const size = 7.0;
+                  final textW = font.stringMetrics(label).width * size;
+                  canvas
+                    ..setFillColor(PdfColors.white)
+                    ..drawRRect(sx + 9, sy - 5, textW + 6, 10, 2, 2)
+                    ..fillPath()
+                    ..setFillColor(pdfText)
+                    ..drawString(font, size, label, sx + 12, sy - 2.5);
+                }
+              }
 
               for (final b in windBarbs) {
                 _drawWindBarbGlyph(canvas, b.x, b.y, b.barb);
@@ -3093,3 +3381,83 @@ pw.Widget pdfTrackMap({
 
 /// Cómo se pinta cada tramo de la traza GPS.
 enum _TrackSegmentKind { sail, motor, unknown }
+
+/// El distintivo de parada como widget, para la leyenda y la tabla.
+pw.Widget pdfStopBadge(ReportStopKind kind, {double size = 14}) => pw.SizedBox(
+  width: size,
+  height: size,
+  child: pw.CustomPaint(
+    size: PdfPoint(size, size),
+    painter: (canvas, box) => _drawStopBadge(
+      canvas,
+      box.x / 2,
+      box.y / 2,
+      kind,
+      radius: size / 2 - 0.5,
+    ),
+  ),
+);
+
+/// Distintivo de una parada en la traza: disco blanco con borde de color y
+/// el glifo dentro — ancla si el fondeo es seguro, noray si pudo ser marina.
+/// Coordenadas del lienzo PDF (el eje y crece hacia arriba).
+void _drawStopBadge(
+  PdfGraphics canvas,
+  double x,
+  double y,
+  ReportStopKind kind, {
+  double radius = 8,
+}) {
+  final color = kind == ReportStopKind.anchored
+      ? const PdfColor.fromInt(0xff1d4e89)
+      : const PdfColor.fromInt(0xff8a5a2b);
+  canvas
+    ..setFillColor(PdfColors.white)
+    ..drawEllipse(x, y, radius, radius)
+    ..fillPath()
+    ..setStrokeColor(color)
+    ..setLineWidth(radius * 0.16)
+    ..drawEllipse(x, y, radius, radius)
+    ..strokePath();
+  final k = radius / 8;
+  if (kind == ReportStopKind.anchored) {
+    canvas
+      ..setStrokeColor(color)
+      ..setLineWidth(1.1 * k)
+      ..setLineCap(PdfLineCap.round)
+      // anilla
+      ..drawEllipse(x, y + 4.2 * k, 1.3 * k, 1.3 * k)
+      ..strokePath()
+      // caña
+      ..moveTo(x, y + 2.9 * k)
+      ..lineTo(x, y - 4.6 * k)
+      ..strokePath()
+      // cepo
+      ..moveTo(x - 2.6 * k, y + 1.6 * k)
+      ..lineTo(x + 2.6 * k, y + 1.6 * k)
+      ..strokePath()
+      // brazos
+      ..moveTo(x - 4.4 * k, y - 1.2 * k)
+      ..curveTo(
+        x - 4.0 * k,
+        y - 5.0 * k,
+        x + 4.0 * k,
+        y - 5.0 * k,
+        x + 4.4 * k,
+        y - 1.2 * k,
+      )
+      ..strokePath();
+  } else {
+    canvas
+      ..setFillColor(color)
+      // sombrerete
+      ..drawEllipse(x, y + 2.3 * k, 4.0 * k, 1.6 * k)
+      ..fillPath()
+      // fuste
+      ..drawRect(x - 1.7 * k, y - 3.6 * k, 3.4 * k, 5.9 * k)
+      ..fillPath()
+      // base
+      ..drawEllipse(x, y - 3.8 * k, 3.2 * k, 1.0 * k)
+      ..fillPath();
+  }
+}

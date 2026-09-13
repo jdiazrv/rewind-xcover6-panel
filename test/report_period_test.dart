@@ -263,4 +263,118 @@ void main() {
       expect(reportMovementSpans([at(0, 0), at(10, 0.3)], start), isEmpty);
     });
   });
+
+  group('paradas en la traza', () {
+    final t0 = DateTime.utc(2026, 9, 12, 8);
+    GraphPoint sog(int minute, double kn) =>
+        GraphPoint(time: t0.add(Duration(minutes: minute)), value: kn);
+    final track = [
+      (lat: 37.39, lon: 24.38, time: t0.add(const Duration(minutes: 60))),
+    ];
+
+    test('parada con el ancla armada es fondeado aunque sea corta', () {
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(50, 6), sog(60, 0.1), sog(75, 0.2), sog(90, 0.1), sog(100, 6)],
+        anchorStates: [(time: t0.add(const Duration(minutes: 70)), anchored: true)],
+        track: track,
+      );
+      expect(stops, hasLength(1));
+      expect(stops.single.kind, ReportStopKind.anchored);
+      expect(stops.single.start, t0.add(const Duration(minutes: 60)));
+      expect(stops.single.end, t0.add(const Duration(minutes: 90)));
+      expect(stops.single.lat, 37.39);
+      expect(reportStopKindLabel(stops.single.kind), 'Fondeado');
+    });
+
+    test('más de una hora parado sin fondeo es fondeado/marina', () {
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(60, 0), sog(100, 0), sog(150, 0.1), sog(160, 5)],
+        anchorStates: const [],
+        track: track,
+      );
+      expect(stops.single.kind, ReportStopKind.anchoredOrMarina);
+      expect(reportStopKindLabel(stops.single.kind), 'Fondeado/marina');
+    });
+
+    test('una parada corta sin fondeo no se marca', () {
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(60, 0), sog(90, 0.2), sog(100, 6)],
+        anchorStates: const [],
+        track: track,
+      );
+      expect(stops, isEmpty);
+    });
+
+    test('con los instrumentos apagados en marina, el hueco cuenta', () {
+      // Parado a las 60 y 62, sin datos 4 horas, parado a las 300 y sale.
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(60, 0), sog(62, 0), sog(300, 0), sog(305, 6)],
+        anchorStates: const [],
+        track: track,
+      );
+      expect(stops.single.kind, ReportStopKind.anchoredOrMarina);
+      expect(stops.single.end, t0.add(const Duration(minutes: 300)));
+    });
+
+    test('un ancla armada lejos de la parada no la hace fondeo', () {
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(60, 0), sog(150, 0), sog(160, 6)],
+        anchorStates: [(time: t0.add(const Duration(minutes: 600)), anchored: true)],
+        track: track,
+      );
+      expect(stops.single.kind, ReportStopKind.anchoredOrMarina);
+    });
+
+    test('dos navegaciones con parada intermedia dan una parada', () {
+      final stops = detectReportStops(
+        sog: [sog(0, 6), sog(30, 6), sog(40, 0), sog(200, 0), sog(210, 6), sog(260, 6)],
+        anchorStates: const [],
+        track: track,
+      );
+      expect(stops, hasLength(1));
+      expect(stops.single.start, t0.add(const Duration(minutes: 40)));
+    });
+  });
+
+  group('muestras a motor en la tabla de rendimiento', () {
+    final t0 = DateTime.utc(2026, 9, 12, 10);
+    GraphPoint rpm(int minute, double value) =>
+        GraphPoint(time: t0.add(Duration(minutes: minute)), value: value);
+
+    test('sin telemetría de motor en el periodo no se descarta nada', () {
+      expect(reportSampleUnderEngine(const [], t0), isFalse);
+    });
+
+    test('con el motor girando cerca, la muestra es a motor', () {
+      expect(reportSampleUnderEngine([rpm(2, 1800)], t0), isTrue);
+    });
+
+    test('RPM por debajo del umbral no es motor', () {
+      expect(reportSampleUnderEngine([rpm(1, 150)], t0), isFalse);
+    });
+
+    test('sin RPM cerca es motor apagado, o sea vela', () {
+      // Hubo motor, pero hace más de 10 minutos: al apagarlo deja de
+      // publicar, y esa ausencia no es "sin datos" sino vela.
+      expect(reportSampleUnderEngine([rpm(-40, 1800)], t0), isFalse);
+    });
+
+    test('manda la lectura más cercana', () {
+      expect(
+        reportSampleUnderEngine([rpm(-9, 1800), rpm(1, 0)], t0),
+        isFalse,
+        reason: 'el motor se apagó justo antes',
+      );
+    });
+  });
+
+  test('la duración de una parada va en horas, o en días si pasa de 3', () {
+    expect(reportStopDurationLabel(const Duration(minutes: 5)), '0.1 h');
+    expect(
+      reportStopDurationLabel(const Duration(hours: 18, minutes: 25)),
+      '18.4 h',
+    );
+    expect(reportStopDurationLabel(const Duration(hours: 72)), '72.0 h');
+    expect(reportStopDurationLabel(const Duration(hours: 80)), '3.3 días');
+  });
 }
