@@ -1028,6 +1028,7 @@ class SignalKModel {
   /// del propio cuentahoras: mientras el motor gira runTime sube, así que
   /// el último tramo en que subió ES el último uso. No hace falta ningún
   /// dato nuevo en el servidor, solo leer su histórico.
+  DateTime? lastEngineRunStartedAt;
   DateTime? lastEngineRunAt;
   double? lastEngineRunHours;
   DateTime? engineHoursUpdate;

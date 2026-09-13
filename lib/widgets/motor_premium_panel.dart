@@ -133,9 +133,8 @@ class PremiumMotorEnginePanel extends StatefulWidget {
 
   final NavCardData engineHours;
 
-  /// "hace 3 días · 2,4 h": cuándo se usó el motor por última vez, deducido
-  /// del propio cuentahoras (ver lastEngineRunAt en models.dart). Nulo
-  /// mientras no se haya podido averiguar.
+  /// Inicio, parada y duración del último uso, deducidos del histórico de
+  /// RPM o, como alternativa, de los incrementos del cuentahoras.
   final String? lastRunLabel;
   // Real signal derived from fresh propulsion.<id>.revolutions by
   // _DashboardState._engineRunning.
@@ -241,12 +240,60 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   AudioPlayer? _idleLoopPlayer;
   Timer? _hapticTimer;
   Timer? _crossfadeTimer;
+  Timer? _gaugeSweepPeakTimer;
+  Timer? _gaugeSweepEndTimer;
+
+  // Instrument self-test shown only when the page is entered with no fresh
+  // engine telemetry. Null means normal operation; 0..1 is the shared
+  // position used by RPM, coolant and alternator. Readouts remain "--": the
+  // sweep tests the instruments visually and never fabricates measurements.
+  double? _gaugeSelfTestFraction;
+
+  bool get _hasGaugeTelemetry =>
+      widget.engineContactOn ||
+      widget.engineRpm != null ||
+      widget.engineCoolantTempK != null ||
+      widget.engineAlternatorV != null ||
+      widget.engineSupplyV != null;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_hasGaugeTelemetry) {
+      _gaugeSelfTestFraction = 0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _hasGaugeTelemetry) return;
+        setState(() => _gaugeSelfTestFraction = 1);
+        _gaugeSweepPeakTimer = Timer(const Duration(milliseconds: 750), () {
+          if (!mounted || _hasGaugeTelemetry) return;
+          setState(() => _gaugeSelfTestFraction = 0);
+          _gaugeSweepEndTimer = Timer(const Duration(milliseconds: 750), () {
+            if (mounted) setState(() => _gaugeSelfTestFraction = null);
+          });
+        });
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant PremiumMotorEnginePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Real data always wins immediately, even if it arrives halfway through
+    // the decorative entry sweep.
+    if (_hasGaugeTelemetry && _gaugeSelfTestFraction != null) {
+      _gaugeSweepPeakTimer?.cancel();
+      _gaugeSweepEndTimer?.cancel();
+      _gaugeSelfTestFraction = null;
+    }
+  }
 
   @override
   void dispose() {
     _preheatTimer?.cancel();
     _hapticTimer?.cancel();
     _crossfadeTimer?.cancel();
+    _gaugeSweepPeakTimer?.cancel();
+    _gaugeSweepEndTimer?.cancel();
     _simSoundPlayer?.dispose();
     _idleLoopPlayer?.dispose();
     super.dispose();
@@ -660,6 +707,9 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         compact: _isCompact,
         label: 'TEMP. REFRIGERANTE',
         value: value,
+        needleValueOverride: _gaugeSelfTestFraction == null
+            ? null
+            : 40 + 80 * _gaugeSelfTestFraction!,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)}°C',
         min: 40,
         max: 120,
@@ -688,6 +738,9 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         compact: _isCompact,
         label: isSupplyOnly ? 'ALIMENTACIÓN MDI' : 'ALTERNADOR',
         value: value,
+        needleValueOverride: _gaugeSelfTestFraction == null
+            ? null
+            : 10 + 6 * _gaugeSelfTestFraction!,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)} V',
         min: 10,
         max: 16,
@@ -1003,6 +1056,9 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   Widget _rpmGauge() => _AnalogGauge(
     label: null,
     value: _displayRpm == null ? null : _displayRpm! / 1000,
+    needleValueOverride: _gaugeSelfTestFraction == null
+        ? null
+        : 4 * _gaugeSelfTestFraction!,
     valueText: _displayRpm == null ? '' : _displayRpm!.round().toString(),
     min: 0,
     max: 4,
@@ -1013,6 +1069,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     dangerStart: 3.4,
     dangerEnd: 4,
     needleColor: cCyan,
+    rimMarker: true,
     big: true,
     hourMeterDigits: _hourMeterDigits,
   );
@@ -1043,12 +1100,13 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       padding: const EdgeInsets.only(left: 4, bottom: 2),
       child: Text(
         'Último uso: $last',
-        maxLines: 1,
+        maxLines: 2,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
           color: cMuted,
           fontSize: 10.5,
           fontWeight: FontWeight.w600,
+          height: 1.15,
         ),
       ),
     );
@@ -1938,6 +1996,7 @@ class _AnalogGaugePainter extends CustomPainter {
     required this.needleColor,
     required this.valueText,
     this.hourMeterDigits,
+    this.showRimMarker = false,
     this.dangerStart,
     this.dangerEnd,
     this.big = false,
@@ -1953,6 +2012,7 @@ class _AnalogGaugePainter extends CustomPainter {
   final bool big;
   final String valueText;
   final String? hourMeterDigits;
+  final bool showRimMarker;
 
   // Bottom-left start, 270° clockwise sweep to bottom-right — a small gap
   // at the bottom like a real automotive dial, so 0 and max never overlap.
@@ -2201,6 +2261,45 @@ class _AnalogGaugePainter extends CustomPainter {
       }
     }
 
+    if (showRimMarker) {
+      // Marca luminosa corta alineada con la aguja: mejora la lectura
+      // periférica sin convertir la esfera en una barra de progreso.
+      final markerAngle = _angleFor(value);
+      const markerSweep = 0.065;
+      final markerRect = Rect.fromCircle(
+        center: center,
+        radius: tickOuter + s * 0.03,
+      );
+      canvas.drawArc(
+        markerRect,
+        markerAngle - markerSweep / 2,
+        markerSweep,
+        false,
+        Paint()
+          ..color = needleColor.withValues(alpha: 0.48)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = s * 0.045
+          ..strokeCap = StrokeCap.round
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.025),
+      );
+      canvas.drawArc(
+        markerRect,
+        markerAngle - markerSweep / 2,
+        markerSweep,
+        false,
+        Paint()
+          ..color = needleColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = s * 0.014
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+
+    // El horómetro forma parte del fondo de la esfera. La aguja se pinta a
+    // continuación para que pase físicamente por delante de su caja, igual
+    // que en un tacómetro mecánico real.
+    _paintHourMeter(canvas, center, r);
+
     // Needle — a tapered quadrilateral (wide at the pivot, pointed tip)
     // plus a short tail for a counterweight look, with its own drop
     // shadow and a thin lengthwise highlight.
@@ -2268,8 +2367,6 @@ class _AnalogGaugePainter extends CustomPainter {
         ..strokeWidth = 1
         ..color = Colors.black.withValues(alpha: 0.6),
     );
-
-    _paintHourMeter(canvas, center, r);
 
     // Digital readout — e-ink style (matte pale ground, flat dark text),
     // matching every other plain numeric readout on this panel, instead of
@@ -2384,6 +2481,7 @@ class _AnalogGaugePainter extends CustomPainter {
       old.needleColor != needleColor ||
       old.valueText != valueText ||
       old.hourMeterDigits != hourMeterDigits ||
+      old.showRimMarker != showRimMarker ||
       old.big != big;
 }
 
@@ -2399,11 +2497,13 @@ class _AnalogGauge extends StatelessWidget {
     required this.max,
     required this.majorStep,
     required this.valueText,
+    this.needleValueOverride,
     this.hourMeterDigits,
     this.label,
     this.dangerStart,
     this.dangerEnd,
     this.needleColor = cCyan,
+    this.rimMarker = false,
     this.big = false,
     this.source,
     this.ledState,
@@ -2412,12 +2512,14 @@ class _AnalogGauge extends StatelessWidget {
 
   final String? label;
   final double? value;
+  final double? needleValueOverride;
   final double min;
   final double max;
   final double majorStep;
   final double? dangerStart;
   final double? dangerEnd;
   final Color needleColor;
+  final bool rimMarker;
   final bool big;
   final String valueText;
   final String? hourMeterDigits;
@@ -2433,7 +2535,7 @@ class _AnalogGauge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final display = (value ?? min).clamp(min, max);
+    final display = (needleValueOverride ?? value ?? min).clamp(min, max);
     if (compact) return _buildCompact(display);
     // _panelShell has no padding of its own — without this, the label/LED
     // row sits flush against the card's rounded corners (radius 14) and
@@ -2495,6 +2597,10 @@ class _AnalogGauge extends StatelessWidget {
                                     big: big,
                                     valueText: valueText,
                                     hourMeterDigits: hourMeterDigits,
+                                    showRimMarker:
+                                        rimMarker &&
+                                        (value != null ||
+                                            needleValueOverride != null),
                                   ),
                                 ),
                           ),
@@ -2605,7 +2711,9 @@ class _AnalogGauge extends StatelessWidget {
                 builder: (context, animated, child) => CustomPaint(
                   size: Size.infinite,
                   painter: _BarGaugePainter(
-                    value: value == null ? null : animated,
+                    value: value == null && needleValueOverride == null
+                        ? null
+                        : animated,
                     min: min,
                     max: max,
                     dangerStart: dangerStart,

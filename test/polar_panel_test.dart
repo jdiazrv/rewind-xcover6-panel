@@ -33,6 +33,7 @@ void main() {
     double? tws = 12,
     double? twa = 90,
     double? speed = 7.5,
+    double? sog,
     bool engine = false,
     bool usingSog = false,
     double? destNm,
@@ -47,6 +48,7 @@ void main() {
     twaDeg: twa,
     boatSpeedKn: speed,
     usingSog: usingSog,
+    sogKn: sog ?? speed,
     engineRunning: engine,
     twdDeg: twd,
     destinationDistanceNm: destNm,
@@ -106,6 +108,16 @@ void main() {
       await pump(t, panel(destNm: 12, destBrg: 90, twa: 90));
       expect(find.textContaining('Se puede apuntar'), findsOneWidget);
       expect(find.textContaining('12.0 M'), findsOneWidget);
+    });
+
+    testWidgets('el tiempo restante usa SOG y COG, no STW', (t) async {
+      await pump(
+        t,
+        panel(destNm: 12, destBrg: 90, twa: 90, speed: 8, sog: 4, cog: 90),
+      );
+      // 12 M / 4 kn sobre el fondo = 3 h. Con STW daría 1 h 30 min.
+      expect(find.textContaining('12.0 M · 3 h 0 min'), findsOneWidget);
+      expect(find.textContaining('restante con SOG/COG'), findsOneWidget);
     });
 
     testWidgets('nunca dice "vira" ni "orza"', (t) async {

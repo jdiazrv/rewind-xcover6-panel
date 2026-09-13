@@ -6,8 +6,8 @@ import '../polars.dart';
 import '../theme.dart';
 
 /// Página POLAR del carrusel de VNT: qué debería dar el barco con este
-/// viento, qué está dando, y —si hay destino— cuánto se tarda de verdad
-/// contando los bordos.
+/// viento, qué está dando, y —si hay destino— compara el tiempo restante
+/// real sobre fondo con la estimación de la polar contando los bordos.
 ///
 /// Regla de estilo que atraviesa todo el widget: **no da órdenes**. Ni
 /// "orza" ni "vira". Enseña el hecho, la alternativa y lo que cuesta en
@@ -25,6 +25,7 @@ class PolarPanel extends StatelessWidget {
     required this.twaDeg,
     required this.boatSpeedKn,
     required this.usingSog,
+    required this.sogKn,
     required this.engineRunning,
     this.twdDeg,
     this.destinationDistanceNm,
@@ -43,6 +44,11 @@ class PolarPanel extends StatelessWidget {
   /// que decirlo.
   final double? boatSpeedKn;
   final bool usingSog;
+
+  /// Ground speed is kept separate from the polar/performance speed. Any
+  /// remaining-time calculation to a geographical destination must use this
+  /// together with COG, never STW.
+  final double? sogKn;
   final bool engineRunning;
 
   final double? twdDeg;
@@ -53,6 +59,12 @@ class PolarPanel extends StatelessWidget {
 
   double get _factor => factorPercent / 100;
   double _relativeAngle(double degrees) => ((degrees + 540) % 360) - 180;
+
+  double? get _currentRouteVmg {
+    final sog = sogKn, cog = currentCogDeg, bearing = destinationBearingDeg;
+    if (sog == null || cog == null || bearing == null) return null;
+    return sog * math.cos(_relativeAngle(cog - bearing) * math.pi / 180);
+  }
 
   /// Velocidad objetivo ya ajustada al porcentaje del barco.
   double? get _target {
@@ -253,7 +265,13 @@ class PolarPanel extends StatelessWidget {
 
   // ── Con destino ───────────────────────────────────────────────────────
   Widget _legCard(LegEstimate leg, double tws, double twa) {
-    final eta = now?.add(Duration(seconds: (leg.hours * 3600).round()));
+    final routeVmg = _currentRouteVmg;
+    final actualHours = routeVmg != null && routeVmg > 0.2
+        ? leg.directNm / routeVmg
+        : null;
+    final eta = actualHours == null
+        ? null
+        : now?.add(Duration(seconds: (actualHours * 3600).round()));
     final children = <Widget>[];
 
     if (leg.isZigzag) {
@@ -273,10 +291,18 @@ class PolarPanel extends StatelessWidget {
       );
       children.add(
         _big(
-          _hm(leg.hours),
-          'a ${leg.sailAngle.round()}°, avanzando '
-          '${leg.routeMadeGoodKn.toStringAsFixed(1)} kn hacia el destino'
-          '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
+          actualHours == null ? '--' : _hm(actualHours),
+          actualHours == null
+              ? 'sin SOG/COG válidos hacia el destino'
+              : 'restante con SOG/COG · ${routeVmg!.toStringAsFixed(1)} kn hacia destino'
+                    '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
+        ),
+      );
+      children.add(
+        _line(
+          'Estimación polar: ${_hm(leg.hours)} a ${leg.sailAngle.round()}° '
+          '(${leg.routeMadeGoodKn.toStringAsFixed(1)} kn hacia destino).',
+          dim: true,
         ),
       );
       final cmp = _compareWithCurrent(leg, tws, twa);
@@ -286,21 +312,20 @@ class PolarPanel extends StatelessWidget {
       children.add(_line('Se puede apuntar al destino.'));
       children.add(
         _big(
-          '${leg.directNm.toStringAsFixed(1)} M · ${_hm(leg.hours)}',
-          'al objetivo de ${leg.madeGoodKn.toStringAsFixed(1)} kn'
-              '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
+          '${leg.directNm.toStringAsFixed(1)} M · ${actualHours == null ? '--' : _hm(actualHours)}',
+          actualHours == null
+              ? 'tiempo restante sin SOG/COG válidos hacia el destino'
+              : 'restante con SOG/COG · ${routeVmg!.toStringAsFixed(1)} kn hacia destino'
+                    '${eta == null ? '' : ' · llegada ${_clock(eta)}'}',
         ),
       );
-      final actual = boatSpeedKn!;
-      if (actual > 0.2) {
-        final hoursNow = leg.directNm / actual;
-        children.add(
-          _line(
-            'Al ritmo de ahora (${actual.toStringAsFixed(1)} kn): '
-            '${_hm(hoursNow)}.',
-          ),
-        );
-      }
+      children.add(
+        _line(
+          'Estimación polar: ${_hm(leg.hours)} al objetivo de '
+          '${leg.madeGoodKn.toStringAsFixed(1)} kn.',
+          dim: true,
+        ),
+      );
     }
 
     if (leg.twsOutOfRange) {
@@ -334,14 +359,8 @@ class PolarPanel extends StatelessWidget {
   /// este tramo, y se calla cuando la diferencia está por debajo del ruido
   /// del propio cálculo.
   String? _compareWithCurrent(LegEstimate leg, double tws, double twa) {
-    final actual = boatSpeedKn;
-    final bearing = destinationBearingDeg;
-    final cog = currentCogDeg;
-    if (actual == null || actual <= 0.05 || bearing == null || cog == null) {
-      return null;
-    }
-    final routeVmg =
-        actual * math.cos(_relativeAngle(cog - bearing) * math.pi / 180);
+    final routeVmg = _currentRouteVmg;
+    if (routeVmg == null) return null;
     if (routeVmg <= 0.05) {
       return 'El movimiento real sobre fondo no está reduciendo la distancia al destino.';
     }

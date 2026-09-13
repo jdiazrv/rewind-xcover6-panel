@@ -3102,6 +3102,17 @@ class _DashboardState extends State<Dashboard> {
     signalK.lastEngineRunAt = lastRunMs == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(lastRunMs);
+    final lastRunStartedMs = prefs.getInt('lastEngineRunStartedAt');
+    signalK.lastEngineRunStartedAt = lastRunStartedMs == null
+        ? (signalK.lastEngineRunAt != null && signalK.lastEngineRunHours != null
+              ? signalK.lastEngineRunAt!.subtract(
+                  Duration(
+                    milliseconds: (signalK.lastEngineRunHours! * 3600000)
+                        .round(),
+                  ),
+                )
+              : null)
+        : DateTime.fromMillisecondsSinceEpoch(lastRunStartedMs);
     final lastHoursMs = prefs.getInt('lastEngineHoursAt');
     signalK.lastEngineHoursAt = lastHoursMs == null
         ? null
@@ -3362,6 +3373,12 @@ class _DashboardState extends State<Dashboard> {
         'lastEngineRunAt',
         (signalK.lastEngineRunAt ?? DateTime.now()).millisecondsSinceEpoch,
       );
+      if (signalK.lastEngineRunStartedAt != null) {
+        await prefs.setInt(
+          'lastEngineRunStartedAt',
+          signalK.lastEngineRunStartedAt!.millisecondsSinceEpoch,
+        );
+      }
     }
     await prefs.setString(
       'savedServers',
@@ -5549,6 +5566,7 @@ class _DashboardState extends State<Dashboard> {
         final completedRun = lastRun;
         if (completedRun != null) {
           setState(() {
+            signalK.lastEngineRunStartedAt = completedRun.startedAt;
             signalK.lastEngineRunAt = completedRun.endedAt;
             signalK.lastEngineRunHours = completedRun.durationHours;
           });
@@ -7180,6 +7198,7 @@ class _DashboardState extends State<Dashboard> {
       twaDeg: twa,
       boatSpeedKn: speed.valueKn,
       usingSog: speed.overGround,
+      sogKn: _freshSog,
       engineRunning: _engineRunning,
       twdDeg: twd ?? trueWindDirection(twa, _freshTrueHeading ?? _freshCog),
       currentCogDeg: cog,
@@ -8377,15 +8396,37 @@ class _DashboardState extends State<Dashboard> {
   // block and _buildDynamicHandlers); _engineRunning is derived only from
   // fresh propulsion.<id>.revolutions, never from the lifetime runTime
   // counter.
-  /// "hace 3 días · 2,4 h" para la pantalla de motor.
+  /// Inicio, parada y duración del último uso recuperado del histórico.
   String? get _engineLastRunLabel {
-    final at = signalK.lastEngineRunAt;
+    final start = signalK.lastEngineRunStartedAt;
+    final end = signalK.lastEngineRunAt;
     final hours = signalK.lastEngineRunHours;
-    if (at == null || hours == null || hours <= 0) return null;
+    if (end == null || hours == null || hours <= 0) return null;
+    final inferredStart =
+        start ??
+        end.subtract(Duration(milliseconds: (hours * 3600000).round()));
     final dur = hours >= 1
         ? '${hours.toStringAsFixed(1)} h'
         : '${(hours * 60).round()} min';
-    return '${_lastUpdateText(at)} · $dur';
+    String hm(DateTime value) {
+      final local = value.toLocal();
+      return '${local.hour.toString().padLeft(2, '0')}:'
+          '${local.minute.toString().padLeft(2, '0')}';
+    }
+
+    final localStart = inferredStart.toLocal();
+    final localEnd = end.toLocal();
+    final date =
+        '${localStart.day.toString().padLeft(2, '0')}/'
+        '${localStart.month.toString().padLeft(2, '0')}';
+    final stop =
+        localStart.year == localEnd.year &&
+            localStart.month == localEnd.month &&
+            localStart.day == localEnd.day
+        ? hm(end)
+        : '${localEnd.day.toString().padLeft(2, '0')}/'
+              '${localEnd.month.toString().padLeft(2, '0')} ${hm(end)}';
+    return 'Arranque $date ${hm(inferredStart)} · Paro $stop · $dur';
   }
 
   Widget _navPremiumMotorPage() => PremiumMotorEnginePanel(
