@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rewind_xcover6_panel/models.dart';
 import 'package:rewind_xcover6_panel/performance_report.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:rewind_xcover6_panel/model_comparison.dart';
+import 'package:rewind_xcover6_panel/pdf/pdf_theme.dart';
 
 void main() {
   test('al ampliar por el inicio arrastra la ventana completa de 48 horas', () {
@@ -106,6 +110,10 @@ void main() {
     expect(stats.underway, const Duration(minutes: 2));
     expect(stats.avgSogUnderway, closeTo(6, 0.0001));
     expect(stats.maxSog, 8);
+    // La navegación empieza y acaba donde hubo arrancada, no en los bordes
+    // del periodo pedido.
+    expect(stats.startedAt, base);
+    expect(stats.endedAt, base.add(const Duration(minutes: 2)));
   });
 
   test('la media STW excluye los tramos sin arrancada', () {
@@ -143,4 +151,116 @@ void main() {
     expect(stats.underway, Duration.zero);
   });
 
+  test('el máximo solo cuenta mientras se navega', () {
+    final base = DateTime.utc(2026, 9, 12, 10);
+    final sog = [
+      GraphPoint(time: base, value: 0),
+      GraphPoint(time: base.add(const Duration(minutes: 2)), value: 6),
+      GraphPoint(time: base.add(const Duration(minutes: 4)), value: 7),
+    ];
+    final stw = [
+      // Un pico con el barco parado (corredera sucia, oleaje en el
+      // molinete) no puede ser el máximo de la navegación.
+      GraphPoint(time: base, value: 12),
+      GraphPoint(time: base.add(const Duration(minutes: 2)), value: 6.5),
+      GraphPoint(time: base.add(const Duration(minutes: 4)), value: 7.2),
+    ];
+    expect(
+      reportMaxSpeedUnderway(stw, sog, const Duration(minutes: 2)),
+      closeTo(7.2, 0.0001),
+    );
+    expect(reportMaxSpeedUnderway(sog, sog, const Duration(minutes: 2)), 7);
+    expect(reportMaxSpeedUnderway(const [], sog, const Duration(minutes: 2)),
+        isNull);
+  });
+
+  test('la etiqueta de navegación dice cuándo empezó y acabó', () {
+    final start = DateTime(2026, 9, 12, 9, 12);
+    expect(
+      reportNavigationSpanLabel(start, DateTime(2026, 9, 12, 16, 40)),
+      'de 09:12 a 16:40',
+    );
+    expect(
+      reportNavigationSpanLabel(start, DateTime(2026, 9, 13, 1, 5)),
+      'de 12/09 09:12 a 13/09 01:05',
+    );
+    expect(reportNavigationSpanLabel(null, null), 'sin navegación registrada');
+  });
+
+  test('una tarjeta con texto largo no se queda en blanco en el PDF', () async {
+    // Antes, un valor que no cabía en una línea desbordaba la tarjeta y el
+    // PDF perdía el valor y el subtítulo: solo quedaba el título.
+    final doc = pw.Document(compress: false);
+    doc.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4,
+        theme: pw.ThemeData.base(),
+        build: (_) => pw.Row(
+          children: [
+            for (var i = 0; i < 4; i++) ...[
+              pw.Expanded(
+                child: pw.SizedBox(
+                  height: 62,
+                  child: pdfInfoCard(
+                    'SOG',
+                    '47.8 kt media (una etiqueta larga)',
+                    'máx 93.1 kt con un subtítulo también bastante largo',
+                    pdfGreen,
+                  ),
+                ),
+              ),
+              pw.SizedBox(width: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+    final text = String.fromCharCodes(await doc.save());
+    expect(text, contains('47.8'));
+    expect(text, contains('93.1'));
+  });
+
+  group('tramos de movimiento en la línea de tiempo', () {
+    final start = DateTime.utc(2026, 9, 10, 0);
+    GraphPoint at(int minutes, double kn) =>
+        GraphPoint(time: start.add(Duration(minutes: minutes)), value: kn);
+
+    test('parado, navegando y otra vez parado da un solo tramo', () {
+      final spans = reportMovementSpans([
+        at(0, 0),
+        at(60, 0.2),
+        at(70, 6),
+        at(80, 6.5),
+        at(90, 0.1),
+        at(200, 0),
+      ], start);
+      expect(spans, hasLength(1));
+      expect(spans.single.start, 70);
+      expect(spans.single.end, 90);
+    });
+
+    test('un hueco largo de datos corta el tramo en dos', () {
+      final spans = reportMovementSpans([
+        at(0, 6),
+        at(10, 6),
+        // 3 horas sin datos: no se da por navegado.
+        at(190, 6),
+        at(200, 6),
+      ], start);
+      expect(spans, hasLength(2));
+      expect(spans[0].end, 10);
+      expect(spans[1].start, 190);
+    });
+
+    test('si sigue navegando al final, el tramo acaba en su último dato', () {
+      final spans = reportMovementSpans([at(100, 0), at(110, 5), at(120, 5)], start);
+      expect(spans.single.start, 110);
+      expect(spans.single.end, 120);
+    });
+
+    test('sin datos o siempre parado no hay tramos', () {
+      expect(reportMovementSpans(const [], start), isEmpty);
+      expect(reportMovementSpans([at(0, 0), at(10, 0.3)], start), isEmpty);
+    });
+  });
 }

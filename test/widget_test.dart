@@ -4,12 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:rewind_xcover6_panel/main.dart';
-import 'package:rewind_xcover6_panel/engine_fuel.dart';
 import 'package:rewind_xcover6_panel/models.dart';
+import 'package:rewind_xcover6_panel/performance_report.dart';
+import 'package:rewind_xcover6_panel/engine_fuel.dart';
 import 'package:rewind_xcover6_panel/theme.dart';
 import 'package:rewind_xcover6_panel/widgets/motor_premium_panel.dart';
 
 void main() {
+  // Sin red en los tests: el selector de informes no debe lanzar la descarga
+  // real del histórico, que dejaría vivo el temporizador de su timeout.
+  setUp(() => reportHorizonSogLoader = (_, _) async => const <GraphPoint>[]);
+  tearDown(() => reportHorizonSogLoader = loadReportHorizonSog);
+
   testWidgets('REWIND panel boots', (WidgetTester tester) async {
     await tester.pumpWidget(const RewindApp());
 
@@ -249,6 +255,31 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('la línea de tiempo marca en verde cuándo navegó el barco', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    reportHorizonSogLoader = (_, referenceNow) async => [
+      for (var m = 0; m <= 120; m += 10)
+        GraphPoint(
+          time: referenceNow.subtract(Duration(hours: 30, minutes: -m)),
+          value: m < 40 || m > 90 ? 0 : 6,
+        ),
+    ];
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.tap(find.text('VNT'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('INFORME VIENTO'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('en verde, barco navegando (SOG > 0.5 kt)'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('VNT exposes the three report types directly', (
     WidgetTester tester,
   ) async {
@@ -269,6 +300,8 @@ void main() {
     expect(find.text('−72 h'), findsOneWidget);
     expect(find.text('ahora'), findsOneWidget);
     expect(find.text('24 h'), findsOneWidget);
+    // Sin datos no se afirma que el barco estuviera parado.
+    expect(find.text('sin datos de velocidad para estas 72 h'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

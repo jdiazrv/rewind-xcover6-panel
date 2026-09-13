@@ -249,9 +249,23 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // sweep tests the instruments visually and never fabricates measurements.
   double? _gaugeSelfTestFraction;
 
+  // Barrido de autotest más lento y sin parada arriba ("el movimiento de las
+  // agujas al entrar en motor debe ser más suave/lento y no hay que parar al
+  // llegar al máximo"). Antes subía en 1000 ms con easeOutCubic —arranque
+  // brusco y final muy lento— y se quedaba 500 ms quieta en el máximo porque
+  // la bajada no empezaba hasta los 1500 ms.
+  static const _gaugeSweepLeg = Duration(milliseconds: 1600);
+
   Duration get _gaugeMotionDuration => _gaugeSelfTestFraction == null
       ? const Duration(milliseconds: 500)
-      : const Duration(milliseconds: 1000);
+      : _gaugeSweepLeg;
+
+  // easeInOutSine acelera y frena suave en los dos extremos, como una aguja
+  // real; con la bajada enganchada al final de la subida, da la vuelta arriba
+  // de forma continua. Los datos reales siguen con la curva de siempre.
+  Curve get _gaugeMotionCurve => _gaugeSelfTestFraction == null
+      ? Curves.easeOutCubic
+      : Curves.easeInOutSine;
 
   bool get _hasGaugeTelemetry =>
       widget.engineContactOn ||
@@ -268,12 +282,16 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || _hasGaugeTelemetry) return;
         setState(() => _gaugeSelfTestFraction = 1);
-        _gaugeSweepPeakTimer = Timer(const Duration(milliseconds: 1500), () {
+        // La bajada arranca justo al terminar la subida: sin espera arriba.
+        _gaugeSweepPeakTimer = Timer(_gaugeSweepLeg, () {
           if (!mounted || _hasGaugeTelemetry) return;
           setState(() => _gaugeSelfTestFraction = 0);
-          _gaugeSweepEndTimer = Timer(const Duration(milliseconds: 1100), () {
+          _gaugeSweepEndTimer = Timer(
+            _gaugeSweepLeg + const Duration(milliseconds: 100),
+            () {
             if (mounted) setState(() => _gaugeSelfTestFraction = null);
-          });
+            },
+          );
         });
       });
     }
@@ -715,6 +733,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             ? null
             : 40 + 80 * _gaugeSelfTestFraction!,
         motionDuration: _gaugeMotionDuration,
+        motionCurve: _gaugeMotionCurve,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)}°C',
         min: 40,
         max: 120,
@@ -747,6 +766,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             ? null
             : 10 + 6 * _gaugeSelfTestFraction!,
         motionDuration: _gaugeMotionDuration,
+        motionCurve: _gaugeMotionCurve,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)} V',
         min: 10,
         max: 16,
@@ -1066,6 +1086,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         ? null
         : 4 * _gaugeSelfTestFraction!,
     motionDuration: _gaugeMotionDuration,
+        motionCurve: _gaugeMotionCurve,
     valueText: _displayRpm == null ? '' : _displayRpm!.round().toString(),
     min: 0,
     max: 4,
@@ -2506,6 +2527,7 @@ class _AnalogGauge extends StatelessWidget {
     required this.valueText,
     this.needleValueOverride,
     this.motionDuration = const Duration(milliseconds: 500),
+    this.motionCurve = Curves.easeOutCubic,
     this.hourMeterDigits,
     this.label,
     this.dangerStart,
@@ -2522,6 +2544,7 @@ class _AnalogGauge extends StatelessWidget {
   final double? value;
   final double? needleValueOverride;
   final Duration motionDuration;
+  final Curve motionCurve;
   final double min;
   final double max;
   final double majorStep;
@@ -2592,7 +2615,7 @@ class _AnalogGauge extends StatelessWidget {
                           child: TweenAnimationBuilder<double>(
                             tween: Tween<double>(begin: display, end: display),
                             duration: motionDuration,
-                            curve: Curves.easeOutCubic,
+                            curve: motionCurve,
                             builder: (context, animatedValue, child) =>
                                 CustomPaint(
                                   painter: _AnalogGaugePainter(
@@ -2716,7 +2739,7 @@ class _AnalogGauge extends StatelessWidget {
               child: TweenAnimationBuilder<double>(
                 tween: Tween<double>(begin: display, end: display),
                 duration: motionDuration,
-                curve: Curves.easeOutCubic,
+                curve: motionCurve,
                 builder: (context, animated, child) => CustomPaint(
                   size: Size.infinite,
                   painter: _BarGaugePainter(

@@ -82,36 +82,47 @@ pw.Widget pdfInfoCard(
     color: color,
     borderRadius: pw.BorderRadius.circular(5),
   ),
+  // Cada texto va en una sola línea y se encoge si no cabe. Sin esto, un
+  // valor un poco largo saltaba a una segunda línea, la columna de alto
+  // fijo desbordaba, y el motor del PDF descartaba el valor y el subtítulo
+  // sin avisar: la tarjeta salía solo con el título. Así pasaba con
+  // "6.4 kt media (>=2 kt)" en las tarjetas SOG y STW del informe.
   child: pw.Column(
     crossAxisAlignment: pw.CrossAxisAlignment.start,
     children: [
-      pw.Text(
+      _pdfCardLine(
         title,
-        style: const pw.TextStyle(
+        const pw.TextStyle(
           color: PdfColors.white,
           fontSize: 7,
           fontWeight: pw.FontWeight.bold,
         ),
       ),
       pw.SizedBox(height: 4),
-      pw.Text(
+      _pdfCardLine(
         value,
-        style: const pw.TextStyle(
+        const pw.TextStyle(
           color: PdfColors.white,
           fontSize: 15,
           fontWeight: pw.FontWeight.bold,
         ),
       ),
       pw.Spacer(),
-      pw.Text(
+      _pdfCardLine(
         subtitle,
-        style: const pw.TextStyle(
+        const pw.TextStyle(
           color: PdfColor.fromInt(0xffeef6f8),
           fontSize: 6.5,
         ),
       ),
     ],
   ),
+);
+
+pw.Widget _pdfCardLine(String text, pw.TextStyle style) => pw.FittedBox(
+  fit: pw.BoxFit.scaleDown,
+  alignment: pw.Alignment.centerLeft,
+  child: pw.Text(text, style: style, softWrap: false, maxLines: 1),
 );
 
 pw.Widget pdfLocationMap(

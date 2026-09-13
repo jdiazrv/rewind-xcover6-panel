@@ -101,6 +101,11 @@ List<ReportGpsSample> filterImplausibleReportGps(
 typedef ReportNavigationStats = ({
   double? distanceNm,
   Duration underway,
+  // Primer y último instante con el barco en marcha (SOG > 0.5 kt). Es lo
+  // que acota "desde que se inicia la navegación": el periodo elegido para
+  // el informe puede ser mucho más ancho que la singladura.
+  DateTime? startedAt,
+  DateTime? endedAt,
   double? avgSogUnderway,
   double? maxSog,
   double? avgSogMoving,
@@ -138,6 +143,8 @@ ReportNavigationStats calculateReportNavigationStats(
     return (
       distanceNm: null,
       underway: Duration.zero,
+      startedAt: null,
+      endedAt: null,
       avgSogUnderway: null,
       maxSog: sog.isEmpty ? null : sog.first.value,
       avgSogMoving: null,
@@ -151,6 +158,8 @@ ReportNavigationStats calculateReportNavigationStats(
   var underwayDistanceNm = 0.0;
   var underwaySeconds = 0.0;
   var acceptedSegments = 0;
+  DateTime? startedAt;
+  DateTime? endedAt;
   for (var i = 1; i < sog.length; i++) {
     final dt = sog[i].time.difference(sog[i - 1].time);
     if (dt <= Duration.zero || dt > maxGap) continue;
@@ -161,11 +170,15 @@ ReportNavigationStats calculateReportNavigationStats(
     if (meanKn > 0.5) {
       underwayDistanceNm += meanKn * hours;
       underwaySeconds += dt.inMilliseconds / 1000;
+      startedAt ??= sog[i - 1].time;
+      endedAt = sog[i].time;
     }
   }
   return (
     distanceNm: acceptedSegments == 0 ? null : distanceNm,
     underway: Duration(seconds: underwaySeconds.round()),
+    startedAt: startedAt,
+    endedAt: endedAt,
     avgSogUnderway: underwaySeconds <= 0
         ? null
         : underwayDistanceNm / (underwaySeconds / 3600),
@@ -217,6 +230,159 @@ Map<String, Duration> reportEngineRpmBands(
     if (name != null) seconds[name] = seconds[name]! + dt.inMilliseconds / 1000;
   }
   return {for (final name in names) name: Duration(seconds: seconds[name]!.round())};
+}
+
+/// Máximo de una serie de velocidad contando solo los instantes en que el
+/// barco navegaba (SOG > 0.5 kt), con el mismo criterio que
+/// [reportAverageStwUnderway]. Así media y máximo de una tarjeta hablan del
+/// mismo tiempo: el de la navegación, no el del periodo elegido.
+double? reportMaxSpeedUnderway(
+  List<GraphPoint> source,
+  List<GraphPoint> sogSource,
+  Duration expectedStep,
+) {
+  final series = source.where((p) => p.value.isFinite && p.value >= 0).toList();
+  final sog = sogSource.where((p) => p.value.isFinite && p.value >= 0).toList();
+  if (series.isEmpty || sog.isEmpty) return null;
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+  double? nearestSog(DateTime time) {
+    double? best;
+    Duration? bestDifference;
+    for (final point in sog) {
+      final difference = point.time.difference(time).abs();
+      if (difference > maxGap) continue;
+      if (bestDifference == null || difference < bestDifference) {
+        best = point.value;
+        bestDifference = difference;
+      }
+    }
+    return best;
+  }
+
+  double? maximum;
+  for (final point in series) {
+    if ((nearestSog(point.time) ?? 0) <= 0.5) continue;
+    if (maximum == null || point.value > maximum) maximum = point.value;
+  }
+  return maximum;
+}
+
+/// "de 09:12 a 16:40", o con fecha si la navegación cruza de un día a otro.
+/// Sustituye al antiguo "20% del periodo", que dependía de lo ancho que se
+/// eligiera el periodo del informe y no decía nada de la singladura.
+String reportNavigationSpanLabel(DateTime? startedAt, DateTime? endedAt) {
+  if (startedAt == null || endedAt == null) return 'sin navegación registrada';
+  final start = startedAt.toLocal();
+  final end = endedAt.toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  String hm(DateTime t) => '${two(t.hour)}:${two(t.minute)}';
+  String dm(DateTime t) => '${two(t.day)}/${two(t.month)}';
+  final sameDay =
+      start.year == end.year && start.month == end.month && start.day == end.day;
+  return sameDay
+      ? 'de ${hm(start)} a ${hm(end)}'
+      : 'de ${dm(start)} ${hm(start)} a ${dm(end)} ${hm(end)}';
+}
+
+/// Tramos del horizonte del selector de informes, en minutos desde su
+/// inicio, en los que el barco navegaba (SOG > 0.5 kt). Un hueco de datos
+/// más largo que [maxGap] corta el tramo: no se da por navegado un rato del
+/// que no hay registro.
+List<({double start, double end})> reportMovementSpans(
+  List<GraphPoint> sogSource,
+  DateTime horizonStart, {
+  int horizonMinutes = _reportHorizonMinutes,
+  Duration maxGap = const Duration(minutes: 30),
+}) {
+  final sog = sogSource.where((p) => p.value.isFinite).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  double minutesOf(DateTime t) =>
+      (t.difference(horizonStart).inSeconds / 60)
+          .clamp(0, horizonMinutes)
+          .toDouble();
+  final spans = <({double start, double end})>[];
+  double? openStart;
+  DateTime? lastMoving;
+  void close(DateTime at) {
+    if (openStart != null) spans.add((start: openStart!, end: minutesOf(at)));
+    openStart = null;
+    lastMoving = null;
+  }
+
+  for (final p in sog) {
+    if (p.value > 0.5) {
+      if (lastMoving != null && p.time.difference(lastMoving!) > maxGap) {
+        close(lastMoving!);
+      }
+      openStart ??= minutesOf(p.time);
+      lastMoving = p.time;
+    } else if (openStart != null) {
+      close(p.time);
+    }
+  }
+  if (lastMoving != null) close(lastMoving!);
+  return spans;
+}
+
+/// Cargador que usa el selector de informes. Los tests de widgets no tienen
+/// red, y una descarga en curso les deja vivo el temporizador de su timeout;
+/// ahí se sustituye por uno que responde al momento.
+@visibleForTesting
+Future<List<GraphPoint>> Function(SettingsModel settings, DateTime referenceNow)
+reportHorizonSogLoader = loadReportHorizonSog;
+
+/// SOG de las últimas 72 h para colorear la línea de tiempo del selector,
+/// desde la misma fuente que usan los informes. Si falla devuelve una lista
+/// vacía: el selector sigue funcionando, solo que sin colorear.
+Future<List<GraphPoint>> loadReportHorizonSog(
+  SettingsModel s,
+  DateTime referenceNow,
+) async {
+  final start = referenceNow.subtract(const Duration(hours: 72));
+  final r = _reportRangeFor(const Duration(hours: 72));
+  if (s.demoMode) {
+    return demoGraphSeries(mSog, r.flux, r.agg, start: start, stop: referenceNow);
+  }
+  try {
+    final host = await resolveHostOnce(s.host);
+    Future<List<GraphPoint>> fromInflux() => influxQuery(
+      host: s.effectiveInfluxHost,
+      org: s.influxOrg,
+      token: s.influxToken,
+      def: mSog,
+      fluxRange: r.flux,
+      aggEvery: r.agg,
+      start: start,
+      stop: referenceNow,
+      bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
+    );
+    Future<List<GraphPoint>> fromSk() => skHistoryQuery(
+      host: host,
+      port: s.port,
+      authBase64: s.authBase64,
+      def: mSog,
+      range: parseFluxRange(r.flux),
+      resolution: parseAggEvery(r.agg),
+      start: start,
+      stop: referenceNow,
+    );
+    switch (s.historySource) {
+      case 'influx':
+        return await fromInflux();
+      case 'sk':
+        return await fromSk();
+      default:
+        try {
+          return await fromInflux();
+        } catch (_) {
+          return await fromSk();
+        }
+    }
+  } catch (_) {
+    return const [];
+  }
 }
 
 double? reportAverageStwUnderway(
@@ -372,11 +538,19 @@ class _ReportPeriodSelector extends StatelessWidget {
     required this.referenceNow,
     required this.values,
     required this.onChanged,
+    this.movement,
   });
 
   final DateTime referenceNow;
   final RangeValues values;
   final ValueChanged<RangeValues> onChanged;
+  /// SOG de las 72 h del horizonte. Pinta en verde, bajo la barra, los
+  /// tramos en que el barco navegaba: así se ve de un vistazo dónde colocar
+  /// el periodo de un informe que incluya movimiento del barco.
+  final Future<List<GraphPoint>>? movement;
+
+  DateTime get _horizonStart =>
+      referenceNow.subtract(const Duration(hours: 72));
 
   DateTime _timeFor(double minutes) => referenceNow
       .subtract(const Duration(hours: 72))
@@ -466,6 +640,29 @@ class _ReportPeriodSelector extends StatelessWidget {
               return Stack(
                 clipBehavior: Clip.none,
                 children: [
+                  // Detrás de la barra y un poco más alta que su pista, para
+                  // que el verde asome por arriba y por abajo. El margen de
+                  // 24 es el que el RangeSlider deja a cada lado de la pista
+                  // (el radio del overlay por defecto), para que cada tramo
+                  // quede bajo la hora que le corresponde.
+                  if (movement != null)
+                    Positioned(
+                      left: 24,
+                      right: 24,
+                      top: 46,
+                      height: 10,
+                      child: FutureBuilder<List<GraphPoint>>(
+                        future: movement,
+                        builder: (context, snapshot) => CustomPaint(
+                          painter: _MovementStripPainter(
+                            reportMovementSpans(
+                              snapshot.data ?? const [],
+                              _horizonStart,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   Positioned(
                     left: 0,
                     right: 0,
@@ -513,9 +710,89 @@ class _ReportPeriodSelector extends StatelessWidget {
             Text('ahora', style: TextStyle(color: cMuted, fontSize: 10)),
           ],
         ),
+        if (movement != null)
+          FutureBuilder<List<GraphPoint>>(
+            future: movement,
+            builder: (context, snapshot) {
+              final String label;
+              final Color swatch;
+              if (snapshot.connectionState != ConnectionState.done) {
+                label = 'buscando cuándo navegó el barco…';
+                swatch = cMuted.withValues(alpha: 0.4);
+              } else if ((snapshot.data ?? const []).isEmpty) {
+                // Sin datos no se puede afirmar que el barco estuviera
+                // parado: se dice que falta el dato, no que no hubo
+                // movimiento.
+                label = 'sin datos de velocidad para estas 72 h';
+                swatch = cMuted.withValues(alpha: 0.4);
+              } else if (reportMovementSpans(snapshot.data!, _horizonStart)
+                  .isEmpty) {
+                label = 'el barco no se ha movido en las últimas 72 h';
+                swatch = cMuted.withValues(alpha: 0.4);
+              } else {
+                label = 'en verde, barco navegando (SOG > 0.5 kt)';
+                swatch = cGreen;
+              }
+              return Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 14,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: swatch,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      label,
+                      style: const TextStyle(color: cMuted, fontSize: 10),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
       ],
     );
   }
+}
+
+class _MovementStripPainter extends CustomPainter {
+  _MovementStripPainter(this.spans);
+
+  final List<({double start, double end})> spans;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = cGreen.withValues(alpha: 0.85);
+    for (final span in spans) {
+      final left = size.width * span.start / _reportHorizonMinutes;
+      // Un tramo muy corto sigue viéndose: mínimo 2 px de ancho.
+      final right = math.max(
+        left + 2,
+        size.width * span.end / _reportHorizonMinutes,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTRB(left, 0, right, size.height),
+          const Radius.circular(3),
+        ),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _MovementStripPainter old) =>
+      old.spans.length != spans.length ||
+      [
+        for (var i = 0; i < spans.length; i++)
+          spans[i] != old.spans[i],
+      ].any((changed) => changed);
 }
 
 class _InvisibleRangeThumbShape extends RangeSliderThumbShape {
@@ -587,6 +864,9 @@ Future<void> showPerformanceReportPicker(
   // Freeze "now" while this dialog is open: otherwise both labels would
   // drift under the user's fingers even though neither marker had moved.
   final referenceNow = DateTime.now();
+  // Una sola carga por apertura del diálogo: el selector se reconstruye en
+  // cada arrastre y no debe volver a pedir el histórico.
+  final movement = reportHorizonSogLoader(settings, referenceNow);
   var selectedPeriod = RangeValues(
     (_reportHorizonMinutes - _reportDefaultPeriodMinutes).toDouble(),
     _reportHorizonMinutes.toDouble(),
@@ -631,6 +911,7 @@ Future<void> showPerformanceReportPicker(
                     const SizedBox(height: 4),
                     _ReportPeriodSelector(
                       referenceNow: referenceNow,
+                      movement: movement,
                       values: selectedPeriod,
                       onChanged: (value) => setDialogState(
                         () => selectedPeriod = normalizeReportRange(
@@ -1400,25 +1681,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final rangeDur = widget.end.difference(widget.start);
     final navigationStats = calculateReportNavigationStats(sog, interval);
     final underwayDur = navigationStats.underway;
-    final underwayFrac = rangeDur.inMilliseconds <= 0
-        ? 0.0
-        : underwayDur.inMilliseconds / rangeDur.inMilliseconds;
-    final sogMoving = _reportMovingSpeedStats(sog);
-    final stwMoving = _reportMovingSpeedStats(stw);
-    // Keep the cards numeric even when the history backend returns a sparse
-    // series: navigationStats proves SOG exists, while the explicit source
-    // fallback prevents a blank PDF text run from hiding valid telemetry.
-    // The integrated navigation stats are the authoritative fallback: the
-    // distance/time cards prove SOG exists even if a sparse history query
-    // returns an unexpected sample shape.
-    final sogAverage = navigationStats.distanceNm != null &&
-            navigationStats.underway.inSeconds > 0
-        ? navigationStats.distanceNm! /
-            (navigationStats.underway.inSeconds / 3600)
-        : sogMoving.average ?? 0.0;
-    final sogMaximum = sogMoving.maximum ?? sogAverage;
-    final stwAverage = stwMoving.average ?? _avg(stw) ?? 0.0;
-    final stwMaximum = stwMoving.maximum ?? stwAverage;
+    // Medias y máximos desde que el barco empieza a navegar (SOG > 0.5 kt),
+    // no sobre todo el periodo elegido: con un informe de 48 h y 5 h de
+    // navegación, las horas fondeado hundían la media hacia cero.
+    final sogAverage = navigationStats.avgSogUnderway;
+    final sogMaximum = reportMaxSpeedUnderway(sog, sog, interval);
+    final stwAverage = reportAverageStwUnderway(stw, sog, interval);
+    final stwMaximum = reportMaxSpeedUnderway(stw, sog, interval);
     final engineDuration = reportEngineRunningDuration(rpm, interval);
     final rpmBands = reportEngineRpmBands(rpm, interval);
     final polar = _realPolar(stw, twa, tws, sog);
@@ -1530,7 +1799,10 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     child: pdfInfoCard(
                       'Tiempo navegando',
                       '${underwayDur.inHours}h ${underwayDur.inMinutes % 60}m',
-                      '${(underwayFrac * 100).round()}% del periodo (SOG>0.5kt)',
+                      reportNavigationSpanLabel(
+                        navigationStats.startedAt,
+                        navigationStats.endedAt,
+                      ),
                       pdfGreen,
                     ),
                   ),
@@ -1541,8 +1813,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'SOG',
-                      '${sogAverage.toStringAsFixed(1)} kt media (>=2 kt)',
-                      'máx ${sogMaximum.toStringAsFixed(1)} kt',
+                      sogAverage == null
+                          ? 'Sin datos'
+                          : '${sogAverage.toStringAsFixed(1)} kt media',
+                      sogMaximum == null
+                          ? 'máx: Sin datos'
+                          : 'máx ${sogMaximum.toStringAsFixed(1)} kt',
                       pdfGreen,
                     ),
                   ),
@@ -1553,8 +1829,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'STW',
-                      '${stwAverage.toStringAsFixed(1)} kt media (>=2 kt)',
-                      'máx ${stwMaximum.toStringAsFixed(1)} kt',
+                      stwAverage == null
+                          ? 'Sin datos'
+                          : '${stwAverage.toStringAsFixed(1)} kt media',
+                      stwMaximum == null
+                          ? 'máx: Sin datos'
+                          : 'máx ${stwMaximum.toStringAsFixed(1)} kt',
                       pdfTeal,
                     ),
                   ),
@@ -2644,6 +2924,12 @@ pw.Widget pdfTrackMap({
     }
   }
 
+  // Sin telemetría de motor no se puede saber si un tramo fue a vela o a
+  // motor, así que no se pinta como vela: va en un color neutro y la
+  // leyenda lo dice. Lo mismo para tramos concretos sin RPM cerca.
+  const unknownTrackColor = PdfColor.fromInt(0xff1d4e89);
+  final hasEngineTelemetry = rpm.isNotEmpty;
+
   GraphPoint? nearestEngineRpm(DateTime time) {
     GraphPoint? best;
     Duration? bestDiff;
@@ -2657,6 +2943,52 @@ pw.Widget pdfTrackMap({
     }
     return best;
   }
+
+  _TrackSegmentKind segmentKind(int i) {
+    if (!hasEngineTelemetry) return _TrackSegmentKind.unknown;
+    final before = nearestEngineRpm(points[i - 1].time);
+    final after = nearestEngineRpm(points[i].time);
+    if (before == null && after == null) return _TrackSegmentKind.unknown;
+    final motor = (before?.value ?? 0) >= 200 || (after?.value ?? 0) >= 200;
+    return motor ? _TrackSegmentKind.motor : _TrackSegmentKind.sail;
+  }
+
+  final presentKinds = <_TrackSegmentKind>{};
+  for (var i = 1; i < points.length; i++) {
+    if (points[i].time.difference(points[i - 1].time) > breakThreshold) continue;
+    presentKinds.add(segmentKind(i));
+  }
+
+  pw.Widget legendSwatch(PdfColor color, String label) => pw.Row(
+    mainAxisSize: pw.MainAxisSize.min,
+    children: [
+      pw.Container(width: 12, height: 3, color: color),
+      pw.SizedBox(width: 3),
+      pw.Text(label, style: const pw.TextStyle(color: pdfText, fontSize: 7)),
+    ],
+  );
+
+  final legendItems = <pw.Widget>[
+    if (!hasEngineTelemetry) ...[
+      legendSwatch(unknownTrackColor, 'Traza'),
+      pw.SizedBox(width: 6),
+      pw.Text(
+        'Sin telemetría de motor: no se distingue vela de motor',
+        style: const pw.TextStyle(color: pdfMuted, fontSize: 7),
+      ),
+    ] else ...[
+      if (presentKinds.contains(_TrackSegmentKind.sail)) ...[
+        legendSwatch(pdfCyan, 'Vela'),
+        pw.SizedBox(width: 8),
+      ],
+      if (presentKinds.contains(_TrackSegmentKind.motor)) ...[
+        legendSwatch(pdfOrange, 'Motor'),
+        pw.SizedBox(width: 8),
+      ],
+      if (presentKinds.contains(_TrackSegmentKind.unknown))
+        legendSwatch(unknownTrackColor, 'Sin datos de motor'),
+    ],
+  ];
 
   return pw.Container(
     width: width,
@@ -2704,11 +3036,14 @@ pw.Widget pdfTrackMap({
                 final previous = toCanvas(projected[i - 1]);
                 final gapBefore = points[i].time.difference(points[i - 1].time);
                 if (gapBefore > breakThreshold) continue;
-                final motor = (nearestEngineRpm(points[i - 1].time)?.value ?? 0) >= 200 ||
-                    (nearestEngineRpm(points[i].time)?.value ?? 0) >= 200;
+                final kind = segmentKind(i);
                 canvas
-                  ..setStrokeColor(motor ? pdfOrange : pdfCyan)
-                  ..setLineWidth(motor ? 2.2 : 1.6)
+                  ..setStrokeColor(switch (kind) {
+                    _TrackSegmentKind.motor => pdfOrange,
+                    _TrackSegmentKind.sail => pdfCyan,
+                    _TrackSegmentKind.unknown => unknownTrackColor,
+                  })
+                  ..setLineWidth(kind == _TrackSegmentKind.motor ? 2.2 : 1.6)
                   ..moveTo(previous.$1, previous.$2)
                   ..lineTo(x, y)
                   ..strokePath();
@@ -2735,7 +3070,26 @@ pw.Widget pdfTrackMap({
             },
           ),
         ),
+        if (legendItems.isNotEmpty)
+          pw.Positioned(
+            left: 6,
+            bottom: 6,
+            child: pw.Container(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.white,
+                borderRadius: pw.BorderRadius.circular(3),
+              ),
+              child: pw.Row(
+                mainAxisSize: pw.MainAxisSize.min,
+                children: legendItems,
+              ),
+            ),
+          ),
       ],
     ),
   );
 }
+
+/// Cómo se pinta cada tramo de la traza GPS.
+enum _TrackSegmentKind { sail, motor, unknown }

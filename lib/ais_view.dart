@@ -955,6 +955,8 @@ class AisRelativeView extends StatefulWidget {
     this.shipIconAsset = 'assets/img/own_ship.png',
     this.priorityCpaNm = 1.0,
     this.priorityTcpaMin = 10.0,
+    this.onSwipeToNextPage,
+    this.onSwipeToPreviousPage,
   });
   final Map<String, AisTarget> targets;
   final double? ownHeadingDeg;
@@ -966,6 +968,12 @@ class AisRelativeView extends StatefulWidget {
   final double priorityCpaNm;
   final double priorityTcpaMin;
 
+  /// Cambio de pantalla desde la franja izquierda. En AIS el PageView de la
+  /// app no desliza (competía con el pellizco para hacer zoom), así que el
+  /// gesto para irse de pantalla vive solo en esa franja.
+  final VoidCallback? onSwipeToNextPage;
+  final VoidCallback? onSwipeToPreviousPage;
+
   @override
   State<AisRelativeView> createState() => _AisRelativeViewState();
 }
@@ -976,6 +984,11 @@ class _AisRelativeViewState extends State<AisRelativeView>
   bool get wantKeepAlive => true;
 
   bool _showList = false;
+  // Ancho de la franja izquierda que cambia de pantalla: el de la columna de
+  // opciones (chips de 160 px a 10 px del borde), para que el gesto quede
+  // donde el usuario ya tiene la mano y el resto del radar sea solo zoom.
+  static const _pageSwipeStripWidth = 170.0;
+  double _stripDragDx = 0;
   bool _priorityOnly = false;
   bool _movingOnly = false;
   double _maxDistanceNm = 0; // 0 = sin límite
@@ -1191,6 +1204,48 @@ class _AisRelativeViewState extends State<AisRelativeView>
                   ownScreenHeadingDeg,
                   northScreenAngleDeg,
                   cogFallbackActive,
+                ),
+              // Franja para cambiar de pantalla. Translúcida: los toques
+              // siguen llegando al radar de debajo (abrir un blanco AIS), y un
+              // arrastre de un dedo gana al pellizco, que solo actúa con dos.
+              // Va antes que la columna de opciones para que sus chips, que
+              // quedan encima, conserven su toque.
+              if (widget.onSwipeToNextPage != null ||
+                  widget.onSwipeToPreviousPage != null)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: _pageSwipeStripWidth,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragStart: (_) => _stripDragDx = 0,
+                    onHorizontalDragUpdate: (d) => _stripDragDx += d.delta.dx,
+                    onHorizontalDragEnd: (d) {
+                      final velocity = d.primaryVelocity ?? 0;
+                      final toNext = _stripDragDx < -60 || velocity < -400;
+                      final toPrevious = _stripDragDx > 60 || velocity > 400;
+                      _stripDragDx = 0;
+                      if (toNext) {
+                        widget.onSwipeToNextPage?.call();
+                      } else if (toPrevious) {
+                        widget.onSwipeToPreviousPage?.call();
+                      }
+                    },
+                    child: const Align(
+                      alignment: Alignment.bottomLeft,
+                      child: IgnorePointer(
+                        child: Padding(
+                          padding: EdgeInsets.only(left: 10, bottom: 12),
+                          child: Icon(
+                            Icons.swap_horiz,
+                            size: 18,
+                            color: Color(0x668A9BA8),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
               Positioned(
                 top: 8,

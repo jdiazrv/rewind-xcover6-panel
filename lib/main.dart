@@ -6803,12 +6803,11 @@ class _DashboardState extends State<Dashboard> {
                                 alarmPageIds: _alarmPageIds,
                                 alarmCount: _activeAlarms.length,
                                 onBellTap: () => _showAlarmsList(context),
-                                contextActionLabel:
-                                    _selectedPageId == 'VNT'
-                                        ? 'INFORME VIENTO'
-                                        : _selectedPageId == 'NAV'
-                                        ? 'INFORME BARCO'
-                                        : null,
+                                contextActionLabel: _selectedPageId == 'VNT'
+                                    ? 'INFORME VIENTO'
+                                    : _selectedPageId == 'NAV'
+                                    ? 'INFORME BARCO'
+                                    : null,
                                 contextActionIcon:
                                     (_selectedPageId == 'VNT' ||
                                         _selectedPageId == 'NAV')
@@ -6830,6 +6829,19 @@ class _DashboardState extends State<Dashboard> {
                       child: PageView(
                         controller: _pageController,
                         onPageChanged: _onPageChange,
+                        // En AIS el deslizamiento horizontal entre pantallas
+                        // competía con el pellizco para hacer zoom: al posar
+                        // el primer dedo con un poco de desvío lateral, el
+                        // PageView ganaba y se iba de pantalla. Ahí se apaga,
+                        // y AisRelativeView deja una franja a la izquierda
+                        // para cambiar de pantalla ("es muy difícil hacer
+                        // zoom porque interpreta que estoy sliding").
+                        // En TNK tampoco: su carrusel de tanques decide, y solo
+                        // se pasa de pantalla al empujar más allá del último
+                        // (o del primero) grupo de tanques.
+                        physics: const {'AIS', 'TNK'}.contains(_pageIds[page])
+                            ? const NeverScrollableScrollPhysics()
+                            : null,
                         children: [for (final p in pages) p.$3],
                       ),
                     ),
@@ -9918,7 +9930,6 @@ class _DashboardState extends State<Dashboard> {
     );
     final aws = _freshWind(_dAws, signalK.awsUpdate),
         awa = _freshWind(_dAwa, signalK.awaUpdate),
-        sog = _freshSog,
         tws = _freshWind(_dTws, signalK.twsUpdate),
         twd = _freshWind(_dTwd, signalK.twdUpdate);
     final h = settings.effectiveInfluxHost;
@@ -9932,6 +9943,11 @@ class _DashboardState extends State<Dashboard> {
     final skA = settings.authBase64;
     final awsGust = _awsHistory.statisticalGustWithAge()?.value;
     final twsGust = _twsHistory.statisticalGustWithAge()?.value;
+    // En VNT la velocidad de referencia es STW. SOG solo entra cuando
+    // selectEffectiveBoatSpeed tiene certeza de que la corredera no sirve
+    // (parada diagnosticada, o sin dato de STW), y entonces se rotula SOG en
+    // amarillo para que nunca pase por velocidad sobre el agua.
+    final boatSpeed = _effectiveBoatSpeed;
     return _grid3x2(
       children: [
         _WindTapCard(
@@ -9975,12 +9991,12 @@ class _DashboardState extends State<Dashboard> {
           demo: settings.demoMode,
         ),
         _WindTapCard(
-          label: 'SOG',
-          value: fmt(sog, 1, ''),
+          label: boatSpeed.overGround ? 'SOG' : 'STW',
+          value: fmt(boatSpeed.valueKn, 1, ''),
           color: cText,
-          accentColor: cGreen,
+          accentColor: boatSpeed.overGround ? cYellow : cGreen,
           unit: 'kt',
-          graphMetrics: const [mSog],
+          graphMetrics: [boatSpeed.overGround ? mSog : mStw],
           host: h,
           bucket: b,
           archiveBucket: ab,
@@ -10572,6 +10588,11 @@ class _DashboardState extends State<Dashboard> {
   }
 
   int _tankPageIndex = 0;
+  // Un gesto, una pantalla: el sobredesplazamiento del carrusel de tanques
+  // se acumula y, al pasar el umbral en un extremo, cambia de pantalla una
+  // sola vez hasta soltar el dedo (mismo criterio que _navFlipLock).
+  double _tankEdgeOverscroll = 0;
+  bool _tankEdgeFlipLock = false;
 
   List<MetricDef> _tankHistoryMetrics(TankViewData tank) => [
     for (final slot in tank.slots)
@@ -10610,74 +10631,172 @@ class _DashboardState extends State<Dashboard> {
                 .clamp(1, 5);
         final pageCount = (tanks.length / maxVisible).ceil();
         if (_tankPageIndex >= pageCount) _tankPageIndex = 0;
+        final tanksBefore = _tankPageIndex * maxVisible;
+        final tanksAfter = math.max(
+          0,
+          tanks.length - (_tankPageIndex + 1) * maxVisible,
+        );
+        Widget edgeHint(bool left, int count) => Positioned(
+          left: left ? 2 : null,
+          right: left ? null : 2,
+          top: 0,
+          bottom: 0,
+          child: IgnorePointer(
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                decoration: BoxDecoration(
+                  color: cPanel.withValues(alpha: 0.85),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: cCyan.withValues(alpha: 0.5)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      left ? Icons.chevron_left : Icons.chevron_right,
+                      color: cCyan,
+                      size: 22,
+                    ),
+                    Text(
+                      '$count',
+                      style: const TextStyle(
+                        color: cText,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Text(
+                      'más',
+                      style: TextStyle(color: cMuted, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
         return Column(
           children: [
             Expanded(
-              child: PageView.builder(
-                itemCount: pageCount,
-                onPageChanged: (index) =>
-                    setState(() => _tankPageIndex = index),
-                itemBuilder: (context, pageIndex) {
-                  final first = pageIndex * maxVisible;
-                  final pageTanks = tanks.sublist(
-                    first,
-                    math.min(first + maxVisible, tanks.length),
-                  );
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: sidePadding,
-                      vertical: 12,
-                    ),
-                    child: Row(
-                      children: [
-                        for (
-                          var index = 0;
-                          index < pageTanks.length;
-                          index++
-                        ) ...[
-                          if (index > 0) const SizedBox(width: gap),
-                          Expanded(
-                            child: Builder(
-                              builder: (context) {
-                                final tank = pageTanks[index];
-                                final firstSlot = tank.slots.first;
-                                return Container(
-                                  key: ValueKey('tank-card-${tank.name}'),
-                                  constraints: const BoxConstraints(
-                                    minWidth: minCardWidth,
-                                  ),
-                                  child: TankCard(
-                                    name: tank.name,
-                                    value: tank.percent(signalK.tanks),
-                                    capacityL: tank.capacityL,
-                                    color: tank.color,
-                                    icon: tank.icon,
-                                    flexible: true,
-                                    segments: _tankSegments(tank),
-                                    dangerWhenHigh:
-                                        firstSlot.type == 'blackWater',
-                                    warningPct: firstSlot.warningPct,
-                                    alarmPct: firstSlot.alarmPct,
-                                    stale: tank.slots.every(
-                                      (slot) => _pathIsStale(
-                                        slot.skPath,
-                                        const Duration(minutes: 5),
-                                      ),
-                                    ),
-                                    calibrated: tank.slots.every(
-                                      (slot) => slot.capacityL > 0,
-                                    ),
-                                    onTap: () => _showTankGroup(tank),
-                                  ),
-                                );
-                              },
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: NotificationListener<ScrollNotification>(
+                      onNotification: (notification) {
+                        if (notification.depth != 0) return false;
+                        if (notification is ScrollStartNotification) {
+                          _tankEdgeOverscroll = 0;
+                          _tankEdgeFlipLock = false;
+                        } else if (notification is ScrollEndNotification) {
+                          _tankEdgeFlipLock = false;
+                        } else if (notification is OverscrollNotification &&
+                            !_tankEdgeFlipLock) {
+                          _tankEdgeOverscroll += notification.overscroll;
+                          if (_tankEdgeOverscroll.abs() >= 60) {
+                            final forward = _tankEdgeOverscroll > 0;
+                            _tankEdgeOverscroll = 0;
+                            _tankEdgeFlipLock = true;
+                            if (forward && page < _pageIds.length - 1) {
+                              _selectPage(page + 1);
+                            } else if (!forward && page > 0) {
+                              _selectPage(page - 1);
+                            }
+                          }
+                        }
+                        return false;
+                      },
+                      child: PageView.builder(
+                        // Clamping, no rebote: el rebote (iOS, web) nunca emite
+                        // OverscrollNotification y el cambio de pantalla en los
+                        // extremos no llegaría a dispararse.
+                        physics: const PageScrollPhysics(
+                          parent: ClampingScrollPhysics(),
+                        ),
+                        itemCount: pageCount,
+                        onPageChanged: (index) =>
+                            setState(() => _tankPageIndex = index),
+                        itemBuilder: (context, pageIndex) {
+                          final first = pageIndex * maxVisible;
+                          final pageTanks = tanks.sublist(
+                            first,
+                            math.min(first + maxVisible, tanks.length),
+                          );
+                          // Cada tarjeta mide lo que mediría en una página
+                          // llena y la fila va centrada: un grupo con menos
+                          // tanques no se estira hasta ocupar la pantalla
+                          // ("mantén el tamaño de la pantalla anterior").
+                          final cardWidth =
+                              (c.maxWidth -
+                                  sidePadding * 2 -
+                                  gap * (maxVisible - 1)) /
+                              maxVisible;
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: sidePadding,
+                              vertical: 12,
                             ),
-                          ),
-                        ],
-                      ],
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                for (
+                                  var index = 0;
+                                  index < pageTanks.length;
+                                  index++
+                                ) ...[
+                                  if (index > 0) const SizedBox(width: gap),
+                                  SizedBox(
+                                    width: cardWidth,
+                                    child: Builder(
+                                      builder: (context) {
+                                        final tank = pageTanks[index];
+                                        final firstSlot = tank.slots.first;
+                                        return Container(
+                                          key: ValueKey(
+                                            'tank-card-${tank.name}',
+                                          ),
+                                          constraints: const BoxConstraints(
+                                            minWidth: minCardWidth,
+                                          ),
+                                          child: TankCard(
+                                            name: tank.name,
+                                            value: tank.percent(signalK.tanks),
+                                            capacityL: tank.capacityL,
+                                            color: tank.color,
+                                            icon: tank.icon,
+                                            flexible: true,
+                                            segments: _tankSegments(tank),
+                                            dangerWhenHigh:
+                                                firstSlot.type == 'blackWater',
+                                            warningPct: firstSlot.warningPct,
+                                            alarmPct: firstSlot.alarmPct,
+                                            stale: tank.slots.every(
+                                              (slot) => _pathIsStale(
+                                                slot.skPath,
+                                                const Duration(minutes: 5),
+                                              ),
+                                            ),
+                                            calibrated: tank.slots.every(
+                                              (slot) => slot.capacityL > 0,
+                                            ),
+                                            onTap: () => _showTankGroup(tank),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          );
+                        },
+                      ),
                     ),
-                  );
-                },
+                  ),
+                  // Indicación clara de que quedan tanques a cada lado.
+                  if (tanksBefore > 0) edgeHint(true, tanksBefore),
+                  if (tanksAfter > 0) edgeHint(false, tanksAfter),
+                ],
               ),
             ),
             if (pageCount > 1)
@@ -11692,6 +11811,12 @@ class _DashboardState extends State<Dashboard> {
     shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
     priorityCpaNm: settings.alarmAisCpaNm,
     priorityTcpaMin: settings.alarmAisTcpaMin,
+    onSwipeToNextPage: () {
+      if (page < _pageIds.length - 1) _selectPage(page + 1);
+    },
+    onSwipeToPreviousPage: () {
+      if (page > 0) _selectPage(page - 1);
+    },
   );
 
   // ─── Settings page ──────────────────────────────────────────────────────────
