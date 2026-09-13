@@ -1411,7 +1411,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     // The integrated navigation stats are the authoritative fallback: the
     // distance/time cards prove SOG exists even if a sparse history query
     // returns an unexpected sample shape.
-    final sogAverage = navigationStats.avgSogUnderway ?? sogMoving.average ?? 0.0;
+    final sogAverage = navigationStats.distanceNm != null &&
+            navigationStats.underway.inSeconds > 0
+        ? navigationStats.distanceNm! /
+            (navigationStats.underway.inSeconds / 3600)
+        : sogMoving.average ?? 0.0;
     final sogMaximum = sogMoving.maximum ?? sogAverage;
     final stwAverage = stwMoving.average ?? _avg(stw) ?? 0.0;
     final stwMaximum = stwMoving.maximum ?? stwAverage;
