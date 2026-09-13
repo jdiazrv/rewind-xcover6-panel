@@ -260,12 +260,12 @@ void main() {
     await tester.pumpWidget(const RewindApp());
     await tester.tap(find.text('VNT'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('INFORMES'));
+    await tester.tap(find.text('INFORME VIENTO'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Navegación y singladura'), findsOneWidget);
+    expect(find.text('Barco: navegación y motor'), findsOneWidget);
     expect(find.text('Viento y navegación a vela'), findsOneWidget);
-    expect(find.text('Informe completo'), findsOneWidget);
+    expect(find.text('Completo: barco y viento'), findsOneWidget);
     expect(find.text('−72 h'), findsOneWidget);
     expect(find.text('ahora'), findsOneWidget);
     expect(find.text('24 h'), findsOneWidget);
