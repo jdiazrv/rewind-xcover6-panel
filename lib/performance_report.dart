@@ -13,6 +13,9 @@ import 'main.dart';
 import 'model_comparison.dart' show pdfInfoCard;
 import 'models.dart';
 import 'pdf/pdf_theme.dart';
+import 'pdf_export/pdf_export_stub.dart'
+    if (dart.library.io) 'pdf_export/pdf_export_io.dart'
+    if (dart.library.html) 'pdf_export/pdf_export_web.dart';
 import 'theme.dart';
 
 // Signal K publishes revolutions in Hz; reports display the conventional RPM.
@@ -1201,6 +1204,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         backgroundColor: cBg,
         foregroundColor: cText,
         title: Text('${widget.kind.label} - ${_range.label}'),
+        actions: [
+          IconButton(
+            tooltip: 'Compartir PDF',
+            onPressed: _loading ? null : () => _sharePdf(context),
+            icon: const Icon(Icons.share),
+          ),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -1230,6 +1240,29 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               build: (_) => _buildReportPdf(),
             ),
     );
+  }
+
+  Future<void> _sharePdf(BuildContext context) async {
+    try {
+      final bytes = await _buildReportPdf();
+      if (!context.mounted) return;
+      await exportPdfReport(
+        bytes: bytes,
+        filename: switch (widget.kind) {
+          PerformanceReportKind.navigation => 'rewind_navegacion.pdf',
+          PerformanceReportKind.windAndSailing =>
+            'rewind_viento_rendimiento_vela.pdf',
+          PerformanceReportKind.complete => 'rewind_informe_completo.pdf',
+        },
+        subject: widget.kind.label,
+      );
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error exportando PDF: ${friendlyApiError(e)}')),
+        );
+      }
+    }
   }
 
   // ─── Stats ──────────────────────────────────────────────────────────────
@@ -1372,6 +1405,17 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         : underwayDur.inMilliseconds / rangeDur.inMilliseconds;
     final sogMoving = _reportMovingSpeedStats(sog);
     final stwMoving = _reportMovingSpeedStats(stw);
+    // Keep the cards numeric even when the history backend returns a sparse
+    // series: navigationStats proves SOG exists, while the explicit source
+    // fallback prevents a blank PDF text run from hiding valid telemetry.
+    final sogAverage = sogMoving.average ?? navigationStats.avgSogUnderway ??
+        (sog.isEmpty ? null : 0.0);
+    final sogMaximum = sogMoving.maximum ??
+        (sog.isEmpty ? null : _max(sog));
+    final stwAverage = stwMoving.average ??
+        (stw.isEmpty ? null : 0.0);
+    final stwMaximum = stwMoving.maximum ??
+        (stw.isEmpty ? null : _max(stw));
     final engineDuration = reportEngineRunningDuration(rpm, interval);
     final rpmBands = reportEngineRpmBands(rpm, interval);
     final polar = _realPolar(stw, twa, tws, sog);
@@ -1494,12 +1538,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'SOG',
-                      sogMoving.average == null
+                      sogAverage == null
                           ? 'Sin datos'
-                          : '${sogMoving.average!.toStringAsFixed(1)} kt media (>=2 kt)',
-                      sogMoving.maximum == null
+                          : '${sogAverage.toStringAsFixed(1)} kt media (>=2 kt)',
+                      sogMaximum == null
                           ? 'máx: Sin datos'
-                          : 'máx ${sogMoving.maximum!.toStringAsFixed(1)} kt',
+                          : 'máx ${sogMaximum.toStringAsFixed(1)} kt',
                       pdfGreen,
                     ),
                   ),
@@ -1510,12 +1554,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'STW',
-                      stwMoving.average == null
+                      stwAverage == null
                           ? 'Sin datos'
-                          : '${stwMoving.average!.toStringAsFixed(1)} kt media (>=2 kt)',
-                      stwMoving.maximum == null
+                          : '${stwAverage.toStringAsFixed(1)} kt media (>=2 kt)',
+                      stwMaximum == null
                           ? 'máx: Sin datos'
-                          : 'máx ${stwMoving.maximum!.toStringAsFixed(1)} kt',
+                          : 'máx ${stwMaximum.toStringAsFixed(1)} kt',
                       pdfTeal,
                     ),
                   ),
