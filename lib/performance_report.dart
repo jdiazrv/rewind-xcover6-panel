@@ -192,7 +192,7 @@ Map<String, Duration> reportEngineRpmBands(
   List<GraphPoint> rpm,
   Duration expectedStep,
 ) {
-  const names = ['1600-1800', '1800-2000', '2000-2200', '2200-2400', '>2400'];
+  const names = ['1600 a 1800', '1800 a 2000', '2000 a 2200', '2200 a 2400', 'mas de 2400'];
   final out = {for (final name in names) name: Duration.zero};
   if (rpm.length < 2) return out;
   final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
@@ -205,7 +205,7 @@ Map<String, Duration> reportEngineRpmBands(
     final dt = points[i].time.difference(points[i - 1].time);
     if (dt <= Duration.zero || dt > maxGap) continue;
     final value = (points[i - 1].value + points[i].value) / 2;
-    final name = value >= 2400 ? '>2400' : value >= 2200 ? '2200-2400' : value >= 2000 ? '2000-2200' : value >= 1800 ? '1800-2000' : value >= 1600 ? '1600-1800' : null;
+    final name = value >= 2400 ? 'mas de 2400' : value >= 2200 ? '2200 a 2400' : value >= 2000 ? '2000 a 2200' : value >= 1800 ? '1800 a 2000' : value >= 1600 ? '1600 a 1800' : null;
     if (name != null) seconds[name] = seconds[name]! + dt.inMilliseconds / 1000;
   }
   return {for (final name in names) name: Duration(seconds: seconds[name]!.round())};
@@ -1491,7 +1491,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                       'SOG',
                       sogMoving.average == null
                           ? 'Sin datos'
-                          : '${sogMoving.average!.toStringAsFixed(1)} kt media (≥2 kt)',
+                          : '${sogMoving.average!.toStringAsFixed(1)} kt media (>=2 kt)',
                       sogMoving.maximum == null
                           ? 'máx: Sin datos'
                           : 'máx ${sogMoving.maximum!.toStringAsFixed(1)} kt',
@@ -1507,7 +1507,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                       'STW',
                       stwMoving.average == null
                           ? 'Sin datos'
-                          : '${stwMoving.average!.toStringAsFixed(1)} kt media (≥2 kt)',
+                          : '${stwMoving.average!.toStringAsFixed(1)} kt media (>=2 kt)',
                       stwMoving.maximum == null
                           ? 'máx: Sin datos'
                           : 'máx ${stwMoving.maximum!.toStringAsFixed(1)} kt',
@@ -1519,25 +1519,18 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             ),
           if (showNavigation && rpm.isNotEmpty) ...[
             pw.SizedBox(height: 8),
-            pw.Row(
-              children: [
-                pw.Expanded(
-                  child: pw.SizedBox(
-                    height: 62,
-                    child: pdfInfoCard(
-                      'Tiempo a motor',
-                      _reportDurationLabel(engineDuration),
-                      'RPM válidas ≥200',
-                      pdfOrange,
-                    ),
-                  ),
+            pw.Align(
+              alignment: pw.Alignment.centerLeft,
+              child: pw.SizedBox(
+                width: contentWidth / 4,
+                height: 62,
+                child: pdfInfoCard(
+                  'Tiempo a motor',
+                  _reportDurationLabel(engineDuration),
+                  'RPM validas >=200',
+                  pdfOrange,
                 ),
-                pw.SizedBox(width: 8),
-                pw.Expanded(
-                  flex: 3,
-                  child: pw.SizedBox(height: 62, child: _pdfEngineBandCard(rpmBands)),
-                ),
-              ],
+              ),
             ),
           ],
           if (showWind) pw.SizedBox(height: 8),
@@ -1725,6 +1718,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               width: contentWidth,
               tws: tws,
               twd: twd,
+              rpm: rpm,
               barbInterval: widget.barbInterval,
             ),
           ],
@@ -1927,7 +1921,7 @@ List<pw.Widget> pdfHistogramRows(
                 width: labelWidth,
                 child: pw.Text(
                   '${(lowStart + step * i).round()}'
-                  '${span > 0 ? '-${(lowStart + step * (i + 1)).round()}' : ''}$unit',
+                  '${span > 0 ? ' a ${(lowStart + step * (i + 1)).round()}' : ''}$unit',
                   style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
                 ),
               ),
@@ -2243,7 +2237,7 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
           cell('TWA \\ TWS', header: true),
           for (var i = 0; i < columns; i++)
             cell(
-              '${polar.twsEdges[i]}–${polar.twsEdges[i + 1]} kt',
+              '${polar.twsEdges[i]} a ${polar.twsEdges[i + 1]} kt',
               header: true,
             ),
         ],
@@ -2252,7 +2246,7 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
         pw.TableRow(
           children: [
             cell(
-              '${polar.twaBands[b].loDeg}–${polar.twaBands[b].hiDeg}°',
+              '${polar.twaBands[b].loDeg} a ${polar.twaBands[b].hiDeg} grados',
               header: true,
             ),
             for (var w = 0; w < columns; w++)
@@ -2441,6 +2435,7 @@ pw.Widget pdfTrackMap({
   // wind history just gets the plain route/markers, same as before.
   List<GraphPoint> tws = const [],
   List<GraphPoint> twd = const [],
+  List<GraphPoint> rpm = const [],
   Duration? barbInterval,
 }) {
   if (map == null || points.length < 2) {
@@ -2626,6 +2621,20 @@ pw.Widget pdfTrackMap({
     }
   }
 
+  GraphPoint? nearestEngineRpm(DateTime time) {
+    GraphPoint? best;
+    Duration? bestDiff;
+    for (final p in rpm) {
+      final diff = p.time.difference(time).abs();
+      if (diff > const Duration(minutes: 10)) continue;
+      if (bestDiff == null || diff < bestDiff) {
+        best = p;
+        bestDiff = diff;
+      }
+    }
+    return best;
+  }
+
   return pw.Container(
     width: width,
     height: height,
@@ -2666,20 +2675,21 @@ pw.Widget pdfTrackMap({
         pw.Positioned.fill(
           child: pw.CustomPaint(
             painter: (canvas, size) {
-              canvas.setStrokeColor(pdfCyan);
-              canvas.setLineWidth(1.6);
               for (var i = 0; i < projected.length; i++) {
                 final (x, y) = toCanvas(projected[i]);
-                final gapBefore = i == 0
-                    ? Duration.zero
-                    : points[i].time.difference(points[i - 1].time);
-                if (i == 0 || gapBefore > breakThreshold) {
-                  canvas.moveTo(x, y);
-                } else {
-                  canvas.lineTo(x, y);
-                }
+                if (i == 0) continue;
+                final previous = toCanvas(projected[i - 1]);
+                final gapBefore = points[i].time.difference(points[i - 1].time);
+                if (gapBefore > breakThreshold) continue;
+                final motor = (nearestEngineRpm(points[i - 1].time)?.value ?? 0) >= 200 ||
+                    (nearestEngineRpm(points[i].time)?.value ?? 0) >= 200;
+                canvas
+                  ..setStrokeColor(motor ? pdfOrange : pdfCyan)
+                  ..setLineWidth(motor ? 2.2 : 1.6)
+                  ..moveTo(previous.$1, previous.$2)
+                  ..lineTo(x, y)
+                  ..strokePath();
               }
-              canvas.strokePath();
 
               void marker((double, double) frac, PdfColor color) {
                 final (x, y) = toCanvas(frac);
