@@ -992,6 +992,129 @@ class _ReportMarkerPainter extends CustomPainter {
       oldDelegate.pointerX != pointerX;
 }
 
+class _ReportKindCard extends StatelessWidget {
+  const _ReportKindCard({
+    required this.kind,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PerformanceReportKind kind;
+  final bool selected;
+  final VoidCallback onTap;
+
+  Color get _accent => switch (kind) {
+    PerformanceReportKind.navigation => cGreen,
+    PerformanceReportKind.windAndSailing => cCyan,
+    PerformanceReportKind.complete => cOrange,
+  };
+
+  String get _eyebrow => switch (kind) {
+    PerformanceReportKind.navigation => 'RUTA Y MOTOR',
+    PerformanceReportKind.windAndSailing => 'METEOROLOGÍA',
+    PerformanceReportKind.complete => 'TODO EL VIAJE',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _accent;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: selected
+                ? accent.withValues(alpha: 0.14)
+                : cPanel2.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected ? accent : Colors.white12,
+              width: selected ? 1.8 : 1,
+            ),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.15),
+                      blurRadius: 18,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Icon(kind.icon, color: accent, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _eyebrow,
+                      style: TextStyle(
+                        color: accent,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      kind.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: cText,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      kind.description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: cMuted,
+                        fontSize: 10.5,
+                        height: 1.25,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 150),
+                child: selected
+                    ? Icon(Icons.check_circle, key: const ValueKey(true), color: accent)
+                    : const Icon(
+                        Icons.radio_button_unchecked,
+                        key: ValueKey(false),
+                        color: Colors.white24,
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Future<void> showPerformanceReportPicker(
   BuildContext context, {
   required SettingsModel settings,
@@ -1007,6 +1130,7 @@ Future<void> showPerformanceReportPicker(
     _reportHorizonMinutes.toDouble(),
   );
   Duration? selectedBarbInterval;
+  var selectedKind = PerformanceReportKind.complete;
   final selection =
       await showDialog<
         ({
@@ -1020,20 +1144,77 @@ Future<void> showPerformanceReportPicker(
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
             backgroundColor: cPanel,
-            title: const Row(
+            surfaceTintColor: Colors.transparent,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            titlePadding: const EdgeInsets.fromLTRB(22, 20, 14, 10),
+            title: Row(
               children: [
-                Icon(Icons.assessment_outlined, color: cCyan),
-                SizedBox(width: 10),
-                Text('INFORMES', style: TextStyle(color: cText)),
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: cCyan.withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: const Icon(Icons.assessment_outlined, color: cCyan),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Centro de informes',
+                        style: TextStyle(
+                          color: cText,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Elige contenido y periodo antes de generar el PDF',
+                        style: TextStyle(color: cMuted, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Cerrar',
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  icon: const Icon(Icons.close, color: cMuted),
+                ),
               ],
             ),
+            contentPadding: const EdgeInsets.fromLTRB(22, 6, 22, 8),
             content: SizedBox(
-              width: 560,
-              height: math.min(410, MediaQuery.sizeOf(context).height * 0.7),
+              width: 660,
+              height: math.min(560, MediaQuery.sizeOf(context).height * 0.78),
               child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    const Text(
+                      'CONTENIDO',
+                      style: TextStyle(
+                        color: cMuted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final kind in PerformanceReportKind.values) ...[
+                      _ReportKindCard(
+                        kind: kind,
+                        selected: selectedKind == kind,
+                        onTap: () => setDialogState(() => selectedKind = kind),
+                      ),
+                      if (kind != PerformanceReportKind.values.last)
+                        const SizedBox(height: 8),
+                    ],
+                    const SizedBox(height: 18),
                     const Text(
                       'PERIODO',
                       style: TextStyle(
@@ -1077,103 +1258,82 @@ Future<void> showPerformanceReportPicker(
                           ),
                       ],
                     ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'BARBAS DE VIENTO',
-                      style: TextStyle(
-                        color: cMuted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.8,
-                      ),
-                    ),
-                    const SizedBox(height: 7),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SegmentedButton<Duration?>(
-                        showSelectedIcon: false,
-                        segments: const [
-                          ButtonSegment(value: null, label: Text('Auto')),
-                          ButtonSegment(
-                            value: Duration(minutes: 10),
-                            label: Text('10 min'),
-                          ),
-                          ButtonSegment(
-                            value: Duration(minutes: 15),
-                            label: Text('15 min'),
-                          ),
-                          ButtonSegment(
-                            value: Duration(minutes: 30),
-                            label: Text('30 min'),
-                          ),
-                          ButtonSegment(
-                            value: Duration(hours: 1),
-                            label: Text('1 h'),
-                          ),
-                          ButtonSegment(
-                            value: Duration(hours: 3),
-                            label: Text('3 h'),
-                          ),
-                        ],
-                        selected: {selectedBarbInterval},
-                        onSelectionChanged: (value) => setDialogState(
-                          () => selectedBarbInterval = value.first,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    for (final kind in PerformanceReportKind.values) ...[
-                      Material(
-                        color: cPanel2,
-                        borderRadius: BorderRadius.circular(10),
-                        child: ListTile(
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          leading: Icon(kind.icon, color: cCyan),
-                          title: Text(
-                            kind.label,
-                            style: const TextStyle(
-                              color: cText,
-                              fontWeight: FontWeight.w800,
+                    if (selectedKind != PerformanceReportKind.navigation) ...[
+                      const SizedBox(height: 18),
+                      const Row(
+                        children: [
+                          Icon(Icons.air, color: cCyan, size: 16),
+                          SizedBox(width: 7),
+                          Text(
+                            'ESPACIADO DE BARBAS',
+                            style: TextStyle(
+                              color: cMuted,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.1,
                             ),
                           ),
-                          subtitle: Text(
-                            kind.description,
-                            style: const TextStyle(color: cMuted),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SegmentedButton<Duration?>(
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(value: null, label: Text('Auto')),
+                            ButtonSegment(value: Duration(minutes: 10), label: Text('10 min')),
+                            ButtonSegment(value: Duration(minutes: 15), label: Text('15 min')),
+                            ButtonSegment(value: Duration(minutes: 30), label: Text('30 min')),
+                            ButtonSegment(value: Duration(hours: 1), label: Text('1 h')),
+                            ButtonSegment(value: Duration(hours: 3), label: Text('3 h')),
+                          ],
+                          selected: {selectedBarbInterval},
+                          onSelectionChanged: (value) => setDialogState(
+                            () => selectedBarbInterval = value.first,
                           ),
-                          trailing: const Icon(
-                            Icons.chevron_right,
-                            color: cMuted,
-                          ),
-                          onTap: () {
-                            final horizonStart = referenceNow.subtract(
-                              const Duration(hours: 72),
-                            );
-                            Navigator.of(dialogContext).pop((
-                              kind: kind,
-                              start: horizonStart.add(
-                                Duration(minutes: selectedPeriod.start.round()),
-                              ),
-                              end: horizonStart.add(
-                                Duration(minutes: selectedPeriod.end.round()),
-                              ),
-                              barbInterval: selectedBarbInterval,
-                            ));
-                          },
                         ),
                       ),
-                      if (kind != PerformanceReportKind.values.last)
-                        const SizedBox(height: 8),
                     ],
+                    const SizedBox(height: 12),
                   ],
                 ),
               ),
             ),
+            actionsPadding: const EdgeInsets.fromLTRB(22, 8, 22, 18),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(dialogContext).pop(),
                 child: const Text('Cancelar'),
+              ),
+              const SizedBox(width: 6),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: switch (selectedKind) {
+                    PerformanceReportKind.navigation => cGreen,
+                    PerformanceReportKind.windAndSailing => cCyan,
+                    PerformanceReportKind.complete => cOrange,
+                  },
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                ),
+                onPressed: () {
+                  final horizonStart = referenceNow.subtract(
+                    const Duration(hours: 72),
+                  );
+                  Navigator.of(dialogContext).pop((
+                    kind: selectedKind,
+                    start: horizonStart.add(
+                      Duration(minutes: selectedPeriod.start.round()),
+                    ),
+                    end: horizonStart.add(
+                      Duration(minutes: selectedPeriod.end.round()),
+                    ),
+                    barbInterval: selectedBarbInterval,
+                  ));
+                },
+                icon: const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                label: const Text('Generar PDF'),
               ),
             ],
           ),
