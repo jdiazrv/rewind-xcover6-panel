@@ -249,6 +249,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // sweep tests the instruments visually and never fabricates measurements.
   double? _gaugeSelfTestFraction;
 
+  Duration get _gaugeMotionDuration => _gaugeSelfTestFraction == null
+      ? const Duration(milliseconds: 500)
+      : const Duration(milliseconds: 1000);
+
   bool get _hasGaugeTelemetry =>
       widget.engineContactOn ||
       widget.engineRpm != null ||
@@ -264,10 +268,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || _hasGaugeTelemetry) return;
         setState(() => _gaugeSelfTestFraction = 1);
-        _gaugeSweepPeakTimer = Timer(const Duration(milliseconds: 750), () {
+        _gaugeSweepPeakTimer = Timer(const Duration(milliseconds: 1500), () {
           if (!mounted || _hasGaugeTelemetry) return;
           setState(() => _gaugeSelfTestFraction = 0);
-          _gaugeSweepEndTimer = Timer(const Duration(milliseconds: 750), () {
+          _gaugeSweepEndTimer = Timer(const Duration(milliseconds: 1100), () {
             if (mounted) setState(() => _gaugeSelfTestFraction = null);
           });
         });
@@ -710,6 +714,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         needleValueOverride: _gaugeSelfTestFraction == null
             ? null
             : 40 + 80 * _gaugeSelfTestFraction!,
+        motionDuration: _gaugeMotionDuration,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)}°C',
         min: 40,
         max: 120,
@@ -741,6 +746,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         needleValueOverride: _gaugeSelfTestFraction == null
             ? null
             : 10 + 6 * _gaugeSelfTestFraction!,
+        motionDuration: _gaugeMotionDuration,
         valueText: value == null ? '' : '${value.toStringAsFixed(1)} V',
         min: 10,
         max: 16,
@@ -1059,6 +1065,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
     needleValueOverride: _gaugeSelfTestFraction == null
         ? null
         : 4 * _gaugeSelfTestFraction!,
+    motionDuration: _gaugeMotionDuration,
     valueText: _displayRpm == null ? '' : _displayRpm!.round().toString(),
     min: 0,
     max: 4,
@@ -2498,6 +2505,7 @@ class _AnalogGauge extends StatelessWidget {
     required this.majorStep,
     required this.valueText,
     this.needleValueOverride,
+    this.motionDuration = const Duration(milliseconds: 500),
     this.hourMeterDigits,
     this.label,
     this.dangerStart,
@@ -2513,6 +2521,7 @@ class _AnalogGauge extends StatelessWidget {
   final String? label;
   final double? value;
   final double? needleValueOverride;
+  final Duration motionDuration;
   final double min;
   final double max;
   final double majorStep;
@@ -2582,7 +2591,7 @@ class _AnalogGauge extends StatelessWidget {
                         Positioned.fill(
                           child: TweenAnimationBuilder<double>(
                             tween: Tween<double>(begin: display, end: display),
-                            duration: const Duration(milliseconds: 500),
+                            duration: motionDuration,
                             curve: Curves.easeOutCubic,
                             builder: (context, animatedValue, child) =>
                                 CustomPaint(
@@ -2706,7 +2715,7 @@ class _AnalogGauge extends StatelessWidget {
               height: 9,
               child: TweenAnimationBuilder<double>(
                 tween: Tween<double>(begin: display, end: display),
-                duration: const Duration(milliseconds: 500),
+                duration: motionDuration,
                 curve: Curves.easeOutCubic,
                 builder: (context, animated, child) => CustomPaint(
                   size: Size.infinite,

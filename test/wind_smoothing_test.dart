@@ -108,6 +108,11 @@ void main() {
       overGround: true,
       degraded: true,
     ));
+    expect(selectEffectiveBoatSpeed(stwKn: 0, sogKn: 7, logStalled: false), (
+      valueKn: 7,
+      overGround: true,
+      degraded: true,
+    ));
   });
 
   test('apparent/true vector transforms round-trip', () {

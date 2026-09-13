@@ -243,7 +243,12 @@ EffectiveBoatSpeed selectEffectiveBoatSpeed({
 }) {
   final validStw = stwKn != null && stwKn.isFinite && stwKn >= 0;
   final validSog = sogKn != null && sogKn.isFinite && sogKn >= 0;
-  if (validStw && !logStalled) {
+  // A moving GPS track with a fresh near-zero log is itself enough evidence
+  // for the degraded choice. This keeps VNT usable even when the optional
+  // corredera alarm is disabled or its three-second alarm debounce has not
+  // elapsed yet.
+  final autoStalled = validStw && validSog && sogKn > 2 && stwKn < 0.2;
+  if (validStw && !logStalled && !autoStalled) {
     return (valueKn: stwKn, overGround: false, degraded: false);
   }
   if (validSog) {

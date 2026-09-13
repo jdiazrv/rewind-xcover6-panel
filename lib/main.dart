@@ -6628,10 +6628,19 @@ class _DashboardState extends State<Dashboard> {
       _freshEngine(signalK.cogTrueDeg, signalK.cogTrueDegUpdate);
   double? get _freshSog => _freshEngine(signalK.sogKn, signalK.sogKnUpdate);
   double? get _freshStw => _freshEngine(signalK.stwKn, signalK.stwKnUpdate);
+  bool get _logAppearsStalled {
+    final sog = _freshSog;
+    final stw = _freshStw;
+    // The alarm has a 3-second debounce, but the polar page must choose a
+    // usable source immediately. A fresh GPS speed with a fresh near-zero
+    // log is enough to avoid reporting a frozen corredera as boat speed.
+    return sog != null && sog > 2 && stw != null && stw < 0.2;
+  }
+
   EffectiveBoatSpeed get _effectiveBoatSpeed => selectEffectiveBoatSpeed(
     stwKn: _freshStw,
     sogKn: _freshSog,
-    logStalled: _correderaActive,
+    logStalled: _correderaActive || _logAppearsStalled,
   );
 
   double? get _freshTwaWater {
@@ -6640,7 +6649,11 @@ class _DashboardState extends State<Dashboard> {
     final aws = _freshWind(_dAws, signalK.awsUpdate);
     final awa = _freshWind(_dAwa, signalK.awaUpdate);
     final stw = _freshStw;
-    if (_correderaActive || aws == null || awa == null || stw == null) {
+    if (_correderaActive ||
+        _logAppearsStalled ||
+        aws == null ||
+        awa == null ||
+        stw == null) {
       return null;
     }
     return trueWindFromApparent(aws, awa, stw).$2;

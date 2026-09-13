@@ -15,6 +15,21 @@ import 'models.dart';
 import 'pdf/pdf_theme.dart';
 import 'theme.dart';
 
+// Signal K publishes revolutions in Hz; reports display the conventional RPM.
+const _mEngineRpm = MetricDef(
+  'propulsion.main.revolutions',
+  'RPM motor',
+  'rpm',
+  scale: 60,
+  color: cOrange,
+);
+
+typedef PolarData = ({
+  List<int> twsEdges,
+  List<({int loDeg, int hiDeg})> twaBands,
+  List<List<double?>> avgStw,
+});
+
 typedef ReportGpsSample = ({
   DateTime time,
   double lat,
@@ -85,7 +100,23 @@ typedef ReportNavigationStats = ({
   Duration underway,
   double? avgSogUnderway,
   double? maxSog,
+  double? avgSogMoving,
+  double? maxSogMoving,
 });
+
+({double? average, double? maximum}) _reportMovingSpeedStats(
+  List<GraphPoint> source,
+) {
+  final values = source
+      .map((p) => p.value)
+      .where((v) => v.isFinite && v >= 2.0)
+      .toList();
+  if (values.isEmpty) return (average: null, maximum: null);
+  return (
+    average: values.reduce((a, b) => a + b) / values.length,
+    maximum: values.reduce(math.max),
+  );
+}
 
 /// Integrates SOG using each pair's real timestamps. Long data holes are not
 /// silently charged as distance or underway time.
@@ -101,6 +132,8 @@ ReportNavigationStats calculateReportNavigationStats(
       underway: Duration.zero,
       avgSogUnderway: null,
       maxSog: sog.isEmpty ? null : sog.first.value,
+      avgSogMoving: null,
+      maxSogMoving: null,
     );
   }
   final maxGap = expectedStep * 4 > const Duration(minutes: 10)
@@ -129,7 +162,53 @@ ReportNavigationStats calculateReportNavigationStats(
         ? null
         : underwayDistanceNm / (underwaySeconds / 3600),
     maxSog: sog.map((p) => p.value).reduce(math.max),
+    avgSogMoving: _reportMovingSpeedStats(sog).average,
+    maxSogMoving: _reportMovingSpeedStats(sog).maximum,
   );
+}
+
+/// Integrates the time for which the engine is demonstrably running. RPM is
+/// deliberately required; a stale runTime/hour counter must never paint a
+/// sailing segment as motoring.
+Duration reportEngineRunningDuration(List<GraphPoint> rpm, Duration expectedStep) {
+  if (rpm.length < 2) return Duration.zero;
+  final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+  var seconds = 0.0;
+  for (var i = 1; i < points.length; i++) {
+    final dt = points[i].time.difference(points[i - 1].time);
+    if (dt <= Duration.zero || dt > maxGap) continue;
+    if ((points[i - 1].value + points[i].value) / 2 >= 200) {
+      seconds += dt.inMilliseconds / 1000;
+    }
+  }
+  return Duration(seconds: seconds.round());
+}
+
+Map<String, Duration> reportEngineRpmBands(
+  List<GraphPoint> rpm,
+  Duration expectedStep,
+) {
+  const names = ['1600-1800', '1800-2000', '2000-2200', '2200-2400', '>2400'];
+  final out = {for (final name in names) name: Duration.zero};
+  if (rpm.length < 2) return out;
+  final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+  final seconds = {for (final name in names) name: 0.0};
+  for (var i = 1; i < points.length; i++) {
+    final dt = points[i].time.difference(points[i - 1].time);
+    if (dt <= Duration.zero || dt > maxGap) continue;
+    final value = (points[i - 1].value + points[i].value) / 2;
+    final name = value >= 2400 ? '>2400' : value >= 2200 ? '2200-2400' : value >= 2000 ? '2000-2200' : value >= 1800 ? '1800-2000' : value >= 1600 ? '1600-1800' : null;
+    if (name != null) seconds[name] = seconds[name]! + dt.inMilliseconds / 1000;
+  }
+  return {for (final name in names) name: Duration(seconds: seconds[name]!.round())};
 }
 
 double? reportAverageStwUnderway(
@@ -742,6 +821,14 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   // resolution can otherwise flip between individual HTTP requests.
   String? _resolvedSkHost;
 
+  MetricDef get _engineRpmMetric {
+    final configured = widget.settings.sensorConfig.enginePath;
+    final path = configured != null && configured.endsWith('.runTime')
+        ? '${configured.substring(0, configured.length - '.runTime'.length)}.revolutions'
+        : _mEngineRpm.skPath;
+    return MetricDef(path, _mEngineRpm.label, _mEngineRpm.unit, scale: 60, color: cOrange);
+  }
+
   AppRange get _range {
     final base = _reportRangeFor(widget.end.difference(widget.start));
     return (
@@ -851,6 +938,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             start: widget.start,
             stop: widget.end,
           ),
+          'rpm': const <GraphPoint>[],
           'aws': demoGraphSeries(
             mAws,
             r.flux,
@@ -905,6 +993,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         final queries = <String, Future<List<GraphPoint>>>{
           'sog': _optionalQuery(mSog),
           'stw': _optionalQuery(mStw),
+          'rpm': _optionalQuery(_engineRpmMetric),
           if (includeSailing) ...{
             'aws': _optionalQuery(mAws),
             'tws': _optionalQuery(mTws),
@@ -1168,12 +1257,98 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     return (points.length / expected * 100).round().clamp(0, 100);
   }
 
+  /// Tabla de datos observados del barco. Se conserva en el informe completo
+  /// aunque se haya eliminado el gráfico de polar: no es una polar objetivo,
+  /// sino STW media realmente registrada por TWA y TWS.
+  PolarData _realPolar(
+    List<GraphPoint> stw,
+    List<GraphPoint> twa,
+    List<GraphPoint> tws,
+    List<GraphPoint> sog,
+  ) {
+    const bandWidth = 10;
+    final bands = [
+      for (var d = 0; d < 180; d += bandWidth) (loDeg: d, hiDeg: d + bandWidth),
+    ];
+    if (stw.isEmpty || twa.isEmpty || tws.isEmpty) {
+      return (
+        twsEdges: const [0],
+        twaBands: bands,
+        avgStw: [for (final _ in bands) <double?>[]],
+      );
+    }
+    final windValues = tws.map((p) => p.value).where((v) => v.isFinite);
+    final windList = windValues.toList();
+    if (windList.isEmpty) {
+      return (
+        twsEdges: const [0],
+        twaBands: bands,
+        avgStw: [for (final _ in bands) <double?>[]],
+      );
+    }
+    final minWind = windList.reduce(math.min);
+    final maxWind = windList.reduce(math.max);
+    final span = maxWind - minWind;
+    final step = span <= 6 ? 1 : 2;
+    final low = (minWind / step).floor() * step;
+    final binCount = span <= 0
+        ? 1
+        : ((maxWind - low) / step).ceil().clamp(1, 16);
+    final edges = [for (var i = 0; i <= binCount; i++) low + i * step];
+
+    GraphPoint? nearest(List<GraphPoint> series, DateTime time) {
+      GraphPoint? best;
+      Duration? bestGap;
+      for (final p in series) {
+        final gap = p.time.difference(time).abs();
+        if (gap > const Duration(minutes: 2)) continue;
+        if (bestGap == null || gap < bestGap) {
+          best = p;
+          bestGap = gap;
+        }
+      }
+      return best;
+    }
+
+    final sums = [for (final _ in bands) List<double>.filled(binCount, 0)];
+    final counts = [for (final _ in bands) List<int>.filled(binCount, 0)];
+    for (final speed in stw) {
+      final angle = nearest(twa, speed.time);
+      final wind = nearest(tws, speed.time);
+      final ground = nearest(sog, speed.time);
+      if (angle == null ||
+          wind == null ||
+          ground == null ||
+          ground.value <= 0.5) {
+        continue;
+      }
+      final twaBand = (angle.value.abs().clamp(0, 180) / bandWidth).floor();
+      final windBand = span <= 0
+          ? 0
+          : ((wind.value - low) / step).floor().clamp(0, binCount - 1);
+      sums[twaBand.clamp(0, bands.length - 1)][windBand] += speed.value;
+      counts[twaBand.clamp(0, bands.length - 1)][windBand]++;
+    }
+    return (
+      twsEdges: edges,
+      twaBands: bands,
+      avgStw: [
+        for (var b = 0; b < bands.length; b++)
+          [
+            for (var w = 0; w < binCount; w++)
+              counts[b][w] == 0 ? null : sums[b][w] / counts[b][w],
+          ],
+      ],
+    );
+  }
+
   Future<Uint8List> _buildReportPdf() async {
     final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
     final showWind = widget.kind != PerformanceReportKind.navigation;
     final r = _range;
     final sog = _series['sog'] ?? [];
     final stw = _series['stw'] ?? [];
+    final rpm = _series['rpm'] ?? [];
     final aws = _series['aws'] ?? [];
     final tws = _series['tws'] ?? [];
     final twd = _series['twd'] ?? [];
@@ -1190,7 +1365,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final underwayFrac = rangeDur.inMilliseconds <= 0
         ? 0.0
         : underwayDur.inMilliseconds / rangeDur.inMilliseconds;
-    final avgStwUnderway = reportAverageStwUnderway(stw, sog, interval);
+    final sogMoving = _reportMovingSpeedStats(sog);
+    final stwMoving = _reportMovingSpeedStats(stw);
+    final engineDuration = reportEngineRunningDuration(rpm, interval);
+    final rpmBands = reportEngineRpmBands(rpm, interval);
+    final polar = _realPolar(stw, twa, tws, sog);
     final coverageParts = <String>[
       if (showNavigation) 'SOG ${_coveragePct(sog, rangeDur, interval)}%',
       if (showNavigation) 'STW ${_coveragePct(stw, rangeDur, interval)}%',
@@ -1310,12 +1489,12 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'SOG',
-                      navigationStats.avgSogUnderway == null
+                      sogMoving.average == null
                           ? 'Sin datos'
-                          : '${navigationStats.avgSogUnderway!.toStringAsFixed(1)} kt media navegando',
-                      navigationStats.maxSog == null
+                          : '${sogMoving.average!.toStringAsFixed(1)} kt media (≥2 kt)',
+                      sogMoving.maximum == null
                           ? 'máx: Sin datos'
-                          : 'máx ${navigationStats.maxSog!.toStringAsFixed(1)} kt',
+                          : 'máx ${sogMoving.maximum!.toStringAsFixed(1)} kt',
                       pdfGreen,
                     ),
                   ),
@@ -1326,18 +1505,41 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'STW',
-                      avgStwUnderway == null
+                      stwMoving.average == null
                           ? 'Sin datos'
-                          : '${avgStwUnderway.toStringAsFixed(1)} kt media navegando',
-                      _max(stw) == null
+                          : '${stwMoving.average!.toStringAsFixed(1)} kt media (≥2 kt)',
+                      stwMoving.maximum == null
                           ? 'máx: Sin datos'
-                          : 'máx ${_max(stw)!.toStringAsFixed(1)} kt',
+                          : 'máx ${stwMoving.maximum!.toStringAsFixed(1)} kt',
                       pdfTeal,
                     ),
                   ),
                 ),
               ],
             ),
+          if (showNavigation && rpm.isNotEmpty) ...[
+            pw.SizedBox(height: 8),
+            pw.Row(
+              children: [
+                pw.Expanded(
+                  child: pw.SizedBox(
+                    height: 62,
+                    child: pdfInfoCard(
+                      'Tiempo a motor',
+                      _reportDurationLabel(engineDuration),
+                      'RPM válidas ≥200',
+                      pdfOrange,
+                    ),
+                  ),
+                ),
+                pw.SizedBox(width: 8),
+                pw.Expanded(
+                  flex: 3,
+                  child: pw.SizedBox(height: 62, child: _pdfEngineBandCard(rpmBands)),
+                ),
+              ],
+            ),
+          ],
           if (showWind) pw.SizedBox(height: 8),
           if (showWind)
             pw.Row(
@@ -1409,6 +1611,30 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             ),
             pw.SizedBox(height: 6),
             ...pdfHistogramRows(sog, 'kt', pdfGreen, contentWidth),
+            pw.SizedBox(height: 14),
+            pw.Text(
+              'Velocidad sobre el tiempo · motor resaltado',
+              style: const pw.TextStyle(color: pdfText, fontSize: 12, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.SizedBox(height: 5),
+            pdfSpeedTimeline(
+              font: canvasFont,
+              sog: sog,
+              stw: stw,
+              rpm: rpm,
+              start: periodStart,
+              end: periodEnd,
+              width: contentWidth,
+            ),
+            if (rpm.isNotEmpty) ...[
+              pw.SizedBox(height: 14),
+              pw.Text(
+                'Tiempo de motor por régimen',
+                style: const pw.TextStyle(color: pdfText, fontSize: 12, fontWeight: pw.FontWeight.bold),
+              ),
+              pw.SizedBox(height: 5),
+              pdfEngineRpmBandChart(rpmBands, contentWidth),
+            ],
           ],
           if (showWind) ...[
             pw.SizedBox(height: 18),
@@ -1502,21 +1728,142 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               barbInterval: widget.barbInterval,
             ),
           ],
-          // Fuera la "polar observada" (gráfico y tabla). Con los datos de
-          // una singladura suelta la mayoría de las casillas salían vacías
-          // o con dos o tres muestras, y una polar medio vacía no se puede
-          // interpretar: invitaba a sacar conclusiones de nada, y el n=0
-          // de cada casilla solo añadía ruido. Para saber si el barco va
-          // bien está la página POLAR de VNT, que compara contra un
-          // certificado completo en vez de contra un puñado de muestras
-          // propias ("es muy difícil de interpretar con datos parciales",
-          // 2026-09-12).
+          if (showWind) ...[
+            if (showNavigation) pw.SizedBox(height: 16),
+            pw.Text(
+              'Tabla de rendimiento observado · STW media (kt)',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Text(
+              'TWA por franjas de 10° y TWS real. Solo datos navegando; no es una polar objetivo.',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+            ),
+            pw.SizedBox(height: 8),
+            pdfPolarTable(polar, pdfGreen),
+          ],
         ],
       ),
     );
 
     return doc.save();
   }
+}
+
+pw.Widget _pdfEngineBandCard(Map<String, Duration> bands) {
+  return pw.Container(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+    decoration: pw.BoxDecoration(
+      color: const PdfColor.fromInt(0xfffff4e8),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text('Distribución RPM', style: const pw.TextStyle(color: pdfOrange, fontSize: 8, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [for (final entry in bands.entries) pw.Text('${entry.key}\n${_reportDurationLabel(entry.value)}', textAlign: pw.TextAlign.center, style: const pw.TextStyle(color: pdfText, fontSize: 7))],
+        ),
+      ],
+    ),
+  );
+}
+
+pw.Widget pdfEngineRpmBandChart(Map<String, Duration> bands, double width) {
+  final maxSeconds = bands.values.fold<int>(0, (m, d) => m > d.inSeconds ? m : d.inSeconds);
+  return pw.Container(
+    width: width,
+    height: 105,
+    padding: const pw.EdgeInsets.all(7),
+    decoration: pw.BoxDecoration(
+      color: const PdfColor.fromInt(0xfffff8f1),
+      border: pw.Border.all(color: pdfGrid, width: .6),
+      borderRadius: pw.BorderRadius.circular(5),
+    ),
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.end,
+      mainAxisAlignment: pw.MainAxisAlignment.spaceEvenly,
+      children: [
+        for (final entry in bands.entries)
+          pw.Column(
+            mainAxisAlignment: pw.MainAxisAlignment.end,
+            children: [
+              pw.Container(
+                width: math.max(24.0, (width - 45) / bands.length - 8).toDouble(),
+                height: maxSeconds == 0 ? 2 : 64 * entry.value.inSeconds / maxSeconds,
+                color: pdfOrange,
+              ),
+              pw.SizedBox(height: 4),
+              pw.Text(entry.key, style: const pw.TextStyle(color: pdfMuted, fontSize: 7)),
+              pw.Text(_reportDurationLabel(entry.value), style: const pw.TextStyle(color: pdfText, fontSize: 7)),
+            ],
+          ),
+      ],
+    ),
+  );
+}
+
+pw.Widget pdfSpeedTimeline({
+  required PdfFont font,
+  required List<GraphPoint> sog,
+  required List<GraphPoint> stw,
+  required List<GraphPoint> rpm,
+  required DateTime start,
+  required DateTime end,
+  required double width,
+  double height = 165,
+}) {
+  final points = [...sog, ...stw].where((p) => p.value.isFinite && p.time.compareTo(start) >= 0 && p.time.compareTo(end) <= 0).toList();
+  if (points.isEmpty) {
+    return pw.Container(width: width, height: height, alignment: pw.Alignment.center, child: pw.Text('Sin datos de SOG/STW.', style: const pw.TextStyle(color: pdfMuted, fontSize: 9)));
+  }
+  final maxValue = math.max(5.0, (points.map((p) => p.value).reduce(math.max) / 5).ceil() * 5.0).toDouble();
+  final rangeMs = math.max(1, end.difference(start).inMilliseconds).toDouble();
+  GraphPoint? nearestRpm(DateTime time) {
+    GraphPoint? best;
+    Duration? delta;
+    for (final p in rpm) {
+      final d = p.time.difference(time).abs();
+      if (d <= const Duration(minutes: 10) && (delta == null || d < delta)) { best = p; delta = d; }
+    }
+    return best;
+  }
+  return pw.Container(
+    width: width,
+    height: height,
+    padding: const pw.EdgeInsets.all(4),
+    decoration: pw.BoxDecoration(color: const PdfColor.fromInt(0xfff5fafb), border: pw.Border.all(color: pdfGrid, width: .6), borderRadius: pw.BorderRadius.circular(5)),
+    child: pw.CustomPaint(
+      size: PdfPoint(width - 8, height - 8),
+      painter: (canvas, size) {
+        const left = 30.0, bottom = 18.0, top = 8.0, right = 6.0;
+        final w = size.x - left - right, h = size.y - bottom - top;
+        double x(DateTime t) => left + (t.millisecondsSinceEpoch - start.millisecondsSinceEpoch) / rangeMs * w;
+        double y(double v) => bottom + v.clamp(0.0, maxValue).toDouble() / maxValue * h;
+        for (var i = 0; i <= 4; i++) {
+          final yy = y(maxValue * i / 4);
+          canvas..setStrokeColor(pdfGrid)..setLineWidth(.4)..moveTo(left, yy)..lineTo(size.x - right, yy)..strokePath()..setFillColor(pdfMuted)..drawString(font, 6.5, (maxValue * i / 4).round().toString(), 2, yy - 2.5);
+        }
+        void draw(List<GraphPoint> source, PdfColor base) {
+          final sorted = source.where((p) => p.value.isFinite && p.time.compareTo(start) >= 0 && p.time.compareTo(end) <= 0).toList()..sort((a, b) => a.time.compareTo(b.time));
+          for (var i = 1; i < sorted.length; i++) {
+            final a = sorted[i - 1], b = sorted[i];
+            if (b.time.difference(a.time) > const Duration(minutes: 20)) continue;
+            final motor = (nearestRpm(a.time)?.value ?? 0) >= 200 || (nearestRpm(b.time)?.value ?? 0) >= 200;
+            canvas..setStrokeColor(motor ? pdfOrange : base)..setLineWidth(motor ? 2.0 : 1.2)..moveTo(x(a.time), y(a.value))..lineTo(x(b.time), y(b.value))..strokePath();
+          }
+        }
+        draw(sog, pdfGreen);
+        draw(stw, pdfCyan);
+        canvas..setFillColor(pdfMuted)..drawString(font, 6.5, 'SOG', size.x - 58, size.y - 9)..setFillColor(pdfCyan)..drawString(font, 6.5, 'STW', size.x - 38, size.y - 9)..setFillColor(pdfOrange)..drawString(font, 6.5, 'motor', size.x - 17, size.y - 9);
+      },
+    ),
+  );
 }
 
 /// PDF-widget equivalent of the on-screen `_HistogramChart` (GraphDialog) —
@@ -1861,6 +2208,60 @@ pw.Widget pdfWindTimeline({
 /// period, excluding stationary samples (SOG<=0.5kt). Answers "how fast
 /// does the boat actually go at each angle/wind strength" from real logged
 /// data, without any assumed/target polar to compare against.
+
+pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
+  final columns = polar.twsEdges.length - 1;
+  if (columns < 1) {
+    return pw.Text(
+      'Sin datos suficientes de TWA/TWS/STW en este periodo.',
+      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+    );
+  }
+  pw.Widget cell(String text, {bool header = false}) => pw.Padding(
+    padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+    child: pw.Text(
+      text,
+      textAlign: pw.TextAlign.center,
+      style: pw.TextStyle(
+        color: header ? pdfText : pdfMuted,
+        fontSize: 7,
+        fontWeight: header ? pw.FontWeight.bold : pw.FontWeight.normal,
+      ),
+    ),
+  );
+
+  return pw.Table(
+    border: pw.TableBorder.all(color: pdfGrid, width: 0.5),
+    columnWidths: {
+      0: const pw.FlexColumnWidth(1.25),
+      for (var i = 0; i < columns; i++) i + 1: const pw.FlexColumnWidth(1),
+    },
+    children: [
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(color: pdfPanel),
+        children: [
+          cell('TWA \\ TWS', header: true),
+          for (var i = 0; i < columns; i++)
+            cell(
+              '${polar.twsEdges[i]}–${polar.twsEdges[i + 1]} kt',
+              header: true,
+            ),
+        ],
+      ),
+      for (var b = 0; b < polar.twaBands.length; b++)
+        pw.TableRow(
+          children: [
+            cell(
+              '${polar.twaBands[b].loDeg}–${polar.twaBands[b].hiDeg}°',
+              header: true,
+            ),
+            for (var w = 0; w < columns; w++)
+              cell(polar.avgStw[b][w]?.toStringAsFixed(1) ?? '--'),
+          ],
+        ),
+    ],
+  );
+}
 
 /// A fetched grid of OSM tiles covering a track's bounding box, plus enough
 /// to re-project any (lat, lon) back onto that grid for overlay drawing.
