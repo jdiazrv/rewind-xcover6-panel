@@ -273,18 +273,18 @@ enum PerformanceReportKind { navigation, windAndSailing, complete }
 
 extension PerformanceReportKindLabel on PerformanceReportKind {
   String get label => switch (this) {
-    PerformanceReportKind.navigation => 'Navegación y singladura',
+    PerformanceReportKind.navigation => 'Barco: navegación y motor',
     PerformanceReportKind.windAndSailing => 'Viento y navegación a vela',
-    PerformanceReportKind.complete => 'Informe completo',
+    PerformanceReportKind.complete => 'Completo: barco y viento',
   };
 
   String get description => switch (this) {
     PerformanceReportKind.navigation =>
-      'Distancia, tiempo real navegando, velocidades y traza GPS',
+      'Distancia, tiempo navegando, motor, velocidades y traza GPS',
     PerformanceReportKind.windAndSailing =>
       'Viento, barbas, escora y velocidades observadas',
     PerformanceReportKind.complete =>
-      'Navegación, viento y velocidades observadas en un único PDF',
+      'Datos del barco, motor, navegación, viento y rendimiento en un PDF',
   };
 
   IconData get icon => switch (this) {

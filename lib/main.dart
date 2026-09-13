@@ -6803,13 +6803,20 @@ class _DashboardState extends State<Dashboard> {
                                 alarmPageIds: _alarmPageIds,
                                 alarmCount: _activeAlarms.length,
                                 onBellTap: () => _showAlarmsList(context),
-                                contextActionLabel: _selectedPageId == 'VNT'
-                                    ? 'INFORMES'
-                                    : null,
-                                contextActionIcon: _selectedPageId == 'VNT'
+                                contextActionLabel:
+                                    _selectedPageId == 'VNT'
+                                        ? 'INFORME VIENTO'
+                                        : _selectedPageId == 'NAV'
+                                        ? 'INFORME BARCO'
+                                        : null,
+                                contextActionIcon:
+                                    (_selectedPageId == 'VNT' ||
+                                        _selectedPageId == 'NAV')
                                     ? Icons.assessment_outlined
                                     : null,
-                                onContextAction: _selectedPageId == 'VNT'
+                                onContextAction:
+                                    (_selectedPageId == 'VNT' ||
+                                        _selectedPageId == 'NAV')
                                     ? () => showPerformanceReportPicker(
                                         context,
                                         settings: settings,
