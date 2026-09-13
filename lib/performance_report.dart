@@ -107,11 +107,16 @@ typedef ReportNavigationStats = ({
 ({double? average, double? maximum}) _reportMovingSpeedStats(
   List<GraphPoint> source,
 ) {
-  final values = source
+  final valid = source
       .map((p) => p.value)
-      .where((v) => v.isFinite && v >= 2.0)
+      .where((v) => v.isFinite && v >= 0)
       .toList();
-  if (values.isEmpty) return (average: null, maximum: null);
+  if (valid.isEmpty) return (average: null, maximum: null);
+  final values = valid.where((v) => v >= 2.0).toList();
+  // A report containing only stationary samples must still show a numeric
+  // result instead of two empty cards. The threshold is applied whenever
+  // there are moving samples; an all-stationary period is explicitly 0 kt.
+  if (values.isEmpty) return (average: 0, maximum: 0);
   return (
     average: values.reduce((a, b) => a + b) / values.length,
     maximum: values.reduce(math.max),
