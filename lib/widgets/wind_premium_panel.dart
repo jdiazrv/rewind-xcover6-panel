@@ -420,6 +420,7 @@ class _PremiumWindPanelState extends State<PremiumWindPanel>
                     child: _DialColumn(
                       legend: [
                         _legendDot(PremiumWindPanel._apparentColor, 'AWA'),
+                        _legendDot(PremiumWindPanel._apparentColor, 'AWS'),
                         _legendDot(PremiumWindPanel._trueColor, 'TWA'),
                       ],
                       readouts: [
@@ -882,30 +883,6 @@ class _WindCompassPainter extends CustomPainter {
 
     drawCloseHauledSector(-60, -25, cRed);
     drawCloseHauledSector(25, 60, cGreen);
-
-    // The coloured bands are meaningful only if the side is legible at a
-    // glance. Keep the labels just outside each band and draw them in the
-    // same colour, avoiding the dial's grey ring and the end caps.
-    void drawBandLabel(double angleDeg, String text, Color color) {
-      final a = _screenRad(angleDeg);
-      final p = center + Offset(math.cos(a), math.sin(a)) * (bandOuter + s * 0.075);
-      final tp = TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(
-            color: color,
-            fontSize: s * 0.036,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 0.3,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: s * 0.22);
-      tp.paint(canvas, Offset(p.dx - tp.width / 2, p.dy - tp.height / 2));
-    }
-
-    drawBandLabel(-42.5, 'BABOR', cRed);
-    drawBandLabel(42.5, 'ESTRIBOR', cGreen);
 
     // Bow marks — two short white lines meeting in a peak at dead ahead,
     // like a stylized bow/sail outline, instead of a solid arrowhead.
