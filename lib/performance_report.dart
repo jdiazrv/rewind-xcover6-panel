@@ -1408,14 +1408,13 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     // Keep the cards numeric even when the history backend returns a sparse
     // series: navigationStats proves SOG exists, while the explicit source
     // fallback prevents a blank PDF text run from hiding valid telemetry.
-    final sogAverage = sogMoving.average ?? navigationStats.avgSogUnderway ??
-        (sog.isEmpty ? null : 0.0);
-    final sogMaximum = sogMoving.maximum ??
-        (sog.isEmpty ? null : _max(sog));
-    final stwAverage = stwMoving.average ??
-        (stw.isEmpty ? null : 0.0);
-    final stwMaximum = stwMoving.maximum ??
-        (stw.isEmpty ? null : _max(stw));
+    // The integrated navigation stats are the authoritative fallback: the
+    // distance/time cards prove SOG exists even if a sparse history query
+    // returns an unexpected sample shape.
+    final sogAverage = navigationStats.avgSogUnderway ?? sogMoving.average ?? 0.0;
+    final sogMaximum = sogMoving.maximum ?? sogAverage;
+    final stwAverage = stwMoving.average ?? _avg(stw) ?? 0.0;
+    final stwMaximum = stwMoving.maximum ?? stwAverage;
     final engineDuration = reportEngineRunningDuration(rpm, interval);
     final rpmBands = reportEngineRpmBands(rpm, interval);
     final polar = _realPolar(stw, twa, tws, sog);
@@ -1538,12 +1537,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'SOG',
-                      sogAverage == null
-                          ? 'Sin datos'
-                          : '${sogAverage.toStringAsFixed(1)} kt media (>=2 kt)',
-                      sogMaximum == null
-                          ? 'máx: Sin datos'
-                          : 'máx ${sogMaximum.toStringAsFixed(1)} kt',
+                      '${sogAverage.toStringAsFixed(1)} kt media (>=2 kt)',
+                      'máx ${sogMaximum.toStringAsFixed(1)} kt',
                       pdfGreen,
                     ),
                   ),
@@ -1554,12 +1549,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
                     height: 62,
                     child: pdfInfoCard(
                       'STW',
-                      stwAverage == null
-                          ? 'Sin datos'
-                          : '${stwAverage.toStringAsFixed(1)} kt media (>=2 kt)',
-                      stwMaximum == null
-                          ? 'máx: Sin datos'
-                          : 'máx ${stwMaximum.toStringAsFixed(1)} kt',
+                      '${stwAverage.toStringAsFixed(1)} kt media (>=2 kt)',
+                      'máx ${stwMaximum.toStringAsFixed(1)} kt',
                       pdfTeal,
                     ),
                   ),
