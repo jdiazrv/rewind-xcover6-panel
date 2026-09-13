@@ -2099,7 +2099,59 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           pw.FullPage(ignoreMargins: true, child: pw.Container(color: pdfBg)),
     );
 
-    doc.addPage(
+    pw.Widget windSummaryCards() => pw.Row(
+      children: [
+        pw.Expanded(
+          child: pw.SizedBox(
+            height: 62,
+            child: pdfInfoCard(
+              'AWS',
+              _avg(aws) == null
+                  ? 'Sin datos'
+                  : '${_avg(aws)!.toStringAsFixed(1)} kt media',
+              _max(awsPeak) == null
+                  ? 'ráfaga: Sin datos'
+                  : 'ráfaga máx ${_max(awsPeak)!.toStringAsFixed(1)} kt',
+              pdfOrange,
+            ),
+          ),
+        ),
+        pw.SizedBox(width: 8),
+        pw.Expanded(
+          child: pw.SizedBox(
+            height: 62,
+            child: pdfInfoCard(
+              'TWS',
+              _avg(tws) == null
+                  ? 'Sin datos'
+                  : '${_avg(tws)!.toStringAsFixed(1)} kt media',
+              _max(twsPeak) == null
+                  ? 'ráfaga: Sin datos'
+                  : 'ráfaga máx ${_max(twsPeak)!.toStringAsFixed(1)} kt',
+              pdfCyan,
+            ),
+          ),
+        ),
+        pw.SizedBox(width: 8),
+        pw.Expanded(
+          child: pw.SizedBox(
+            height: 62,
+            child: pdfInfoCard(
+              'Escora',
+              _maxAbs(heel) == null
+                  ? 'Sin datos'
+                  : '${_maxAbs(heel)!.toStringAsFixed(0)}° máx',
+              _avg(heel) == null
+                  ? 'media: Sin datos'
+                  : 'media ${_avg(heel)!.toStringAsFixed(0)}°',
+              pdfYellow,
+            ),
+          ),
+        ),
+      ],
+    );
+
+    if (showNavigation) doc.addPage(
       pw.MultiPage(
         pageTheme: pageTheme,
         footer: (ctx) => pw.Align(
@@ -2190,61 +2242,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               ),
             ),
           ],
-          if (showWind) pw.SizedBox(height: 8),
-          if (showWind)
-            pw.Row(
-              children: [
-                pw.Expanded(
-                  child: pw.SizedBox(
-                    height: 62,
-                    child: pdfInfoCard(
-                      'AWS',
-                      _avg(aws) == null
-                          ? 'Sin datos'
-                          : '${_avg(aws)!.toStringAsFixed(1)} kt media',
-                      _max(awsPeak) == null
-                          ? 'ráfaga: Sin datos'
-                          : 'ráfaga máx ${_max(awsPeak)!.toStringAsFixed(1)} kt',
-                      pdfOrange,
-                    ),
-                  ),
-                ),
-                pw.SizedBox(width: 8),
-                pw.Expanded(
-                  child: pw.SizedBox(
-                    height: 62,
-                    child: pdfInfoCard(
-                      'TWS',
-                      _avg(tws) == null
-                          ? 'Sin datos'
-                          : '${_avg(tws)!.toStringAsFixed(1)} kt media',
-                      _max(twsPeak) == null
-                          ? 'ráfaga: Sin datos'
-                          : 'ráfaga máx ${_max(twsPeak)!.toStringAsFixed(1)} kt',
-                      pdfCyan,
-                    ),
-                  ),
-                ),
-                pw.SizedBox(width: 8),
-                pw.Expanded(
-                  child: pw.SizedBox(
-                    height: 62,
-                    child: pdfInfoCard(
-                      'Escora',
-                      _maxAbs(heel) == null
-                          ? 'Sin datos'
-                          : '${_maxAbs(heel)!.toStringAsFixed(0)}° máx',
-                      _avg(heel) == null
-                          ? 'media: Sin datos'
-                          : 'media ${_avg(heel)!.toStringAsFixed(0)}°',
-                      pdfYellow,
-                    ),
-                  ),
-                ),
-                pw.SizedBox(width: 8),
-                pw.Expanded(child: pw.SizedBox()),
-              ],
-            ),
           if (showNavigation) ...[
             pw.SizedBox(height: 22),
             pw.Text(
@@ -2286,23 +2283,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               pdfEngineRpmBandChart(rpmBands, contentWidth),
             ],
           ],
-          if (showWind) ...[
-            pw.SizedBox(height: 18),
-            pw.Text(
-              'Distribución de viento (TWS)',
-              style: const pw.TextStyle(
-                color: pdfText,
-                fontSize: 12,
-                fontWeight: pw.FontWeight.bold,
-              ),
-            ),
-            pw.Text(
-              '% de muestras del periodo en cada franja de viento real',
-              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
-            ),
-            pw.SizedBox(height: 6),
-            ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
-          ],
         ],
       ),
     );
@@ -2320,6 +2300,23 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           ),
           build: (ctx) => [
             header(),
+            windSummaryCards(),
+            pw.SizedBox(height: 18),
+            pw.Text(
+              'Distribución de viento (TWS)',
+              style: const pw.TextStyle(
+                color: pdfText,
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            pw.Text(
+              '% de muestras del periodo en cada franja de viento real',
+              style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
+            ),
+            pw.SizedBox(height: 6),
+            ...pdfHistogramRows(tws, 'kt', pdfCyan, contentWidth),
+            pw.SizedBox(height: 18),
             pw.Text(
               'Evolución del viento verdadero',
               style: const pw.TextStyle(
@@ -2923,6 +2920,24 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
       style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
     );
   }
+  // A full 0..180 x all-wind matrix is mostly empty in a real passage and
+  // was forcing six empty TWA rows onto a fifth page. Keep only rows and
+  // columns containing at least one observed value; the range labels still
+  // make the retained subset unambiguous.
+  final visibleRows = <int>[
+    for (var b = 0; b < polar.twaBands.length; b++)
+      if (polar.avgStw[b].any((value) => value != null)) b,
+  ];
+  final visibleColumns = <int>[
+    for (var w = 0; w < columns; w++)
+      if (visibleRows.any((b) => polar.avgStw[b][w] != null)) w,
+  ];
+  if (visibleRows.isEmpty || visibleColumns.isEmpty) {
+    return pw.Text(
+      'Sin datos suficientes de TWA/TWS/STW navegando a vela.',
+      style: const pw.TextStyle(color: pdfMuted, fontSize: 9),
+    );
+  }
   pw.Widget cell(String text, {bool header = false}) => pw.Padding(
     padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 4),
     child: pw.Text(
@@ -2940,28 +2955,29 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
     border: pw.TableBorder.all(color: pdfGrid, width: 0.5),
     columnWidths: {
       0: const pw.FlexColumnWidth(1.25),
-      for (var i = 0; i < columns; i++) i + 1: const pw.FlexColumnWidth(1),
+      for (var i = 0; i < visibleColumns.length; i++)
+        i + 1: const pw.FlexColumnWidth(1),
     },
     children: [
       pw.TableRow(
         decoration: const pw.BoxDecoration(color: pdfPanel),
         children: [
           cell('TWA \\ TWS', header: true),
-          for (var i = 0; i < columns; i++)
+          for (final i in visibleColumns)
             cell(
               '${polar.twsEdges[i]} a ${polar.twsEdges[i + 1]} kt',
               header: true,
             ),
         ],
       ),
-      for (var b = 0; b < polar.twaBands.length; b++)
+      for (final b in visibleRows)
         pw.TableRow(
           children: [
             cell(
               '${polar.twaBands[b].loDeg} a ${polar.twaBands[b].hiDeg} grados',
               header: true,
             ),
-            for (var w = 0; w < columns; w++)
+            for (final w in visibleColumns)
               cell(polar.avgStw[b][w]?.toStringAsFixed(1) ?? '--'),
           ],
         ),
