@@ -4679,8 +4679,13 @@ class _DashboardState extends State<Dashboard> {
         signalK.headingMagneticDeg = n == null ? null : n * 57.2957795;
         signalK.headingMagneticDegUpdate = ts;
       case 'navigation.magneticVariation':
-        signalK.magneticVariationDeg = n == null ? null : n * 57.2957795;
-        signalK.magneticVariationUpdate = ts;
+        // A GPS with an empty RMC variation field publishes null every
+        // second, wiping the value derived-data computed. Variation doesn't
+        // change in hours, so a null never replaces a known one.
+        if (n != null) {
+          signalK.magneticVariationDeg = n * 57.2957795;
+          signalK.magneticVariationUpdate = ts;
+        }
       case 'navigation.courseOverGroundTrue':
         signalK.cogTrueDeg = n == null ? null : n * 57.2957795;
         signalK.cogTrueDegUpdate = ts;
@@ -6606,6 +6611,33 @@ class _DashboardState extends State<Dashboard> {
     return magnetic == null || variation == null
         ? null
         : normalize360(magnetic + variation);
+  }
+
+  // ANC only. At anchor the heading barely moves, and derived-data publishes
+  // headingTrue about every 10 s, so the 2 s engine window left the hull
+  // flipping between the real heading and "point at the anchor" (reported
+  // live 2026-09-13). The anchor fallback only applies after 30 s with no
+  // heading of any kind; magnetic without a known variation still counts.
+  static const _anchorHeadingStaleAfter = Duration(seconds: 30);
+  double? get _anchorHeading {
+    final direct = _freshEngine(
+      signalK.headingTrueDeg,
+      signalK.headingTrueDegUpdate,
+      staleAfter: _anchorHeadingStaleAfter,
+    );
+    if (direct != null) return direct;
+    final magnetic = _freshEngine(
+      signalK.headingMagneticDeg,
+      signalK.headingMagneticDegUpdate,
+      staleAfter: _anchorHeadingStaleAfter,
+    );
+    if (magnetic == null) return null;
+    final variation = _freshEngine(
+      signalK.magneticVariationDeg,
+      signalK.magneticVariationUpdate,
+      staleAfter: _anchorHeadingStaleAfter,
+    );
+    return normalize360(magnetic + (variation ?? 0));
   }
 
   String get _headingSourceLabel =>
@@ -11632,8 +11664,9 @@ class _DashboardState extends State<Dashboard> {
       // retained in the model. At anchor COG is noisy-to-meaningless and a
       // frozen compass value makes the hull keep pointing in a direction we
       // no longer know. NativeAnchorView already has the safer fallback: it
-      // points the bow at the anchor when this becomes null.
-      headingDeg: _freshTrueHeading,
+      // points the bow at the anchor when this becomes null — after 30 s
+      // without any heading, see _anchorHeading.
+      headingDeg: _anchorHeading,
       sogKn: _freshSog,
       depthM: _freshEngine(signalK.depthM, signalK.depthMUpdate),
       bowRollerHeightM: settings.anchorBowRollerHeightM,
