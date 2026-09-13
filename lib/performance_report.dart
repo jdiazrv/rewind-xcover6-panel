@@ -1747,27 +1747,6 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   }
 }
 
-pw.Widget _pdfEngineBandCard(Map<String, Duration> bands) {
-  return pw.Container(
-    padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-    decoration: pw.BoxDecoration(
-      color: const PdfColor.fromInt(0xfffff4e8),
-      borderRadius: pw.BorderRadius.circular(5),
-    ),
-    child: pw.Column(
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.Text('Distribución RPM', style: const pw.TextStyle(color: pdfOrange, fontSize: 8, fontWeight: pw.FontWeight.bold)),
-        pw.SizedBox(height: 5),
-        pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [for (final entry in bands.entries) pw.Text('${entry.key}\n${_reportDurationLabel(entry.value)}', textAlign: pw.TextAlign.center, style: const pw.TextStyle(color: pdfText, fontSize: 7))],
-        ),
-      ],
-    ),
-  );
-}
-
 pw.Widget pdfEngineRpmBandChart(Map<String, Duration> bands, double width) {
   final maxSeconds = bands.values.fold<int>(0, (m, d) => m > d.inSeconds ? m : d.inSeconds);
   return pw.Container(
