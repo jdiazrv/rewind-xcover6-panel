@@ -9541,7 +9541,12 @@ class _DashboardState extends State<Dashboard> {
             // instead of sitting right where the (now-removed) title used
             // to be. Applies on both Vela/Motor and Fondeado now that
             // Fondeado's title is gone too.
-            final upShift = compactWind ? constraints.maxHeight * 0.20 : 0.0;
+            // Only Fondeado (no gauge) shifts up: on Vela/Motor the labels
+            // already start at the card's top padding, and the shift pushed
+            // AWS/AWA out of the card on the XCover (seen 2026-09-13).
+            final upShift = compactWind && !showGauge
+                ? constraints.maxHeight * 0.20
+                : 0.0;
             // The numbers strip below used a flat 170/108px regardless of
             // how tall the card actually is — fine on a normal phone/
             // tablet card, but on an unusually short one (a very compact

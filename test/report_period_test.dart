@@ -368,6 +368,125 @@ void main() {
     });
   });
 
+  group('viento real calculado desde el aparente', () {
+    final t0 = DateTime.utc(2026, 9, 13, 10);
+    List<GraphPoint> series(double value) => [
+      GraphPoint(time: t0, value: value),
+    ];
+
+    test('sin viento real se calcula TWS, TWA y TWD y se avisa', () {
+      // Parado sobre el agua: el real es el aparente.
+      final fill = fillReportTrueWindFromApparent(
+        tws: const [],
+        twa: const [],
+        twd: const [],
+        aws: series(10),
+        awa: series(90),
+        stw: series(0),
+        sog: const [],
+        heading: series(100),
+      );
+      expect(fill.derived, {'TWS', 'TWA', 'TWD'});
+      expect(fill.tws.single.value, closeTo(10, 1e-9));
+      expect(fill.twa.single.value, closeTo(90, 1e-9));
+      expect(fill.twd.single.value, closeTo(190, 1e-9));
+      expect(fill.usedSog, isFalse);
+      final note = reportTrueWindNote(fill)!;
+      expect(note, contains('TWS, TWA y TWD calculados'));
+      expect(note, contains('y rumbo'));
+      expect(note, isNot(contains('SOG')));
+    });
+
+    test('resta la marcha del barco al aparente', () {
+      final fill = fillReportTrueWindFromApparent(
+        tws: const [],
+        twa: const [],
+        twd: const [],
+        aws: series(10),
+        awa: series(0),
+        stw: series(5),
+        sog: const [],
+        heading: const [],
+      );
+      expect(fill.tws.single.value, closeTo(5, 1e-9));
+      expect(fill.twa.single.value, closeTo(0, 1e-9));
+      expect(fill.twd, isEmpty, reason: 'sin rumbo no hay TWD');
+      expect(fill.derived, {'TWS', 'TWA'});
+      expect(reportTrueWindNote(fill), isNot(contains('rumbo')));
+    });
+
+    test('sin STW usa SOG y lo dice', () {
+      final fill = fillReportTrueWindFromApparent(
+        tws: const [],
+        twa: const [],
+        twd: const [],
+        aws: series(10),
+        awa: series(0),
+        stw: const [],
+        sog: series(4),
+        heading: const [],
+      );
+      expect(fill.tws.single.value, closeTo(6, 1e-9));
+      expect(fill.usedSog, isTrue);
+      expect(reportTrueWindNote(fill), contains('SOG donde faltaba STW'));
+    });
+
+    test('sin rumbo, TWD usa COG solo navegando', () {
+      List<GraphPoint> at(List<(int, double)> pts) => [
+        for (final (m, v) in pts)
+          GraphPoint(time: t0.add(Duration(minutes: m * 10)), value: v),
+      ];
+      final fill = fillReportTrueWindFromApparent(
+        tws: const [],
+        twa: const [],
+        twd: const [],
+        aws: at([(0, 10), (1, 10)]),
+        awa: at([(0, 90), (1, 90)]),
+        stw: at([(0, 0), (1, 0)]),
+        // Navegando en el primer instante, parado en el segundo.
+        sog: at([(0, 5), (1, 0.1)]),
+        heading: const [],
+        cog: at([(0, 100), (1, 300)]),
+      );
+      expect(fill.twd, hasLength(1), reason: 'parado el COG no vale');
+      expect(fill.twd.single.value, closeTo(190, 1e-9));
+      expect(fill.usedCog, isTrue);
+      expect(reportTrueWindNote(fill), contains('COG navegando'));
+    });
+
+    test('el viento real medido nunca se sustituye', () {
+      final fill = fillReportTrueWindFromApparent(
+        tws: series(12),
+        twa: series(45),
+        twd: series(270),
+        aws: series(10),
+        awa: series(0),
+        stw: series(5),
+        sog: const [],
+        heading: series(0),
+      );
+      expect(fill.derived, isEmpty);
+      expect(fill.tws.single.value, 12);
+      expect(reportTrueWindNote(fill), isNull);
+    });
+
+    test('solo se rellena la serie que falta', () {
+      final fill = fillReportTrueWindFromApparent(
+        tws: series(12),
+        twa: series(45),
+        twd: const [],
+        aws: series(10),
+        awa: series(90),
+        stw: series(0),
+        sog: const [],
+        heading: series(100),
+      );
+      expect(fill.derived, {'TWD'});
+      expect(fill.tws.single.value, 12, reason: 'TWS medido intacto');
+      expect(reportTrueWindNote(fill), contains('TWD calculado'));
+    });
+  });
+
   test('la duración de una parada va en horas, o en días si pasa de 3', () {
     expect(reportStopDurationLabel(const Duration(minutes: 5)), '0.1 h');
     expect(

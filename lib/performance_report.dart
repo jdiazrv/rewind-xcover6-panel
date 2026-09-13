@@ -570,6 +570,133 @@ double? reportAverageStwUnderway(
   return seconds == 0 ? null : weightedSpeed / seconds;
 }
 
+typedef ReportTrueWindFill = ({
+  List<GraphPoint> tws,
+  List<GraphPoint> twa,
+  List<GraphPoint> twd,
+  // Cuáles de 'TWS', 'TWA', 'TWD' salen del viento aparente.
+  Set<String> derived,
+  // Alguna muestra usó SOG porque no había STW cerca.
+  bool usedSog,
+  // Algún TWD usó COG porque no había rumbo cerca.
+  bool usedCog,
+});
+
+/// Si el histórico no trae viento real, se reconstruye con el aparente:
+/// AWS y AWA con STW (SOG solo donde falta STW) dan TWS y TWA, y con el
+/// rumbo verdadero, TWD. Sin rumbo, TWD usa COG, pero solo navegando
+/// (SOG > 0,5 kt): parado, el COG es ruido y daría un TWD inventado. Caso
+/// real: QUINTO REAL publica rumbo en directo pero su histórico solo guarda
+/// COG. Solo se rellena la serie que está vacía; una serie real nunca se
+/// sustituye por una calculada.
+ReportTrueWindFill fillReportTrueWindFromApparent({
+  required List<GraphPoint> tws,
+  required List<GraphPoint> twa,
+  required List<GraphPoint> twd,
+  required List<GraphPoint> aws,
+  required List<GraphPoint> awa,
+  required List<GraphPoint> stw,
+  required List<GraphPoint> sog,
+  required List<GraphPoint> heading,
+  List<GraphPoint> cog = const [],
+  Duration tolerance = const Duration(minutes: 2),
+}) {
+  final needTws = tws.isEmpty, needTwa = twa.isEmpty, needTwd = twd.isEmpty;
+  if (!(needTws || needTwa || needTwd) || aws.isEmpty || awa.isEmpty) {
+    return (
+      tws: tws,
+      twa: twa,
+      twd: twd,
+      derived: const {},
+      usedSog: false,
+      usedCog: false,
+    );
+  }
+  GraphPoint? nearest(List<GraphPoint> series, DateTime time) {
+    GraphPoint? best;
+    Duration? bestGap;
+    for (final p in series) {
+      if (!p.value.isFinite) continue;
+      final gap = p.time.difference(time).abs();
+      if (gap > tolerance) continue;
+      if (bestGap == null || gap < bestGap) {
+        best = p;
+        bestGap = gap;
+      }
+    }
+    return best;
+  }
+
+  final outTws = <GraphPoint>[], outTwa = <GraphPoint>[];
+  final outTwd = <GraphPoint>[];
+  var usedSog = false, usedCog = false;
+  for (final a in aws) {
+    if (!a.value.isFinite) continue;
+    final angle = nearest(awa, a.time);
+    if (angle == null) continue;
+    var speed = nearest(stw, a.time);
+    final overGround = speed == null;
+    speed ??= nearest(sog, a.time);
+    if (speed == null) continue;
+    final (trueSpeed, trueAngle) = trueWindFromApparent(
+      a.value,
+      angle.value,
+      speed.value,
+    );
+    if (!trueSpeed.isFinite || !trueAngle.isFinite) continue;
+    if (overGround) usedSog = true;
+    outTws.add(GraphPoint(time: a.time, value: trueSpeed));
+    outTwa.add(GraphPoint(time: a.time, value: trueAngle));
+    var reference = nearest(heading, a.time)?.value;
+    if (reference == null) {
+      final ground = nearest(sog, a.time);
+      final course = nearest(cog, a.time);
+      if (course != null && ground != null && ground.value > 0.5) {
+        reference = course.value;
+        usedCog = true;
+      }
+    }
+    if (reference != null) {
+      outTwd.add(GraphPoint(time: a.time, value: (reference + trueAngle) % 360));
+    }
+  }
+  final derived = <String>{
+    if (needTws && outTws.isNotEmpty) 'TWS',
+    if (needTwa && outTwa.isNotEmpty) 'TWA',
+    if (needTwd && outTwd.isNotEmpty) 'TWD',
+  };
+  return (
+    tws: needTws ? outTws : tws,
+    twa: needTwa ? outTwa : twa,
+    twd: needTwd ? outTwd : twd,
+    derived: derived,
+    usedSog: usedSog && derived.isNotEmpty,
+    usedCog: usedCog && derived.contains('TWD'),
+  );
+}
+
+/// Aviso para la cabecera del informe cuando parte del viento real es
+/// calculado. Null si todo el viento real es medido.
+String? reportTrueWindNote(ReportTrueWindFill fill) {
+  if (fill.derived.isEmpty) return null;
+  final names = [
+    for (final n in const ['TWS', 'TWA', 'TWD'])
+      if (fill.derived.contains(n)) n,
+  ];
+  final list = names.length == 1
+      ? names.single
+      : '${names.sublist(0, names.length - 1).join(', ')} y ${names.last}';
+  final speed = fill.usedSog ? 'STW (SOG donde faltaba STW)' : 'STW';
+  final heading = !fill.derived.contains('TWD')
+      ? ''
+      : fill.usedCog
+      ? ' y rumbo (COG navegando donde faltaba rumbo)'
+      : ' y rumbo';
+  return 'Aviso: sin viento real en el histórico. $list '
+      '${names.length == 1 ? 'calculado' : 'calculados'} a partir del viento '
+      'aparente (AWS, AWA, $speed$heading).';
+}
+
 enum PerformanceReportKind { navigation, windAndSailing, complete }
 
 extension PerformanceReportKindLabel on PerformanceReportKind {
@@ -1512,6 +1639,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   }
 
   List<({double lat, double lon, DateTime time})> _track = [];
+  // Aviso cuando TWS/TWA/TWD se han calculado desde el viento aparente.
+  String? _trueWindNote;
   int _gpsRawFixes = 0;
   int _gpsDiscardedFixes = 0;
 
@@ -1528,6 +1657,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       final includeNavigation =
           widget.kind != PerformanceReportKind.windAndSailing;
       final includeSailing = widget.kind != PerformanceReportKind.navigation;
+      _trueWindNote = null;
       if (widget.settings.demoMode) {
         _gpsRawFixes = 0;
         _gpsDiscardedFixes = 0;
@@ -1613,6 +1743,11 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             'twa': _optionalQuery(mTwa, aggregate: 'last'),
             'awsPeak': _optionalQuery(mAws, aggregate: 'max'),
             'twsPeak': _optionalQuery(mTws, aggregate: 'max'),
+            // Solo para reconstruir el viento real si falta. Ángulos con
+            // 'last', igual que TWA/TWD: la media aritmética rompe en ±180°.
+            'awa': _optionalQuery(mAwa, aggregate: 'last'),
+            'heading': _optionalQuery(mHeading, aggregate: 'last'),
+            'cog': _optionalQuery(mCog, aggregate: 'last'),
           },
         };
         final entries = queries.entries.toList();
@@ -1620,6 +1755,28 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         _series = {
           for (var i = 0; i < entries.length; i++) entries[i].key: results[i],
         };
+        if (includeSailing) {
+          final fill = fillReportTrueWindFromApparent(
+            tws: _series['tws'] ?? const [],
+            twa: _series['twa'] ?? const [],
+            twd: _series['twd'] ?? const [],
+            aws: _series['aws'] ?? const [],
+            awa: _series['awa'] ?? const [],
+            stw: _series['stw'] ?? const [],
+            sog: _series['sog'] ?? const [],
+            heading: _series['heading'] ?? const [],
+            cog: _series['cog'] ?? const [],
+          );
+          if (fill.derived.isNotEmpty) {
+            _series['tws'] = fill.tws;
+            _series['twa'] = fill.twa;
+            _series['twd'] = fill.twd;
+            // Sin TWS medido tampoco hay su máximo: la ráfaga sale de la
+            // misma serie calculada.
+            if (fill.derived.contains('TWS')) _series['twsPeak'] = fill.tws;
+            _trueWindNote = reportTrueWindNote(fill);
+          }
+        }
         _track = includeNavigation
             ? await _fetchTrackPoints(_series['sog'] ?? const [])
             : [];
@@ -2078,6 +2235,15 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
           'Cobertura de muestras: ${coverageParts.join(' · ')}',
           style: const pw.TextStyle(color: pdfMuted, fontSize: 8),
         ),
+        if (showWind && _trueWindNote != null)
+          pw.Text(
+            _trueWindNote!,
+            style: pw.TextStyle(
+              color: pdfOrange,
+              fontSize: 8,
+              fontWeight: pw.FontWeight.bold,
+            ),
+          ),
         if (showNavigation && _gpsRawFixes > 0)
           pw.Text(
             'GPS: ${_track.length} puntos representados · $_gpsDiscardedFixes descartados de $_gpsRawFixes por posición o velocidad imposible',

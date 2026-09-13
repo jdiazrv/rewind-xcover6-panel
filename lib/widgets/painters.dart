@@ -758,7 +758,9 @@ class _PremiumAwaPainter extends CustomPainter {
           ..color = colors[i]
           ..style = PaintingStyle.stroke
           ..strokeWidth = _bandWidth
-          ..strokeCap = StrokeCap.round,
+          // Square ends: round caps made the ±45° tips look like pills
+          // hanging past the end ticks.
+          ..strokeCap = StrokeCap.butt,
       );
     }
   }
