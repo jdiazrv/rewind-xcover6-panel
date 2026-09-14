@@ -872,16 +872,38 @@ class _DashboardState extends State<Dashboard> {
       final token = await _ensureSkConfigToken(forceRefresh: attempt > 0);
       if (token == null) return;
       try {
+        final headers = {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        };
+        // Signal K guarda la configuración que se le envía TAL CUAL: mandar
+        // solo el topic borraba el resto (el grabador de histórico se quedó
+        // apagado en QUINTO REAL, 2026-09-14). Se lee la actual, se cambian
+        // solo estos dos campos y se devuelve entera. Si no se puede leer, no
+        // se escribe nada.
+        final current = await http
+            .get(Uri.parse(base), headers: headers)
+            .timeout(const Duration(seconds: 8));
+        if (current.statusCode == 401 && attempt == 0) {
+          _skConfigToken = null;
+          continue;
+        }
+        if (current.statusCode != 200) return;
+        final decoded = jsonDecode(current.body);
+        final existing = decoded is Map<String, dynamic> &&
+                decoded['configuration'] is Map<String, dynamic>
+            ? Map<String, dynamic>.from(
+                decoded['configuration'] as Map<String, dynamic>,
+              )
+            : <String, dynamic>{};
         final resp = await http
             .post(
               Uri.parse(base),
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer $token',
-              },
+              headers: headers,
               body: jsonEncode({
                 'enabled': true,
                 'configuration': {
+                  ...existing,
                   'ntfyTopic': settings.ntfyTopic,
                   // Keeps the server plugin's own backup-watchdog push
                   // throttle equal to the app's — previously independent,

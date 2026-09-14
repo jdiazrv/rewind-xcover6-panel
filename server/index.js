@@ -24,6 +24,7 @@
  */
 
 const https = require('https');
+const fs = require('fs');
 const path = require('path');
 const { createRecorder, DEFAULTS: HISTORY_DEFAULTS } = require('./history_recorder');
 
@@ -146,18 +147,36 @@ function sendNtfy(app, topic, title, body) {
 module.exports = function (app) {
   const plugin = {};
   plugin.id = 'rewind-xcover6-panel';
-  plugin.name = 'REWIND Panel — Anchor Watch';
+  plugin.name = 'REWIND Panel — Vigilante de fondeo y grabador de histórico';
   plugin.description =
-    'Background anchor-drag watchdog for the REWIND panel app. Watches ' +
-    'navigation.anchor.state/position/watchZone — the same paths the ' +
-    'REWIND app itself publishes when you arm the anchor watch — and ' +
-    'raises a Signal K notification (and optionally an ntfy.sh push) if ' +
-    'the boat leaves the watch zone. Runs inside the server, so it keeps ' +
-    'working even with no phone, tablet, or browser connected. Purely a ' +
-    'read-only observer: it never drops, raises, or moves an anchor ' +
-    'itself, and automatically stays quiet whenever a genuinely different ' +
-    'anchor-watch plugin (hoekens-anchor-alarm, etc.) is armed, so the ' +
-    'two can never disagree out loud at the same time.';
+    'Parte de servidor de la app REWIND Panel (Android y webapp). Hace dos ' +
+    'cosas, las dos dentro de Signal K para que funcionen aunque no haya ' +
+    'ningún móvil, tablet o navegador conectado. ' +
+    '(1) VIGILANTE DE FONDEO: cuando se arma el fondeo desde la app, esta ' +
+    'publica navigation.anchor.state, position y watchZone; el plugin los ' +
+    'lee y cada pocos segundos comprueba si el barco ha salido del círculo ' +
+    'o sector de vigilancia. Si garrea, lanza la notificación ' +
+    'notifications.navigation.anchor y, si hay un topic de ntfy.sh ' +
+    'configurado, envía un aviso al móvil. También avisa si se pierde la ' +
+    'posición del GPS. Filtra saltos sueltos del GPS para no dar falsas ' +
+    'alarmas. Nunca fondea, leva ni mueve el ancla por su cuenta, y se ' +
+    'calla si otro plugin de fondeo (hoekens-anchor-alarm…) está armado, ' +
+    'para que no haya dos alarmas diciendo cosas distintas. ' +
+    '(2) GRABADOR DE HISTÓRICO: pensado para Raspberry con tarjeta SD, ' +
+    'donde KIP o QuestDB escribían gigas al día y desgastaban la tarjeta. ' +
+    'Guarda en memoria todos los datos que la app muestra con histórico ' +
+    '(posición, velocidades, rumbo, viento, profundidad, temperaturas y ' +
+    'presión, baterías, solar, Victron, tanques, motor y estado del ancla), ' +
+    'resumidos en intervalos con media, mínimo, máximo y último valor, y ' +
+    'los escribe a disco una vez por hora, comprimidos, en un fichero por ' +
+    'hora; borra lo que pasa del periodo de retención (72 h por defecto). ' +
+    'Al arrancar recupera lo guardado. Se registra como proveedor del ' +
+    'History API de Signal K, así que la app (fuente "Grabador REWIND"), ' +
+    'KIP u otros clientes leen sus datos con la consulta estándar. Si se ' +
+    'corta la corriente de golpe se pierde como mucho lo no escrito desde ' +
+    'el último volcado. Viene apagado: se activa en "Grabador de histórico ' +
+    'REWIND", donde también se ajustan retención, resolución, frecuencia ' +
+    'de escritura y qué rutas se graban.';
 
   plugin.schema = {
     type: 'object',
@@ -266,12 +285,34 @@ module.exports = function (app) {
   let recorderProviderRegistered = false;
 
   function startHistoryRecorder(historyOptions) {
-    const cfg = historyOptions || {};
-    if (cfg.enabled !== true) return;
     const dataDir =
       typeof app.getDataDirPath === 'function'
         ? app.getDataDirPath()
         : path.join(process.cwd(), 'rewind-history');
+    // Las apps REWIND hasta la 1.4.212 guardaban la config del plugin con
+    // solo el topic de ntfy, y Signal K la sustituía entera: el grabador se
+    // apagaba sin que nadie lo pidiera (QUINTO REAL, 2026-09-14). Si la
+    // sección "history" falta del todo se reutiliza la última guardada; si
+    // viene (aunque sea con enabled: false, apagado a propósito desde el
+    // panel) manda lo que venga.
+    const remembered = path.join(dataDir, 'history-options.json');
+    let cfg = historyOptions;
+    if (cfg === undefined || cfg === null) {
+      try {
+        cfg = JSON.parse(fs.readFileSync(remembered, 'utf8'));
+        app.debug('[histórico] config sin "history": uso la última guardada');
+      } catch (_) {
+        cfg = {};
+      }
+    } else {
+      try {
+        fs.mkdirSync(dataDir, { recursive: true });
+        fs.writeFileSync(remembered, JSON.stringify(cfg));
+      } catch (err) {
+        app.debug(`[histórico] no se pudo recordar la config: ${err && err.message}`);
+      }
+    }
+    if (cfg.enabled !== true) return;
     recorder = createRecorder({ app, dataDir, options: cfg });
     const loadedHours = recorder.load();
     recorderDeltaListener = (delta) => recorder.handleDelta(delta);

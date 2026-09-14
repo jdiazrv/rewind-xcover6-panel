@@ -14,6 +14,14 @@ const _tankKindLabels = <String, String>{
 
 String friendlyApiError(Object e) {
   final s = e.toString();
+  // Fuente "Grabador REWIND" contra un servidor donde el grabador no está
+  // activado (REWIND sigue con InfluxDB): Signal K responde un 400 críptico.
+  if (s.contains('Requested provider not found') &&
+      s.contains(rewindHistoryProviderId)) {
+    return 'Este servidor Signal K no tiene activado el grabador de histórico '
+        'REWIND. Actívalo en Signal K > Plugins > REWIND Panel > Grabador de '
+        'histórico REWIND, o elige otra fuente (InfluxDB o Signal K).';
+  }
   final match = RegExp(r'Exception: (.+)').firstMatch(s);
   return match != null ? match.group(1)! : s;
 }
