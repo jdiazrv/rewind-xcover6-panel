@@ -2566,13 +2566,27 @@ class _DashboardState extends State<Dashboard> {
   // here so the Fondeado anchor ring shows the real hull instead of a
   // generic triangle.
   ui.Image? _shipIcon;
+  String? _shipIconLoadedAsset;
+
+  // Carga el icono ELEGIDO en CFG, no el de por defecto: antes solo se
+  // cargaba own_ship.png una vez al arrancar, así que cambiar el icono no
+  // cambiaba el dial de viento ni la tarjeta de fondeo premium.
+  void _reloadShipIcon() {
+    final asset = boatIconById(settings.shipIconId).pequenoAsset;
+    if (asset == _shipIconLoadedAsset) return;
+    _shipIconLoadedAsset = asset;
+    loadShipIcon(asset).then((img) {
+      // Si entretanto se eligió otro icono, esta carga ya no vale.
+      if (mounted && _shipIconLoadedAsset == asset) {
+        setState(() => _shipIcon = img);
+      }
+    });
+  }
 
   @override
   void initState() {
     super.initState();
-    loadShipIcon().then((img) {
-      if (mounted) setState(() => _shipIcon = img);
-    });
+    _reloadShipIcon();
     unawaited(_boot());
     // Re-render periodically so nav/wind cards flip to "--" once stale, even
     // without a new Signal K message arriving to trigger a rebuild.
@@ -2957,6 +2971,7 @@ class _DashboardState extends State<Dashboard> {
     settings.navGridColumns =
         prefs.getInt('navGridColumns') ?? settings.navGridColumns;
     settings.shipIconId = prefs.getString('shipIconId') ?? settings.shipIconId;
+    _reloadShipIcon();
     settings.aisCpaMaxNm =
         prefs.getDouble('aisCpaMaxNm') ?? settings.aisCpaMaxNm;
     settings.aisTcpaMaxMin =
@@ -13885,6 +13900,7 @@ class _DashboardState extends State<Dashboard> {
                                             setState(
                                               () => settings.shipIconId = id,
                                             );
+                                            _reloadShipIcon();
                                             unawaited(_saveSettings());
                                           },
                                         ),
