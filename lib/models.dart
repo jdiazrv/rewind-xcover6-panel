@@ -3232,7 +3232,7 @@ class SettingsModel {
   // Historical-chart data source: 'auto' tries InfluxDB first and falls back
   // to the Signal K History API (e.g. KIP/SQLite) if that fails — 'influx'
   // and 'sk' force one or the other regardless of availability.
-  String historySource = 'auto';
+  String historySource = 'sk';
   String influxHost = ''; // empty = same as `host` above
   String influxOrg = influxOrgDefault;
   String influxToken = influxTokenDefault;

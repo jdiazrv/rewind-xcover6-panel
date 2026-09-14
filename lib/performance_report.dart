@@ -2317,7 +2317,8 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       ],
     );
 
-    if (showNavigation) doc.addPage(
+    if (showNavigation) {
+      doc.addPage(
       pw.MultiPage(
         pageTheme: pageTheme,
         footer: (ctx) => pw.Align(
@@ -2452,6 +2453,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
         ],
       ),
     );
+    }
 
     if (showWind) {
       doc.addPage(

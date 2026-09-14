@@ -3225,10 +3225,15 @@ class _DashboardState extends State<Dashboard> {
   Future<void> _migrateAndValidateSettings(SharedPreferences prefs) async {
     final previousVersion = prefs.getInt('settingsSchemaVersion') ?? 0;
     settings.port = settings.port.clamp(1, 65535);
-    if (!const {'auto', 'influx', 'sk', 'rewind'}.contains(
-      settings.historySource,
-    )) {
-      settings.historySource = 'auto';
+    // "Automático" ya no existe: probaba InfluxDB y caía a Signal K en cada
+    // consulta, y en los barcos sin InfluxDB solo añadía un fallo previo a
+    // todo. Quien lo tenía pasa a InfluxDB si lo tiene configurado (REWIND)
+    // y si no, al histórico por defecto de Signal K (el grabador REWIND en
+    // DRAGUEUR y QUINTO REAL).
+    if (!const {'influx', 'sk', 'rewind'}.contains(settings.historySource)) {
+      settings.historySource = settings.influxToken.trim().isNotEmpty
+          ? 'influx'
+          : 'sk';
     }
     skHistoryProvider = skHistoryProviderFor(settings.historySource);
     if (!const {'dia', 'noche', 'auto'}.contains(settings.brightnessMode)) {
@@ -13308,13 +13313,6 @@ class _DashboardState extends State<Dashboard> {
                             const SizedBox(height: 4),
                             SegmentedButton<String>(
                               segments: const [
-                                ButtonSegment(
-                                  value: 'auto',
-                                  label: Text(
-                                    'Automático',
-                                    style: TextStyle(fontSize: 12),
-                                  ),
-                                ),
                                 ButtonSegment(
                                   value: 'influx',
                                   label: Text(
