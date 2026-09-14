@@ -164,7 +164,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
     final influxAggregate = angular ? 'last' : 'mean';
     final skAggregate = angular ? 'last' : 'average';
     switch (widget.historySource) {
-      case 'sk':
+      case 'sk' || 'rewind':
         return _fetchSkMetric(def, last24h, aggregate: skAggregate);
       case 'influx':
         return _fetchInfluxMetric(def, last24h, aggregate: influxAggregate);
@@ -347,7 +347,7 @@ class _YawAnalysisDialogState extends State<YawAnalysisDialog> {
     bool last24h,
   ) async {
     switch (widget.historySource) {
-      case 'sk':
+      case 'sk' || 'rewind':
         return _fetchSkPosition(last24h);
       case 'influx':
         return influxPositionQuery(

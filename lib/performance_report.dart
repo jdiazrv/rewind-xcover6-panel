@@ -397,7 +397,7 @@ Future<List<GraphPoint>> loadReportHorizonSog(
     switch (s.historySource) {
       case 'influx':
         return await fromInflux();
-      case 'sk':
+      case 'sk' || 'rewind':
         return await fromSk();
       default:
         try {
@@ -1592,7 +1592,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     switch (s.historySource) {
       case 'influx':
         return fromInflux();
-      case 'sk':
+      case 'sk' || 'rewind':
         return fromSk();
       default:
         try {
@@ -3140,7 +3140,7 @@ pw.Widget pdfPolarTable(PolarData polar, PdfColor color) {
         pw.TableRow(
           children: [
             cell(
-              '${polar.twaBands[b].loDeg} a ${polar.twaBands[b].hiDeg} grados',
+              '${polar.twaBands[b].loDeg} a ${polar.twaBands[b].hiDeg}º',
               header: true,
             ),
             for (final w in visibleColumns)

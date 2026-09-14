@@ -2890,6 +2890,7 @@ class _DashboardState extends State<Dashboard> {
         (kIsWeb ? 'dia' : settings.brightnessMode);
     settings.historySource =
         prefs.getString('historySource') ?? settings.historySource;
+    skHistoryProvider = skHistoryProviderFor(settings.historySource);
     settings.influxHost = prefs.getString('influxHost') ?? settings.influxHost;
     settings.influxOrg = prefs.getString('influxOrg') ?? settings.influxOrg;
     final storedInfluxToken = await _readCredential(
@@ -3202,9 +3203,12 @@ class _DashboardState extends State<Dashboard> {
   Future<void> _migrateAndValidateSettings(SharedPreferences prefs) async {
     final previousVersion = prefs.getInt('settingsSchemaVersion') ?? 0;
     settings.port = settings.port.clamp(1, 65535);
-    if (!const {'auto', 'influx', 'sk'}.contains(settings.historySource)) {
+    if (!const {'auto', 'influx', 'sk', 'rewind'}.contains(
+      settings.historySource,
+    )) {
       settings.historySource = 'auto';
     }
+    skHistoryProvider = skHistoryProviderFor(settings.historySource);
     if (!const {'dia', 'noche', 'auto'}.contains(settings.brightnessMode)) {
       settings.brightnessMode = 'dia';
     }
@@ -6037,7 +6041,8 @@ class _DashboardState extends State<Dashboard> {
       if (settings.demoMode) {
         points = demoGraphSeries(mPressure, '-24h', '10m');
         source = 'histórico demo';
-      } else if (settings.historySource == 'sk') {
+      } else if (settings.historySource == 'sk' ||
+          settings.historySource == 'rewind') {
         points = await fromSignalK();
         source = 'histórico Signal K';
       } else if (settings.historySource == 'influx') {
@@ -12119,7 +12124,7 @@ class _DashboardState extends State<Dashboard> {
       try {
         if (source == 'influx') {
           points = await influx();
-        } else if (source == 'sk') {
+        } else if (source == 'sk' || source == 'rewind') {
           points = await sk();
         } else {
           source = 'InfluxDB';
@@ -13302,10 +13307,20 @@ class _DashboardState extends State<Dashboard> {
                                     style: TextStyle(fontSize: 12),
                                   ),
                                 ),
+                                ButtonSegment(
+                                  value: 'rewind',
+                                  label: Text(
+                                    'Grabador REWIND',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
                               ],
                               selected: {settings.historySource},
                               onSelectionChanged: (v) {
                                 setSt(() => settings.historySource = v.first);
+                                skHistoryProvider = skHistoryProviderFor(
+                                  settings.historySource,
+                                );
                                 setState(() {});
                                 unawaited(_saveSettings());
                               },
@@ -13315,6 +13330,7 @@ class _DashboardState extends State<Dashboard> {
                               switch (settings.historySource) {
                                 'influx' => 'Siempre usa InfluxDB.',
                                 'sk' => 'Siempre usa el History API de Signal K (funciona con KIP/SQLite u otro proveedor registrado).',
+                                'rewind' => 'Siempre usa el grabador de histórico del plugin REWIND en el servidor Signal K: guarda todo lo que muestra la app y apenas escribe en la tarjeta SD.',
                                 _ => 'Prueba InfluxDB primero; si falla, usa el History API de Signal K (KIP/SQLite) automáticamente.',
                               },
                               style: const TextStyle(
@@ -13322,7 +13338,8 @@ class _DashboardState extends State<Dashboard> {
                                 fontSize: 11,
                               ),
                             ),
-                            if (settings.historySource != 'sk') ...[
+                            if (settings.historySource != 'sk' &&
+                                settings.historySource != 'rewind') ...[
                               const SizedBox(height: 14),
                               const Text('INFLUXDB', style: lbl),
                               gap,

@@ -199,7 +199,7 @@ class _GraphDialogState extends State<GraphDialog> {
     switch (widget.historySource) {
       case 'influx':
         return (await _fetchInflux(r, def), false);
-      case 'sk':
+      case 'sk' || 'rewind':
         return (await _fetchSk(r, def), true);
       default: // 'auto' — prefer InfluxDB (richer/longer history), fall back
         // to the Signal K History API (e.g. KIP/SQLite) if it fails.
@@ -413,7 +413,7 @@ class _GraphDialogState extends State<GraphDialog> {
               ),
               const SizedBox(height: 8),
               Text(
-                widget.historySource == 'sk'
+                widget.historySource == 'sk' || widget.historySource == 'rewind'
                     ? widget.skHost
                     : widget.influxHost,
                 style: const TextStyle(color: cMuted, fontSize: 13),

@@ -218,6 +218,15 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
   return (lat: _sortAndDedupe(lat), lon: _sortAndDedupe(lon));
 }
 
+/// Proveedor concreto del History API al que van todas las consultas de
+/// Signal K. Null = el proveedor por defecto del servidor. Con la fuente
+/// "Grabador REWIND" apunta al grabador del plugin, así funciona aunque el
+/// servidor tenga además KIP o InfluxDB registrados.
+String? skHistoryProvider;
+const rewindHistoryProviderId = 'rewind-xcover6-panel';
+String? skHistoryProviderFor(String historySource) =>
+    historySource == 'rewind' ? rewindHistoryProviderId : null;
+
 // ─── Signal K History API (standard SK endpoint — the same API a boat's
 // InfluxDB plugin OR a SQLite-backed provider like KIP can serve, so this one
 // query works regardless of which the server has registered) ────────────────
@@ -243,6 +252,7 @@ Future<List<GraphPoint>> skHistoryQuery({
     'from': from.toIso8601String(),
     'to': to.toIso8601String(),
     'resolution': resolution.inSeconds.clamp(1, 1 << 30).toString(),
+    'provider': ?skHistoryProvider,
   });
   final response = await http
       .get(
@@ -297,6 +307,7 @@ Future<List<({DateTime time, String value})>> skHistoryStateQuery({
     'from': start.toUtc().toIso8601String(),
     'to': stop.toUtc().toIso8601String(),
     'resolution': resolution.inSeconds.clamp(1, 1 << 30).toString(),
+    'provider': ?skHistoryProvider,
   });
   final response = await http
       .get(

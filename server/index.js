@@ -24,6 +24,8 @@
  */
 
 const https = require('https');
+const path = require('path');
+const { createRecorder, DEFAULTS: HISTORY_DEFAULTS } = require('./history_recorder');
 
 const EARTH_RADIUS_M = 6371000;
 const OWN_SOURCE_PREFIX = 'rewind-panel-anchor';
@@ -180,8 +182,137 @@ module.exports = function (app) {
         default: 60,
         minimum: 10,
       },
+      history: {
+        type: 'object',
+        title: 'Grabador de histórico REWIND',
+        description:
+          'Guarda en memoria todo lo que la app REWIND muestra con histórico ' +
+          'y lo vuelca a disco por horas, comprimido, para no desgastar la ' +
+          'tarjeta SD. Se registra como proveedor del History API de Signal K.',
+        properties: {
+          enabled: {
+            type: 'boolean',
+            title: 'Grabar histórico',
+            default: HISTORY_DEFAULTS.enabled,
+          },
+          registerAsHistoryProvider: {
+            type: 'boolean',
+            title: 'Registrar como proveedor del History API de Signal K',
+            default: HISTORY_DEFAULTS.registerAsHistoryProvider,
+          },
+          retentionHours: {
+            type: 'number',
+            title: 'Horas de histórico que se conservan',
+            default: HISTORY_DEFAULTS.retentionHours,
+            minimum: 1,
+            maximum: 336,
+          },
+          bucketSeconds: {
+            type: 'number',
+            title:
+              'Resolución en segundos (se guarda media, mínimo, máximo y último de cada intervalo)',
+            default: HISTORY_DEFAULTS.bucketSeconds,
+            minimum: 1,
+            maximum: 600,
+          },
+          flushMinutes: {
+            type: 'number',
+            title:
+              'Minutos entre escrituras a disco (lo no escrito se pierde si se corta la corriente de golpe)',
+            default: HISTORY_DEFAULTS.flushMinutes,
+            minimum: 5,
+            maximum: 1440,
+          },
+          maxSeries: {
+            type: 'number',
+            title: 'Máximo de rutas distintas que se graban',
+            default: HISTORY_DEFAULTS.maxSeries,
+            minimum: 10,
+            maximum: 5000,
+          },
+          maxRowsPerQuery: {
+            type: 'number',
+            title: 'Máximo de filas por consulta',
+            default: HISTORY_DEFAULTS.maxRowsPerQuery,
+            minimum: 50,
+            maximum: 100000,
+          },
+          includePaths: {
+            type: 'array',
+            title: 'Rutas que se graban (* = un nivel, ** = cualquier profundidad)',
+            items: { type: 'string' },
+            default: HISTORY_DEFAULTS.includePaths,
+          },
+          excludePaths: {
+            type: 'array',
+            title: 'Rutas excluidas aunque encajen arriba',
+            items: { type: 'string' },
+            default: HISTORY_DEFAULTS.excludePaths,
+          },
+          textPaths: {
+            type: 'array',
+            title: 'Rutas de texto que se graban (estado del ancla, estado del barco…)',
+            items: { type: 'string' },
+            default: HISTORY_DEFAULTS.textPaths,
+          },
+        },
+      },
     },
   };
+
+  let recorder = null;
+  let recorderFlushTimer = null;
+  let recorderDeltaListener = null;
+  let recorderProviderRegistered = false;
+
+  function startHistoryRecorder(historyOptions) {
+    const cfg = historyOptions || {};
+    if (cfg.enabled !== true) return;
+    const dataDir =
+      typeof app.getDataDirPath === 'function'
+        ? app.getDataDirPath()
+        : path.join(process.cwd(), 'rewind-history');
+    recorder = createRecorder({ app, dataDir, options: cfg });
+    const loadedHours = recorder.load();
+    recorderDeltaListener = (delta) => recorder.handleDelta(delta);
+    app.signalk.on('delta', recorderDeltaListener);
+    recorderFlushTimer = setInterval(
+      () => recorder.flush(),
+      recorder.options.flushMinutes * 60000,
+    );
+    recorderFlushTimer.unref?.();
+    if (
+      recorder.options.registerAsHistoryProvider &&
+      typeof app.registerHistoryApiProvider === 'function'
+    ) {
+      app.registerHistoryApiProvider(recorder.provider);
+      recorderProviderRegistered = true;
+    }
+    app.debug(
+      `[histórico] grabando; ${loadedHours} horas recuperadas de ${dataDir}`,
+    );
+  }
+
+  function stopHistoryRecorder() {
+    if (!recorder) return;
+    if (recorderDeltaListener) {
+      app.signalk.removeListener('delta', recorderDeltaListener);
+    }
+    clearInterval(recorderFlushTimer);
+    // Parada ordenada (reinicio de Signal K, apagado): se vuelca lo que haya
+    // en memoria para no perder la última hora.
+    recorder.flush();
+    if (
+      recorderProviderRegistered &&
+      typeof app.unregisterHistoryApiProvider === 'function'
+    ) {
+      app.unregisterHistoryApiProvider();
+    }
+    recorder = null;
+    recorderFlushTimer = null;
+    recorderDeltaListener = null;
+    recorderProviderRegistered = false;
+  }
 
   // ── Live state, entirely mirrored from what the app itself publishes ──
   let unsubscribes = [];
@@ -570,9 +701,21 @@ module.exports = function (app) {
     unsubscribes.push(() => clearInterval(checkTimer));
 
     app.setPluginStatus('Watching for the REWIND app\'s anchor state');
+
+    try {
+      startHistoryRecorder(plugin.configuration.history);
+    } catch (err) {
+      recorder = null;
+      app.setPluginError(`Grabador de histórico: ${err && err.message}`);
+    }
   };
 
   plugin.stop = function () {
+    try {
+      stopHistoryRecorder();
+    } catch (err) {
+      app.debug(`[histórico] error al parar: ${err && err.message}`);
+    }
     unsubscribes.forEach((fn) => fn());
     unsubscribes = [];
     checkTimer = null;
