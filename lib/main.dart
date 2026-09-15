@@ -245,7 +245,11 @@ class _DashboardState extends State<Dashboard> {
   // flash the header between green and orange — only escalate to the
   // "SK espera"/"SK desconectado" state if the drop actually outlasts it.
   Timer? _skStatusGraceTimer;
-  static const _skStatusGrace = Duration(seconds: 3);
+  // Estado físico del stream, separado del estado visual `signalK.connected`.
+  // Este último tiene una tolerancia configurable para no parpadear ante un
+  // microcorte; ANC, en cambio, debe saber inmediatamente que se perdió TODO
+  // Signal K y no confundirlo con «Signal K funciona pero falta solo GPS».
+  bool _signalKStreamHasData = false;
   Timer? weatherTimer;
   Timer? _demoTimer;
   final _demoClockStart = DateTime.now();
@@ -890,7 +894,8 @@ class _DashboardState extends State<Dashboard> {
         }
         if (current.statusCode != 200) return;
         final decoded = jsonDecode(current.body);
-        final existing = decoded is Map<String, dynamic> &&
+        final existing =
+            decoded is Map<String, dynamic> &&
                 decoded['configuration'] is Map<String, dynamic>
             ? Map<String, dynamic>.from(
                 decoded['configuration'] as Map<String, dynamic>,
@@ -2915,6 +2920,10 @@ class _DashboardState extends State<Dashboard> {
     settings.gpsFallbackConsent = prefs.containsKey('gpsFallbackConsent')
         ? prefs.getBool('gpsFallbackConsent')
         : settings.gpsFallbackConsent;
+    settings.signalKDisconnectGraceSeconds =
+        (prefs.getInt('signalKDisconnectGraceSeconds') ??
+                settings.signalKDisconnectGraceSeconds)
+            .clamp(3, 60);
     settings.keepAwake = prefs.getBool('keepAwake') ?? settings.keepAwake;
     // 0..2: CRUCERO, TÉCNICA y POLAR (esta última solo si hay polar
     // elegida). Estaba topado en 1, así que al reiniciar estando en POLAR
@@ -3372,6 +3381,10 @@ class _DashboardState extends State<Dashboard> {
     if (settings.gpsFallbackConsent != null) {
       await prefs.setBool('gpsFallbackConsent', settings.gpsFallbackConsent!);
     }
+    await prefs.setInt(
+      'signalKDisconnectGraceSeconds',
+      settings.signalKDisconnectGraceSeconds,
+    );
     await prefs.setBool('keepAwake', settings.keepAwake);
     await prefs.setString('brightnessMode', settings.brightnessMode);
     await prefs.setString('historySource', settings.historySource);
@@ -4040,6 +4053,7 @@ class _DashboardState extends State<Dashboard> {
     // simulated data landed on the same model at once and flickered.
     // Guarding here once covers all of them instead of patching each.
     if (settings.demoMode) return;
+    _signalKStreamHasData = false;
     // A reconnect timer armed by an earlier disconnect (real or the stale-
     // callback race fixed below) must never be left pending across a fresh
     // connect — it would fire 5s later and tear down the connection this
@@ -4222,10 +4236,13 @@ class _DashboardState extends State<Dashboard> {
       // This watchdog instead catches the case `ready` was meant to: no
       // data at all within a reasonable window means something's actually
       // wrong (bad host, dead server), so retry.
-      Timer(const Duration(seconds: 10), () {
+      Timer(Duration(seconds: settings.signalKDisconnectGraceSeconds), () {
         if (!mounted || myGeneration != _connectGeneration) return;
-        if (!signalK.connected) {
-          debugPrint('[SK] 10s watchdog fired, gen=$myGeneration, no data yet');
+        if (!_signalKStreamHasData) {
+          debugPrint(
+            '[SK] ${settings.signalKDisconnectGraceSeconds}s watchdog fired, '
+            'gen=$myGeneration, no data yet',
+          );
           _onSignalKError('Sin respuesta del servidor Signal K', myGeneration);
         }
       });
@@ -4487,6 +4504,7 @@ class _DashboardState extends State<Dashboard> {
     }
     if (changed) _repairCorruptedAnchorDroppedAt();
     if ((changed || aisChanged) && mounted) {
+      if (changed) _signalKStreamHasData = true;
       if (changed) _skStatusGraceTimer?.cancel();
       if (changed && !signalK.connected) {
         debugPrint('[SK] first/re data received, marking connected=true');
@@ -4935,6 +4953,7 @@ class _DashboardState extends State<Dashboard> {
     // started must not touch state belonging to that newer connection —
     // see the comment where this listener is wired up in _connectSignalK.
     if (!mounted || generation != _connectGeneration) return;
+    _signalKStreamHasData = false;
     unawaited(_recordEvent('SK_ERROR', error.runtimeType.toString()));
     _scheduleReconnect();
     _debounceDisconnected('SK espera');
@@ -4948,6 +4967,7 @@ class _DashboardState extends State<Dashboard> {
     // Same stale-generation guard as _onSignalKError — closing the OLD
     // channel's sink in _connectSignalK triggers exactly this callback.
     if (!mounted || generation != _connectGeneration) return;
+    _signalKStreamHasData = false;
     unawaited(_recordEvent('SK_DISCONNECTED'));
     _scheduleReconnect();
     _debounceDisconnected('SK desconectado');
@@ -4956,16 +4976,19 @@ class _DashboardState extends State<Dashboard> {
   // Reconnection itself (see _scheduleReconnect) always starts right away
   // regardless of this debounce — only the *visible* orange/red status is
   // delayed, so a connection that recovers on its own within
-  // _skStatusGrace never flickers in the UI at all.
+  // la tolerancia configurada nunca parpadea en la UI.
   void _debounceDisconnected(String status) {
     _skStatusGraceTimer?.cancel();
-    _skStatusGraceTimer = Timer(_skStatusGrace, () {
-      if (!mounted) return;
-      setState(() {
-        signalK.connected = false;
-        signalK.status = status;
-      });
-    });
+    _skStatusGraceTimer = Timer(
+      Duration(seconds: settings.signalKDisconnectGraceSeconds),
+      () {
+        if (!mounted) return;
+        setState(() {
+          signalK.connected = false;
+          signalK.status = status;
+        });
+      },
+    );
   }
 
   void _scheduleReconnect() {
@@ -5120,6 +5143,7 @@ class _DashboardState extends State<Dashboard> {
   void _startDemoMode() {
     reconnectTimer?.cancel();
     _skStatusGraceTimer?.cancel();
+    _signalKStreamHasData = false;
     channel?.sink.close();
     // Invalidates any _connectSignalK() still in flight (e.g. stuck
     // resolving mDNS) so it can't land a real connection after DEMO was
@@ -11712,6 +11736,15 @@ class _DashboardState extends State<Dashboard> {
           : null,
       ownPositionUpdatedAt: signalK.positionUpdate,
       skConnected: signalK.connected,
+      // No basta con el estado visual (que conserva una gracia para evitar
+      // parpadeos): el GPS del teléfono solo se ofrece si siguen llegando
+      // OTROS datos de Signal K y lo único ausente es navigation.position.
+      skDataAvailable:
+          settings.demoMode ||
+          (_signalKStreamHasData &&
+              signalK.lastUpdate != null &&
+              DateTime.now().difference(signalK.lastUpdate!).inSeconds <=
+                  settings.signalKDisconnectGraceSeconds),
       // Deliberately just a CURRENT heading, not COG and not the last value
       // retained in the model. At anchor COG is noisy-to-meaningless and a
       // frozen compass value makes the hull keep pointing in a direction we
@@ -12236,6 +12269,12 @@ class _DashboardState extends State<Dashboard> {
               keywords: 'guardar reconectar probar test cambios sin guardar automatico',
               tab: 0,
             ),
+            (
+              title: 'Tolerancia a cortes breves',
+              section: 'CONEXIÓN · Servidor Signal K',
+              keywords: 'tolerancia segundos microcorte perdida desconexion wifi reconexion parpadeo',
+              tab: 0,
+            ),
 
             // SENSORES
             (
@@ -12698,6 +12737,33 @@ class _DashboardState extends State<Dashboard> {
                                     ? 'Conectado'
                                     : 'Desconectado',
                                 color: signalK.connected ? cGreen : cRed,
+                              ),
+                              const SizedBox(height: 8),
+                              _ThresholdRow(
+                                label: 'Tolerancia a cortes breves',
+                                unit: 's',
+                                value: settings.signalKDisconnectGraceSeconds
+                                    .toDouble(),
+                                min: 3,
+                                max: 60,
+                                divisions: 57,
+                                onChanged: (value) {
+                                  setSt(
+                                    () =>
+                                        settings.signalKDisconnectGraceSeconds =
+                                            value.round(),
+                                  );
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                              ),
+                              const Text(
+                                'La reconexión empieza inmediatamente. Este tiempo solo evita declarar una desconexión por un microcorte y fija la espera inicial sin datos.',
+                                style: TextStyle(
+                                  color: cMuted,
+                                  fontSize: 11,
+                                  height: 1.35,
+                                ),
                               ),
                               const SizedBox(height: 8),
                               if (_isSignalKWebapp) ...[

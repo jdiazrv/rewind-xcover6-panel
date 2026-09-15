@@ -52,9 +52,36 @@
       visibility: hidden !important;
       pointer-events: none !important;
     }
+    #rewind-rotate {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;
+      box-sizing: border-box;
+      padding: 28px;
+      background: #061116;
+      color: #e8f4f7;
+      font: 700 18px/1.4 system-ui, sans-serif;
+      text-align: center;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #rewind-rotate strong {
+      color: #20c9d8;
+      font-size: 22px;
+    }
+    @media (orientation: portrait) and (pointer: coarse) {
+      #rewind-rotate.phone-portrait { display: flex; }
+    }
   </style>
 </head>
 <body>
+  <div id="rewind-rotate" role="status" aria-live="polite">
+    <strong>Gira el teléfono</strong>
+    REWIND está diseñado para usarse en horizontal.
+  </div>
   <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
@@ -128,20 +155,57 @@
     // dispatch a moment after the OS reports the rotation is the standard
     // workaround — it's what nudges CanvasKit into recomputing that
     // transform against the settled viewport instead of a stale one.
-    window.addEventListener('orientationchange', () => {
-      setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
-    });
+    const rotateOverlay = document.getElementById('rewind-rotate');
+    const isPhonePortrait = () => {
+      const coarse = window.matchMedia('(pointer: coarse)').matches;
+      const portrait = window.matchMedia('(orientation: portrait)').matches;
+      const shortSide = Math.min(screen.width || innerWidth, screen.height || innerHeight);
+      return coarse && portrait && shortSide <= 600;
+    };
+    const syncPhoneOrientation = () => {
+      rotateOverlay.classList.toggle('phone-portrait', isPhonePortrait());
+    };
+    // CanvasKit sometimes samples the viewport while the browser chrome is
+    // still animating. Repeating the relayout after the dimensions settle
+    // keeps hit testing aligned with the menu after a real phone rotation.
+    const settleViewport = () => {
+      syncPhoneOrientation();
+      [50, 250, 600, 1200].forEach(delay => setTimeout(() => {
+        window.scrollTo(0, 0);
+        window.dispatchEvent(new Event('resize'));
+      }, delay));
+    };
+    window.addEventListener('orientationchange', settleViewport);
     if (window.visualViewport) {
       let lastW = window.visualViewport.width;
       window.visualViewport.addEventListener('resize', () => {
         const w = window.visualViewport.width;
         if (w !== lastW) {
           lastW = w;
-          setTimeout(() => window.dispatchEvent(new Event('resize')), 300);
+          settleViewport();
         }
       });
     }
+    syncPhoneOrientation();
+
+    // Do not initialise Flutter against a phone's portrait viewport and then
+    // rotate its already-created canvas. Starting it once the phone is
+    // horizontal avoids the stale touch transform at its source. Desktop and
+    // tablet browsers continue to boot immediately.
+    let flutterStarted = false;
+    const startFlutter = () => {
+      if (flutterStarted || isPhonePortrait()) return;
+      flutterStarted = true;
+      const script = document.createElement('script');
+      script.src = 'flutter_bootstrap.js';
+      script.async = true;
+      document.body.appendChild(script);
+    };
+    startFlutter();
+    window.matchMedia('(orientation: landscape)').addEventListener('change', () => {
+      syncPhoneOrientation();
+      startFlutter();
+    });
   </script>
-  <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

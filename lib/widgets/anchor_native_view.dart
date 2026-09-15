@@ -76,6 +76,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.ownLon,
     required this.ownPositionUpdatedAt,
     required this.skConnected,
+    required this.skDataAvailable,
     required this.headingDeg,
     required this.sogKn,
     required this.depthM,
@@ -129,6 +130,10 @@ class NativeAnchorView extends StatefulWidget {
   // never present "FONDEADO" (or any drag/outside reading) as if it were
   // confirmed. Explicit per request 2026-09-02.
   final bool skConnected;
+  // True only while the main stream is alive AND other real Signal K data
+  // keeps arriving. A total server outage must never trigger the device-GPS
+  // offer: that fallback is specifically for a missing navigation.position.
+  final bool skDataAvailable;
   final double? headingDeg;
   final double? sogKn;
   final double? depthM;
@@ -503,7 +508,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   }
 
   Future<void> _maybeOfferDeviceGps() async {
-    if (_hasSkPosition || _askedDeviceGps) return;
+    if (_hasSkPosition || !widget.skDataAvailable || _askedDeviceGps) return;
     if (widget.gpsFallbackConsent == false) return;
     _askedDeviceGps = true;
     if (widget.gpsFallbackConsent == null) {
@@ -756,6 +761,13 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       // decision was about the previous reappearance, not a standing
       // preference, so it's re-askable next time SK comes back too.
       _preferDeviceGps = false;
+      // A new episode starts either when a valid position has just vanished,
+      // or when Signal K recovers without bringing navigation.position back.
+      // Do not consume the one-shot guard while the whole server is absent.
+      if ((old.ownLat != null && old.ownLon != null) ||
+          (!old.skDataAvailable && widget.skDataAvailable)) {
+        _askedDeviceGps = false;
+      }
       unawaited(_maybeOfferDeviceGps());
       return;
     }
@@ -809,7 +821,9 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_hasSkPosition) unawaited(_maybeOfferDeviceGps());
+      if (!_hasSkPosition && widget.skDataAvailable) {
+        unawaited(_maybeOfferDeviceGps());
+      }
       final lat = _effectiveLat, lon = _effectiveLon;
       if (lat != null && lon != null) {
         _mapController.move(ll.LatLng(lat, lon), 18);

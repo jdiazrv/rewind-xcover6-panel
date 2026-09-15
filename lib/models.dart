@@ -3211,6 +3211,11 @@ class SettingsModel {
   Map<String, Map<String, dynamic>> anchorConfigJsonByHost = {};
   String host = 'lysmarine.local';
   int port = 3000;
+  // Tiempo que se tolera un corte breve antes de presentar Signal K como
+  // desconectado. La reconexión se intenta inmediatamente; este margen solo
+  // evita que un cambio de WiFi o un microcorte haga parpadear toda la UI.
+  // También limita cuánto se espera al conectar sin recibir ningún dato.
+  int signalKDisconnectGraceSeconds = 10;
   String authBase64 = ''; // Basic auth for the Signal K connection (WebSocket + REST) — not InfluxDB.
   // Separate from authBase64 above: a real Signal K session login (POST
   // /signalk/v1/auth/login). Only meaningful running as the Signal K
