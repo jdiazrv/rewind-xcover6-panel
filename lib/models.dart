@@ -3399,6 +3399,9 @@ class SettingsModel {
   bool anchorDetectPhoneLeftBySteps = false;
   bool anchorDetectPhoneLeftByWifi = false;
   String anchorBoatWifiSsid = '';
+  // false: ANC puede continuar sin servidor usando solo el GPS local;
+  // true: el respaldo solo se ofrece si Signal K sigue enviando otros datos.
+  bool anchorPhoneGpsRequiresSignalK = false;
   // ANC's own HUD (voltage/SOC/corriente of the house/service battery) —
   // off by default since not everyone fondeando wants a battery readout
   // competing for space with viento/profundidad. Reported live 2026-09-06.

@@ -250,6 +250,9 @@ class _DashboardState extends State<Dashboard> {
   // microcorte; ANC, en cambio, debe saber inmediatamente que se perdió TODO
   // Signal K y no confundirlo con «Signal K funciona pero falta solo GPS».
   bool _signalKStreamHasData = false;
+  // Inicio del episodio sin datos. ANC espera la tolerancia configurada antes
+  // de ofrecer el GPS del teléfono, pero después puede funcionar solo con él.
+  DateTime? _signalKUnavailableSince;
   Timer? weatherTimer;
   Timer? _demoTimer;
   final _demoClockStart = DateTime.now();
@@ -3068,6 +3071,9 @@ class _DashboardState extends State<Dashboard> {
         settings.anchorDetectPhoneLeftByWifi;
     settings.anchorBoatWifiSsid =
         prefs.getString('anchorBoatWifiSsid') ?? settings.anchorBoatWifiSsid;
+    settings.anchorPhoneGpsRequiresSignalK =
+        prefs.getBool('anchorPhoneGpsRequiresSignalK') ??
+        settings.anchorPhoneGpsRequiresSignalK;
     settings.anchorShowElectrical =
         prefs.getBool('anchorShowElectrical') ?? settings.anchorShowElectrical;
     settings.alarmEngineOilSound =
@@ -3569,6 +3575,10 @@ class _DashboardState extends State<Dashboard> {
       settings.anchorDetectPhoneLeftByWifi,
     );
     await prefs.setString('anchorBoatWifiSsid', settings.anchorBoatWifiSsid);
+    await prefs.setBool(
+      'anchorPhoneGpsRequiresSignalK',
+      settings.anchorPhoneGpsRequiresSignalK,
+    );
     await prefs.setBool('anchorShowElectrical', settings.anchorShowElectrical);
     await prefs.setBool('alarmEngineOilSound', settings.alarmEngineOilSound);
     await prefs.setDouble(
@@ -4054,6 +4064,7 @@ class _DashboardState extends State<Dashboard> {
     // Guarding here once covers all of them instead of patching each.
     if (settings.demoMode) return;
     _signalKStreamHasData = false;
+    _signalKUnavailableSince ??= DateTime.now();
     // A reconnect timer armed by an earlier disconnect (real or the stale-
     // callback race fixed below) must never be left pending across a fresh
     // connect — it would fire 5s later and tear down the connection this
@@ -4504,7 +4515,10 @@ class _DashboardState extends State<Dashboard> {
     }
     if (changed) _repairCorruptedAnchorDroppedAt();
     if ((changed || aisChanged) && mounted) {
-      if (changed) _signalKStreamHasData = true;
+      if (changed) {
+        _signalKStreamHasData = true;
+        _signalKUnavailableSince = null;
+      }
       if (changed) _skStatusGraceTimer?.cancel();
       if (changed && !signalK.connected) {
         debugPrint('[SK] first/re data received, marking connected=true');
@@ -4954,6 +4968,7 @@ class _DashboardState extends State<Dashboard> {
     // see the comment where this listener is wired up in _connectSignalK.
     if (!mounted || generation != _connectGeneration) return;
     _signalKStreamHasData = false;
+    _signalKUnavailableSince ??= DateTime.now();
     unawaited(_recordEvent('SK_ERROR', error.runtimeType.toString()));
     _scheduleReconnect();
     _debounceDisconnected('SK espera');
@@ -4968,6 +4983,7 @@ class _DashboardState extends State<Dashboard> {
     // channel's sink in _connectSignalK triggers exactly this callback.
     if (!mounted || generation != _connectGeneration) return;
     _signalKStreamHasData = false;
+    _signalKUnavailableSince ??= DateTime.now();
     unawaited(_recordEvent('SK_DISCONNECTED'));
     _scheduleReconnect();
     _debounceDisconnected('SK desconectado');
@@ -5144,6 +5160,7 @@ class _DashboardState extends State<Dashboard> {
     reconnectTimer?.cancel();
     _skStatusGraceTimer?.cancel();
     _signalKStreamHasData = false;
+    _signalKUnavailableSince = null;
     channel?.sink.close();
     // Invalidates any _connectSignalK() still in flight (e.g. stuck
     // resolving mDNS) so it can't land a real connection after DEMO was
@@ -11736,14 +11753,19 @@ class _DashboardState extends State<Dashboard> {
           : null,
       ownPositionUpdatedAt: signalK.positionUpdate,
       skConnected: signalK.connected,
-      // No basta con el estado visual (que conserva una gracia para evitar
-      // parpadeos): el GPS del teléfono solo se ofrece si siguen llegando
-      // OTROS datos de Signal K y lo único ausente es navigation.position.
-      skDataAvailable:
+      // Si Signal K sigue vivo pero solo falta posición se ofrece enseguida.
+      // Si ha caído por completo, se espera la tolerancia de CFG para no
+      // molestar por un microcorte; vencida esta, ANC puede operar únicamente
+      // con el GPS del teléfono y mantener activa la alarma de fondeo.
+      phoneGpsFallbackAllowed:
           settings.demoMode ||
           (_signalKStreamHasData &&
               signalK.lastUpdate != null &&
               DateTime.now().difference(signalK.lastUpdate!).inSeconds <=
+                  settings.signalKDisconnectGraceSeconds) ||
+          (!settings.anchorPhoneGpsRequiresSignalK &&
+              _signalKUnavailableSince != null &&
+              DateTime.now().difference(_signalKUnavailableSince!).inSeconds >=
                   settings.signalKDisconnectGraceSeconds),
       // Deliberately just a CURRENT heading, not COG and not the last value
       // retained in the model. At anchor COG is noisy-to-meaningless and a
@@ -12476,6 +12498,12 @@ class _DashboardState extends State<Dashboard> {
               section: 'FONDEO · Sin posición',
               keywords:
                   'sin posicion gps perdida señal fondeo ancla alarma garreo',
+              tab: 5,
+            ),
+            (
+              title: 'GPS del teléfono sin Signal K',
+              section: 'FONDEO · Fuente de posición',
+              keywords: 'gps telefono movil autonomo signalk segundo plano posicion respaldo',
               tab: 5,
             ),
             (
@@ -14585,6 +14613,80 @@ class _DashboardState extends State<Dashboard> {
                       constraints: const BoxConstraints(maxWidth: 760),
                       child: SettingsResponsiveGroups(
                         children: [
+                          SettingsGroup(
+                            title: 'FUENTE DE POSICIÓN',
+                            icon: Icons.gps_fixed,
+                            children: [
+                              const Text(
+                                'Cuando falte la posición del barco, ¿puede ANC usar el GPS de este teléfono si tampoco hay conexión con Signal K?',
+                                style: TextStyle(
+                                  color: cText,
+                                  fontSize: 12,
+                                  height: 1.35,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SegmentedButton<bool>(
+                                segments: const [
+                                  ButtonSegment(
+                                    value: false,
+                                    icon: Icon(Icons.phone_android),
+                                    label: Text('Sin Signal K'),
+                                  ),
+                                  ButtonSegment(
+                                    value: true,
+                                    icon: Icon(Icons.dns_outlined),
+                                    label: Text('Requiere Signal K'),
+                                  ),
+                                ],
+                                selected: {
+                                  settings.anchorPhoneGpsRequiresSignalK,
+                                },
+                                showSelectedIcon: false,
+                                onSelectionChanged: (values) {
+                                  setSt(
+                                    () =>
+                                        settings.anchorPhoneGpsRequiresSignalK =
+                                            values.first,
+                                  );
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                              ),
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: cOrange.withValues(alpha: 0.10),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: cOrange.withValues(alpha: 0.45),
+                                  ),
+                                ),
+                                child: const Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      Icons.warning_amber_rounded,
+                                      color: cOrange,
+                                      size: 19,
+                                    ),
+                                    SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        'El modo sin Signal K no es una alarma en segundo plano: REWIND debe permanecer abierta y visible, con el teléfono a bordo, alimentación suficiente y permiso de ubicación activo.',
+                                        style: TextStyle(
+                                          color: cOrange,
+                                          fontSize: 11,
+                                          height: 1.35,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                           SettingsGroup(
                             title: 'CAMBIO DE PROFUNDIDAD',
                             icon: Icons.water,

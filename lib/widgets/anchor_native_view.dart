@@ -76,7 +76,7 @@ class NativeAnchorView extends StatefulWidget {
     required this.ownLon,
     required this.ownPositionUpdatedAt,
     required this.skConnected,
-    required this.skDataAvailable,
+    required this.phoneGpsFallbackAllowed,
     required this.headingDeg,
     required this.sogKn,
     required this.depthM,
@@ -130,10 +130,10 @@ class NativeAnchorView extends StatefulWidget {
   // never present "FONDEADO" (or any drag/outside reading) as if it were
   // confirmed. Explicit per request 2026-09-02.
   final bool skConnected;
-  // True only while the main stream is alive AND other real Signal K data
-  // keeps arriving. A total server outage must never trigger the device-GPS
-  // offer: that fallback is specifically for a missing navigation.position.
-  final bool skDataAvailable;
+  // True immediately when only navigation.position is missing, or after the
+  // configured grace when Signal K is entirely unavailable. This lets ANC
+  // remain a complete, standalone anchor alarm using the device GPS.
+  final bool phoneGpsFallbackAllowed;
   final double? headingDeg;
   final double? sogKn;
   final double? depthM;
@@ -508,7 +508,9 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   }
 
   Future<void> _maybeOfferDeviceGps() async {
-    if (_hasSkPosition || !widget.skDataAvailable || _askedDeviceGps) return;
+    if (_hasSkPosition || !widget.phoneGpsFallbackAllowed || _askedDeviceGps) {
+      return;
+    }
     if (widget.gpsFallbackConsent == false) return;
     _askedDeviceGps = true;
     if (widget.gpsFallbackConsent == null) {
@@ -522,7 +524,10 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
             'Signal K no está enviando la posición del barco ahora mismo. '
             'Puedo usar el GPS de esta tablet/móvil como referencia mientras '
             'tanto, solo en esta pantalla de fondeo. Es un dato de tu '
-            'dispositivo, no del barco — solo se usa si lo permites.',
+            'dispositivo, no del barco — solo se usa si lo permites.\n\n'
+            'Importante: esta alarma no está garantizada en segundo plano. '
+            'REWIND debe permanecer abierta y visible, con el dispositivo a '
+            'bordo y la ubicación activa.',
           ),
           actions: [
             TextButton(
@@ -765,7 +770,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       // or when Signal K recovers without bringing navigation.position back.
       // Do not consume the one-shot guard while the whole server is absent.
       if ((old.ownLat != null && old.ownLon != null) ||
-          (!old.skDataAvailable && widget.skDataAvailable)) {
+          (!old.phoneGpsFallbackAllowed && widget.phoneGpsFallbackAllowed)) {
         _askedDeviceGps = false;
       }
       unawaited(_maybeOfferDeviceGps());
@@ -821,7 +826,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_hasSkPosition && widget.skDataAvailable) {
+      if (!_hasSkPosition && widget.phoneGpsFallbackAllowed) {
         unawaited(_maybeOfferDeviceGps());
       }
       final lat = _effectiveLat, lon = _effectiveLon;
@@ -2515,12 +2520,12 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
       children: [
         Builder(
           builder: (context) {
+            final deviceGpsReady = _usingDeviceGpsAsSource;
             final label = !widget.config.armed
                 ? 'SIN ARMAR'
-                // Without a live connection the app has no idea what's
-                // actually true right now — a stale local "armed" flag is
-                // not the same as confirmed "still fine, still anchored".
-                : !widget.skConnected
+                // Sin Signal K solo se puede afirmar el estado si el GPS del
+                // teléfono está proporcionando una posición viva.
+                : !widget.skConnected && !deviceGpsReady
                 ? 'SIN CONEXIÓN'
                 : !outside
                 ? 'FONDEADO'
@@ -2529,7 +2534,7 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
                 : (isDragging ? 'GARREANDO' : 'FUERA DEL CÍRCULO');
             final color = !widget.config.armed
                 ? cMuted
-                : !widget.skConnected
+                : !widget.skConnected && !deviceGpsReady
                 ? cOrange
                 : (outside ? cRed : cGreen);
             final text = Text(
