@@ -218,6 +218,96 @@ Future<({List<GraphPoint> lat, List<GraphPoint> lon})> influxPositionQuery({
   return (lat: _sortAndDedupe(lat), lon: _sortAndDedupe(lon));
 }
 
+/// Configuración del barco guardada por el plugin REWIND en el servidor.
+/// Ver server/config_store.js: la revisión la pone el servidor.
+typedef PanelConfigDoc = ({
+  int revision,
+  String updatedBy,
+  String updatedAt,
+  Map<String, dynamic> config,
+});
+
+PanelConfigDoc _panelConfigFromJson(Map<String, dynamic> j) => (
+  revision: (j['revision'] as num?)?.toInt() ?? 0,
+  updatedBy: j['updatedBy'] as String? ?? '',
+  updatedAt: j['updatedAt'] as String? ?? '',
+  config: j['config'] is Map
+      ? Map<String, dynamic>.from(j['config'] as Map)
+      : <String, dynamic>{},
+);
+
+/// Lee la configuración compartida. Leer no exige identificarse: la app la
+/// necesita nada más conectar, antes incluso de que haya sesión.
+Future<PanelConfigDoc?> fetchPanelConfig({
+  required String host,
+  required int port,
+  String authBase64 = '',
+}) async {
+  final uri = Uri.http('$host:$port', '/plugins/rewind-xcover6-panel/panel-config');
+  final response = await http
+      .get(
+        uri,
+        headers: authBase64.isEmpty
+            ? {}
+            : {'Authorization': 'Basic $authBase64'},
+      )
+      .timeout(const Duration(seconds: 10));
+  if (response.statusCode != 200) return null;
+  final doc = jsonDecode(response.body);
+  if (doc is! Map<String, dynamic>) return null;
+  return _panelConfigFromJson(doc);
+}
+
+/// Resultado de subir la configuración: `conflict` llega cuando otro
+/// dispositivo la cambió mientras tanto, con lo que hay ahora en el servidor.
+typedef PanelConfigPush = ({
+  bool ok,
+  int status,
+  PanelConfigDoc? doc,
+  String? error,
+});
+
+Future<PanelConfigPush> pushPanelConfig({
+  required String host,
+  required int port,
+  required String token,
+  required int baseRevision,
+  required String updatedBy,
+  required Map<String, dynamic> config,
+}) async {
+  final uri = Uri.http('$host:$port', '/plugins/rewind-xcover6-panel/panel-config');
+  final response = await http
+      .post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'baseRevision': baseRevision,
+          'updatedBy': updatedBy,
+          'config': config,
+        }),
+      )
+      .timeout(const Duration(seconds: 12));
+  final decoded = response.body.isEmpty ? null : jsonDecode(response.body);
+  final map = decoded is Map<String, dynamic> ? decoded : null;
+  if (response.statusCode == 200 && map != null) {
+    return (ok: true, status: 200, doc: _panelConfigFromJson(map), error: null);
+  }
+  // 409: el servidor devuelve la configuración actual para que el que
+  // escribe vea antes lo que hay (ver decideWrite en el plugin).
+  final current = map != null && map['current'] is Map<String, dynamic>
+      ? _panelConfigFromJson(map['current'] as Map<String, dynamic>)
+      : null;
+  return (
+    ok: false,
+    status: response.statusCode,
+    doc: current,
+    error: map?['error']?.toString(),
+  );
+}
+
 /// Proveedor concreto del History API al que van todas las consultas de
 /// Signal K. Null = el proveedor por defecto del servidor. Con la fuente
 /// "Grabador REWIND" apunta al grabador del plugin, así funciona aunque el

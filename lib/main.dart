@@ -52,6 +52,7 @@ import 'widgets/motor_premium_panel.dart';
 import 'widgets/polar_panel.dart';
 import 'widgets/ship_icon_picker.dart';
 import 'widgets/wind_premium_panel.dart';
+import 'config_sync.dart';
 
 part 'utils/format_helpers.dart';
 part 'widgets/anchor_webview.dart';
@@ -2939,6 +2940,8 @@ class _DashboardState extends State<Dashboard> {
     settings.historySource =
         prefs.getString('historySource') ?? settings.historySource;
     skHistoryProvider = skHistoryProviderFor(settings.historySource);
+    settings.syncConfigWithServer =
+        prefs.getBool('syncConfigWithServer') ?? settings.syncConfigWithServer;
     settings.influxHost = prefs.getString('influxHost') ?? settings.influxHost;
     settings.influxOrg = prefs.getString('influxOrg') ?? settings.influxOrg;
     final storedInfluxToken = await _readCredential(
@@ -3392,6 +3395,10 @@ class _DashboardState extends State<Dashboard> {
       settings.signalKDisconnectGraceSeconds,
     );
     await prefs.setBool('keepAwake', settings.keepAwake);
+    await prefs.setBool(
+      'syncConfigWithServer',
+      settings.syncConfigWithServer,
+    );
     await prefs.setString('brightnessMode', settings.brightnessMode);
     await prefs.setString('historySource', settings.historySource);
     await prefs.setString('influxHost', settings.influxHost);
@@ -4236,6 +4243,9 @@ class _DashboardState extends State<Dashboard> {
       unawaited(_fetchSelfMmsi());
       unawaited(_seedOwnTrackFromHistory());
       unawaited(_autoConfigureBlankSensorPaths());
+      // Antes de tocar nada: lo que diga el servidor es la configuración
+      // acordada del barco. Este dispositivo no sube la suya por reconectar.
+      unawaited(_pullSharedConfig());
       unawaited(_seedEngineHoursFromHistory());
       // signalK.connected/status flip to true/'Signal K' in
       // _onSignalKMessage, only once real data actually arrives — that's
@@ -4325,6 +4335,13 @@ class _DashboardState extends State<Dashboard> {
       // en cuanto se pulsa ON, y _adoptEngineFromPath lo engancha solo
       // ("que al pulsar el on sea instantáneo su reflejo", 2026-09-12).
       'propulsion.*',
+      // Aviso del plugin cuando otro dispositivo guarda la configuración del
+      // barco (ver _pullSharedConfig).
+      'rewind.config.revision',
+      // Las temperaturas configuradas en CFG > Sensores: cada barco nombra
+      // las suyas a su manera y ninguna lista fija las cubre.
+      for (final s in settings.sensorConfig.tempSensors)
+        if (s.enabled && s.path.isNotEmpty) s.path,
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
         if (rule.type == 'tempAbove' && rule.target != null) rule.target!,
@@ -4333,7 +4350,10 @@ class _DashboardState extends State<Dashboard> {
       jsonEncode({
         'context': 'vessels.self',
         'subscribe': [
-          for (final path in paths) {'path': path, 'policy': 'instant'},
+          // toSet: una ruta configurada puede coincidir con una de la lista
+          // fija (agua, cuadro eléctrico…) y no hay que pedirla dos veces.
+          for (final path in paths.toSet())
+            {'path': path, 'policy': 'instant'},
         ],
       }),
     );
@@ -4498,6 +4518,9 @@ class _DashboardState extends State<Dashboard> {
                 _slowValueHistories
                     .putIfAbsent(path, _SlowValueHistory.new)
                     .add(celsius, dataTime);
+                // Sin campo propio por sensor: la pantalla TMP lee de aquí
+                // la ruta que tenga configurada cada barco.
+                signalK.tempKByPath[path] = celsius + 273.15;
               }
             }
             if (path ==
@@ -4692,6 +4715,13 @@ class _DashboardState extends State<Dashboard> {
   }
 
   bool _routeValue(String path, dynamic value, DateTime? dataTime) {
+    if (path == 'rewind.config.revision') {
+      // El plugin publica la revisión al guardar, así que el resto de
+      // dispositivos se entera al instante en vez de ir preguntando.
+      final revision = _num(value)?.toInt() ?? 0;
+      if (revision != _sharedConfigRevision) unawaited(_pullSharedConfig());
+      return true;
+    }
     if (path.endsWith('.temperature')) {
       _customTempValues[path] = _num(value);
     }
@@ -5688,13 +5718,24 @@ class _DashboardState extends State<Dashboard> {
     if (c.enginePath != null &&
         c.depthPath != null &&
         c.solarPath != null &&
-        c.fridge1Path != null) {
+        c.fridge1Path != null &&
+        // Sin la lista de rutas del barco no se puede ocultar la tarjeta de
+        // lo que no tiene, así que también hay que traerla una vez.
+        c.detectedPaths.isNotEmpty) {
       return; // nada que rellenar: no gastamos una consulta del árbol entero
     }
     try {
       final d = await discoverSkPaths();
       if (!mounted) return;
       var changed = false;
+      final detected = skDetectablePaths(d.allPaths);
+      // Ambas listas vienen ordenadas y sin repetidos (skDetectablePaths),
+      // así que comparar el texto basta para no guardar por guardar.
+      if (detected.isNotEmpty &&
+          detected.join(' ') != c.detectedPaths.join(' ')) {
+        c.detectedPaths = detected;
+        changed = true;
+      }
       if (c.enginePath == null && d.enginePaths.isNotEmpty) {
         c.enginePath = d.enginePaths.first;
         changed = true;
@@ -6599,7 +6640,7 @@ class _DashboardState extends State<Dashboard> {
     'NAV',
     'VNT',
     'PWR',
-    'TMP',
+    if (settings.sensorConfig.tempSensors.any((s) => s.enabled)) 'TMP',
     if (settings.sensorConfig.tanks.any((t) => t.enabled)) 'TNK',
     if (settings.sensorConfig.hasOutsideTemp ||
         settings.sensorConfig.hasOutsidePressure)
@@ -6852,7 +6893,8 @@ class _DashboardState extends State<Dashboard> {
       ('NAV', Icons.explore, _navPage()),
       ('VNT', Icons.air, _windPage()),
       ('PWR', Icons.bolt, _powerPage()),
-      ('TMP', Icons.thermostat, _tempPage()),
+      if (settings.sensorConfig.tempSensors.any((s) => s.enabled))
+        ('TMP', Icons.thermostat, _tempPage()),
       if (settings.sensorConfig.tanks.any((t) => t.enabled))
         ('TNK', Icons.water_drop, _tankPage()),
       if (settings.sensorConfig.hasOutsideTemp ||
@@ -10273,20 +10315,6 @@ class _DashboardState extends State<Dashboard> {
     ].where((part) => part.isNotEmpty).join(' · ');
   }
 
-  MetricDef? get _mFridge1 {
-    final p = settings.sensorConfig.fridge1Path;
-    return (p == null || p.isEmpty)
-        ? null
-        : MetricDef(p, 'T. Nevera 1', 'C', offset: -273.15, color: cGreen);
-  }
-
-  MetricDef? get _mFridge2 {
-    final p = settings.sensorConfig.fridge2Path;
-    return (p == null || p.isEmpty)
-        ? null
-        : MetricDef(p, 'T. Nevera 2', 'C', offset: -273.15, color: cGreen);
-  }
-
   Widget _powerPage() {
     final houseBase =
         'electrical.batteries.${settings.sensorConfig.batteryHouseId}';
@@ -10294,7 +10322,9 @@ class _DashboardState extends State<Dashboard> {
     final houseCurrentPath = '$houseBase.current';
     final startPath =
         'electrical.batteries.${settings.sensorConfig.batteryStartId}.voltage';
-    const bowPath = 'electrical.batteries.bowthruster.voltage';
+    final bowPath =
+        settings.sensorConfig.bowthrusterPath ??
+        'electrical.batteries.bowthruster.voltage';
     final houseColor = socColor(signalK.houseSoc);
     final currentColorValue = currentColor(signalK.houseA);
     final startColor = voltageColor12V(signalK.startV);
@@ -10343,14 +10373,17 @@ class _DashboardState extends State<Dashboard> {
         settings.sensorConfig.solarPath2 != null &&
         settings.sensorConfig.solarPath2!.isNotEmpty;
     final hasSolar =
-        settings.demoMode || (solarMetric != null && signalK.solarW != null);
+        _cardVisible('solar', path: settings.sensorConfig.solarPath) &&
+        (settings.demoMode || (solarMetric != null && signalK.solarW != null));
     // With a single panel this is unchanged — solarW already reads as "the
     // total" since it's the only source. With two, the big number becomes
     // the sum and the individual readings move to the subtitle.
     final solarTotalW = hasSolarPanel2
         ? (signalK.solarW ?? 0) + (signalK.solarW2 ?? 0)
         : signalK.solarW;
-    final hasDcLoads = settings.demoMode || signalK.dcW != null;
+    final hasDcLoads =
+        _cardVisible('dcLoads', path: settings.sensorConfig.dcLoadsPath) &&
+        (settings.demoMode || signalK.dcW != null);
     final flowWidgets = <Widget>[];
     if (hasSolar) {
       flowWidgets.add(
@@ -10421,6 +10454,87 @@ class _DashboardState extends State<Dashboard> {
         ),
       );
     }
+    // Tarjetas propias de cada barco: sin hélice de proa o sin batería de
+    // arranque configurada, su tarjeta no se pinta en vez de quedarse vacía
+    // (ver _cardVisible). La corriente de servicio no es opcional: es la
+    // batería principal, que todos los barcos tienen.
+    final auxTiles = <Widget>[
+      if (_cardVisible('bowthruster', path: bowPath))
+        PowerAuxTile(
+          title: 'Bow thruster',
+          value: fmt(signalK.bowthrusterV, 2, ''),
+          unit: 'V',
+          // Same move as the house battery — its temperature used to be a
+          // separate TEMP-page card.
+          subtitle:
+              (signalK.bowthrusterTempK == null
+                  ? (batteryOnFloat(
+                          signalK.bowthrusterV,
+                          chemistry: settings.batteryChemistryBow,
+                        )
+                        ? 'batería proa · en flotación'
+                        : 'batería proa')
+                  : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}') +
+              _staleSuffix(bowPath),
+          color: bowColor,
+          customIcon: BowThrusterGlyph(color: bowColor),
+          zoom: _showZoom,
+          graphMetrics: [_metricColor(mBowV, bowColor)],
+          onShowCurve: signalK.bowthrusterV == null
+              ? null
+              : () => _openBatteryCurveDialog(
+                  title: 'Bow thruster',
+                  voltage: signalK.bowthrusterV,
+                  trend: _bowVTrend.direction,
+                  color: bowColor,
+                  chemistry: settings.batteryChemistryBow,
+                  loadEvents: _bowLoadWatcher.events,
+                ),
+        ),
+      if (settings.sensorConfig.batteryStartId.isNotEmpty &&
+          _cardVisible('starterBattery', path: startPath))
+        PowerAuxTile(
+          title: 'Arranque',
+          value: fmt(signalK.startV, 2, ''),
+          unit: 'V',
+          subtitle:
+              '${settings.sensorConfig.batteryStartId}'
+              '${batteryOnFloat(signalK.startV, chemistry: settings.batteryChemistryStart) ? ' · en flotación' : ''}'
+              '${_staleSuffix(startPath)}',
+          color: startColor,
+          customIcon: StarterMotorGlyph(color: startColor),
+          zoom: _showZoom,
+          graphMetrics: [_metricColor(_mStartV, startColor)],
+          onShowCurve: signalK.startV == null
+              ? null
+              : () => _openBatteryCurveDialog(
+                  title: 'Arranque',
+                  voltage: signalK.startV,
+                  trend: _startVTrend.direction,
+                  color: startColor,
+                  chemistry: settings.batteryChemistryStart,
+                  loadEvents: _startLoadWatcher.events,
+                ),
+        ),
+      PowerAuxTile(
+        title: 'Corriente servicio',
+        value: fmt(signalK.houseA, 1, ''),
+        unit: 'A',
+        subtitle:
+            (signalK.houseA == null
+                ? 'sin datos'
+                : signalK.houseA! >= 0
+                ? 'cargando batería'
+                : 'descargando batería') +
+            (remainingText == null ? '' : ' · $remainingText') +
+            _staleSuffix(houseCurrentPath),
+        color: currentColorValue,
+        icon: Icons.swap_vert,
+        zoom: _showZoom,
+        graphMetrics: [_metricColor(_mHouseCurrent, currentColorValue)],
+      ),
+    ];
+
     return Padding(
       padding: const EdgeInsets.all(8),
       child: Column(
@@ -10431,87 +10545,10 @@ class _DashboardState extends State<Dashboard> {
             flex: 4,
             child: Row(
               children: [
-                Expanded(
-                  child: PowerAuxTile(
-                    title: 'Bow thruster',
-                    value: fmt(signalK.bowthrusterV, 2, ''),
-                    unit: 'V',
-                    // Same move as the house battery — its temperature
-                    // used to be a separate TEMP-page card.
-                    subtitle:
-                        (signalK.bowthrusterTempK == null
-                            ? (batteryOnFloat(
-                                    signalK.bowthrusterV,
-                                    chemistry: settings.batteryChemistryBow,
-                                  )
-                                  ? 'batería proa · en flotación'
-                                  : 'batería proa')
-                            : 'batería proa · ${fmt(signalK.bowthrusterTempK! - 273.15, 0, '°C')}') +
-                        _staleSuffix(bowPath),
-                    color: bowColor,
-                    customIcon: BowThrusterGlyph(color: bowColor),
-                    zoom: _showZoom,
-                    graphMetrics: [_metricColor(mBowV, bowColor)],
-                    onShowCurve: signalK.bowthrusterV == null
-                        ? null
-                        : () => _openBatteryCurveDialog(
-                            title: 'Bow thruster',
-                            voltage: signalK.bowthrusterV,
-                            trend: _bowVTrend.direction,
-                            color: bowColor,
-                            chemistry: settings.batteryChemistryBow,
-                            loadEvents: _bowLoadWatcher.events,
-                          ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: PowerAuxTile(
-                    title: 'Arranque',
-                    value: fmt(signalK.startV, 2, ''),
-                    unit: 'V',
-                    subtitle:
-                        '${settings.sensorConfig.batteryStartId}'
-                        '${batteryOnFloat(signalK.startV, chemistry: settings.batteryChemistryStart) ? ' · en flotación' : ''}'
-                        '${_staleSuffix(startPath)}',
-                    color: startColor,
-                    customIcon: StarterMotorGlyph(color: startColor),
-                    zoom: _showZoom,
-                    graphMetrics: [_metricColor(_mStartV, startColor)],
-                    onShowCurve: signalK.startV == null
-                        ? null
-                        : () => _openBatteryCurveDialog(
-                            title: 'Arranque',
-                            voltage: signalK.startV,
-                            trend: _startVTrend.direction,
-                            color: startColor,
-                            chemistry: settings.batteryChemistryStart,
-                            loadEvents: _startLoadWatcher.events,
-                          ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: PowerAuxTile(
-                    title: 'Corriente servicio',
-                    value: fmt(signalK.houseA, 1, ''),
-                    unit: 'A',
-                    subtitle:
-                        (signalK.houseA == null
-                            ? 'sin datos'
-                            : signalK.houseA! >= 0
-                            ? 'cargando batería'
-                            : 'descargando batería') +
-                        (remainingText == null ? '' : ' · $remainingText') +
-                        _staleSuffix(houseCurrentPath),
-                    color: currentColorValue,
-                    icon: Icons.swap_vert,
-                    zoom: _showZoom,
-                    graphMetrics: [
-                      _metricColor(_mHouseCurrent, currentColorValue),
-                    ],
-                  ),
-                ),
+                for (var i = 0; i < auxTiles.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 8),
+                  Expanded(child: auxTiles[i]),
+                ],
               ],
             ),
           ),
@@ -10521,101 +10558,206 @@ class _DashboardState extends State<Dashboard> {
   }
 
   // ─── TEMP page ──────────────────────────────────────────────────────────────
+  // Cada barco nombra sus temperaturas a su manera (environment.fridge_1,
+  // environment.sonoff, environment.venus.41…) y publica muy distinta
+  // cantidad: 17 rutas en REWIND, 1 en QUINTO REAL. Por eso la página se
+  // construye desde la lista configurada en CFG > Sensores y no desde rutas
+  // fijas, y los umbrales van por tipo, no por sensor.
+  // ── Configuración del barco, compartida entre dispositivos ──────────────
+  // La guarda el plugin REWIND en el servidor (server/config_store.js) para
+  // no tener que repetir la configuración en cada tablet, móvil o navegador.
+  // Ver lib/config_sync.dart: aquí no viaja ninguna contraseña ni nada propio
+  // del aparato.
+  int _sharedConfigRevision = 0;
+  bool _sharedConfigBusy = false;
+  String? _sharedConfigStatus;
+
+  String get _sharedConfigAuthor => settings.anchorDeviceId.isEmpty
+      ? 'REWIND'
+      : 'REWIND ${settings.anchorDeviceId}';
+
+  Future<void> _pullSharedConfig() async {
+    if (settings.demoMode || !settings.syncConfigWithServer) return;
+    if (_sharedConfigBusy) return;
+    _sharedConfigBusy = true;
+    try {
+      final doc = await fetchPanelConfig(
+        host: settings.host,
+        port: settings.port,
+        authBase64: settings.authBase64,
+      );
+      if (!mounted || doc == null) return;
+      if (!shouldAdoptRemote(
+        remoteRevision: doc.revision,
+        localKnownRevision: _sharedConfigRevision,
+      )) {
+        _sharedConfigRevision = doc.revision;
+        return;
+      }
+      setState(() {
+        applySharedConfig(settings, doc.config);
+        _sharedConfigRevision = doc.revision;
+        _sharedConfigStatus =
+            'Configuración del barco r${doc.revision}'
+            '${doc.updatedBy.isEmpty ? '' : ' · ${doc.updatedBy}'}';
+      });
+      // Los sensores pueden haber cambiado: sin rehacer handlers y
+      // suscripción no llegarían sus datos hasta la próxima reconexión.
+      _buildDynamicHandlers();
+      _sendSignalKSubscription();
+      await _saveSettings();
+    } catch (_) {
+      // Sin servidor se sigue con la copia local: nunca se borra nada.
+    } finally {
+      _sharedConfigBusy = false;
+    }
+  }
+
+  Future<void> _pushSharedConfig() async {
+    if (settings.demoMode || !settings.syncConfigWithServer) return;
+    final token = await _ensureSkConfigToken();
+    if (token == null || !mounted) return;
+    final result = await pushPanelConfig(
+      host: settings.host,
+      port: settings.port,
+      token: token,
+      baseRevision: _sharedConfigRevision,
+      updatedBy: _sharedConfigAuthor,
+      config: sharedConfigFromSettings(settings),
+    );
+    if (!mounted) return;
+    final doc = result.doc;
+    if (result.ok && doc != null) {
+      setState(() {
+        _sharedConfigRevision = doc.revision;
+        _sharedConfigStatus = 'Configuración compartida (r${doc.revision})';
+      });
+      return;
+    }
+    // 409: otro dispositivo la cambió mientras tanto. No se pisa lo suyo por
+    // haber guardado más tarde; se adopta lo del servidor y se avisa, que es
+    // justo el caso que ya nos mordió con el fondeo.
+    if (result.status == 409 && doc != null) {
+      setState(() {
+        applySharedConfig(settings, doc.config);
+        _sharedConfigRevision = doc.revision;
+        _sharedConfigStatus =
+            'Otro dispositivo cambió la configuración (r${doc.revision}): '
+            'se ha adoptado la suya, revisa tus cambios';
+      });
+      _buildDynamicHandlers();
+      _sendSignalKSubscription();
+      await _saveSettings();
+    } else if (result.status == 401 || result.status == 403) {
+      setState(
+        () => _sharedConfigStatus =
+            'Sin permiso para guardar la configuración del barco: revisa '
+            'usuario y contraseña de Signal K en CFG > Conexión',
+      );
+    }
+  }
+
+  // Un barco sin hélice de proa no debe ver su tarjeta vacía. Se considera
+  // que tiene el sensor si la ruta apareció al buscar sensores o si ha
+  // llegado algún dato suyo en vivo. Mientras no se haya buscado nunca no se
+  // oculta nada: una tarjeta sin datos se entiende, una pantalla incompleta
+  // sin explicación no.
+  bool _sensorDetected(String? path) {
+    if (settings.demoMode) return true;
+    if (path == null || path.isEmpty) return false;
+    final c = settings.sensorConfig;
+    if (c.detectedPaths.isEmpty) return true;
+    return c.detectedPaths.contains(path) || _pathUpdatedAt.containsKey(path);
+  }
+
+  bool _cardVisible(String id, {String? path}) => optionalCardVisible(
+    settings.sensorConfig.cardVisibility[id] ?? 'auto',
+    detected: _sensorDetected(path),
+  );
+
+  double? _tempKForPath(String path) {
+    final live = signalK.tempKByPath[path];
+    if (live != null) return live;
+    // El modo DEMO y las rutas con campo propio siguen alimentando estos
+    // valores aunque no haya llegado ninguna delta todavía.
+    if (path == 'environment.water.temperature') return signalK.waterTempK;
+    if (path == 'environment.sonoff.temperature') return signalK.sonoffTempK;
+    if (path == 'environment.solar_fuses.temperature') {
+      return signalK.solarFusesTempK;
+    }
+    if (path == settings.sensorConfig.fridge1Path) return signalK.fridge1TempK;
+    if (path == settings.sensorConfig.fridge2Path) return signalK.fridge2TempK;
+    return null;
+  }
+
+  Color _tempColorForRole(String role, double? kelvin) {
+    final c = settings.sensorConfig;
+    return switch (role) {
+      'nevera' => fridgeTempColor(
+        kelvin,
+        warnC: c.fridgeWarnC,
+        alarmC: c.fridgeAlarmC,
+      ),
+      'congelador' => fridgeTempColor(
+        kelvin,
+        warnC: c.freezerWarnC,
+        alarmC: c.freezerAlarmC,
+      ),
+      'equipo' => equipTempColor(
+        kelvin,
+        warnC: c.equipmentWarnC,
+        alarmC: c.equipmentAlarmC,
+      ),
+      _ => seaTempColor(kelvin),
+    };
+  }
+
   Widget _tempPage() {
-    final cards = <Widget>[
-      MetricCard(
-        title: 'Cuadro eléctrico',
-        value: tempValue(signalK.sonoffTempK),
-        unit: tempUnit(signalK.sonoffTempK),
-        color: equipTempColor(
-          signalK.sonoffTempK,
-          warnC: settings.sensorConfig.sonoffWarnC,
-          alarmC: settings.sensorConfig.sonoffAlarmC,
-        ),
-        subtitle: _slowSensorSubtitle(
-          'environment.sonoff.temperature',
-          staleAfter: const Duration(minutes: 5),
-        ),
-        zoom: _showZoom,
-        graphMetrics: const [mSonoffTemp],
-      ),
-      MetricCard(
-        title: 'Fusibles solares',
-        value: tempValue(signalK.solarFusesTempK),
-        unit: tempUnit(signalK.solarFusesTempK),
-        color: equipTempColor(
-          signalK.solarFusesTempK,
-          warnC: settings.sensorConfig.solarFusesWarnC,
-          alarmC: settings.sensorConfig.solarFusesAlarmC,
-        ),
-        subtitle: _slowSensorSubtitle(
-          'environment.solar_fuses.temperature',
-          staleAfter: const Duration(minutes: 5),
-        ),
-        zoom: _showZoom,
-        graphMetrics: const [mSolarFusesTemp],
-      ),
-      MetricCard(
-        title: 'T. mar',
-        value: tempValue(signalK.waterTempK),
-        unit: tempUnit(signalK.waterTempK),
-        color: seaTempColor(signalK.waterTempK),
-        subtitle: _slowSensorSubtitle(
-          'environment.water.temperature',
-          staleAfter: const Duration(minutes: 10),
-        ),
-        zoom: _showZoom,
-        graphMetrics: const [mSeaTemp],
-      ),
-      if (_mFridge1 != null)
-        PowerAuxTile(
-          title: 'T. ${settings.sensorConfig.fridge1Label}',
-          value: tempValue(signalK.fridge1TempK),
-          unit: tempUnit(signalK.fridge1TempK) ?? '°C',
-          subtitle: _slowSensorSubtitle(
-            settings.sensorConfig.fridge1Path ?? '',
-            prefix: settings.sensorConfig.fridge1Location,
-          ),
-          color: fridgeTempColor(
-            signalK.fridge1TempK,
-            warnC: settings.sensorConfig.fridgeWarnC,
-            alarmC: settings.sensorConfig.fridgeAlarmC,
-          ),
-          customIcon: FridgeChestGlyph(
-            color: fridgeTempColor(
-              signalK.fridge1TempK,
-              warnC: settings.sensorConfig.fridgeWarnC,
-              alarmC: settings.sensorConfig.fridgeAlarmC,
-            ),
-          ),
-          zoom: _showZoom,
-          graphMetrics: [_mFridge1!],
-        ),
-      if (_mFridge2 != null)
-        PowerAuxTile(
-          title: 'T. ${settings.sensorConfig.fridge2Label}',
-          value: tempValue(signalK.fridge2TempK),
-          unit: tempUnit(signalK.fridge2TempK) ?? '°C',
-          subtitle: _slowSensorSubtitle(
-            settings.sensorConfig.fridge2Path ?? '',
-            prefix: settings.sensorConfig.fridge2Location,
-          ),
-          color: fridgeTempColor(
-            signalK.fridge2TempK,
-            warnC: settings.sensorConfig.fridgeWarnC,
-            alarmC: settings.sensorConfig.fridgeAlarmC,
-          ),
-          customIcon: FridgeUprightGlyph(
-            color: fridgeTempColor(
-              signalK.fridge2TempK,
-              warnC: settings.sensorConfig.fridgeWarnC,
-              alarmC: settings.sensorConfig.fridgeAlarmC,
-            ),
-          ),
-          zoom: _showZoom,
-          graphMetrics: [_mFridge2!],
-        ),
-    ];
+    final cards = <Widget>[];
+    for (final s in settings.sensorConfig.tempSensors) {
+      if (!s.enabled || s.path.isEmpty) continue;
+      final kelvin = _tempKForPath(s.path);
+      final color = _tempColorForRole(s.role, kelvin);
+      final metric = MetricDef(
+        s.path,
+        s.label,
+        'C',
+        offset: -273.15,
+        color: color,
+      );
+      final subtitle = _slowSensorSubtitle(
+        s.path,
+        prefix: s.note,
+        staleAfter: s.role == 'mar'
+            ? const Duration(minutes: 10)
+            : const Duration(minutes: 5),
+      );
+      final isFridge = s.role == 'nevera' || s.role == 'congelador';
+      cards.add(
+        isFridge
+            ? PowerAuxTile(
+                title: s.label,
+                value: tempValue(kelvin),
+                unit: tempUnit(kelvin) ?? '°C',
+                subtitle: subtitle,
+                color: color,
+                customIcon: s.role == 'congelador'
+                    ? FridgeUprightGlyph(color: color)
+                    : FridgeChestGlyph(color: color),
+                zoom: _showZoom,
+                graphMetrics: [metric],
+              )
+            : MetricCard(
+                title: s.label,
+                value: tempValue(kelvin),
+                unit: tempUnit(kelvin),
+                color: color,
+                subtitle: subtitle,
+                zoom: _showZoom,
+                graphMetrics: [metric],
+              ),
+      );
+    }
     return _grid3x2(children: cards, fillLastRow: true);
   }
 
@@ -13311,6 +13453,34 @@ class _DashboardState extends State<Dashboard> {
                               ],
                             ),
                             const SizedBox(height: 8),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              value: settings.syncConfigWithServer,
+                              onChanged: (v) {
+                                setState(
+                                  () => settings.syncConfigWithServer = v,
+                                );
+                                unawaited(_saveSettings());
+                                if (v) unawaited(_pullSharedConfig());
+                              },
+                              title: const Text(
+                                'Compartir la configuración con el barco',
+                                style: TextStyle(color: cText, fontSize: 13),
+                              ),
+                              subtitle: Text(
+                                _sharedConfigStatus ??
+                                    'Sensores, umbrales y alarmas se guardan en '
+                                        'el servidor y llegan a todos los '
+                                        'dispositivos. Nunca se comparten '
+                                        'contraseñas.',
+                                style: const TextStyle(
+                                  color: cMuted,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
                             OutlinedButton.icon(
                               icon: const Icon(Icons.tune, size: 18),
                               label: const Text('Configurar sensores'),
@@ -13327,6 +13497,10 @@ class _DashboardState extends State<Dashboard> {
                                     () => settings.sensorConfig = newCfg,
                                   );
                                   await _saveSettings();
+                                  // Lo que se acaba de configurar es del
+                                  // BARCO: se comparte con los demás
+                                  // dispositivos (ver _pushSharedConfig).
+                                  unawaited(_pushSharedConfig());
                                   _connectSignalK();
                                 }
                               },

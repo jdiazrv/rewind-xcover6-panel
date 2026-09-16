@@ -992,6 +992,10 @@ class SignalKModel {
   double? solarFusesTempK;
   double? fridge1TempK;
   double? fridge2TempK;
+  // Última temperatura (K) de CUALQUIER ruta `*.temperature` recibida, sin
+  // tener que declarar un campo por sensor: la pantalla TMP se construye
+  // desde la lista configurada, que es distinta en cada barco.
+  final Map<String, double> tempKByPath = {};
   // Wind
   double? awsKn;
   double? awaDeg;
@@ -1191,6 +1195,7 @@ class SignalKModel {
     solarFusesTempK = null;
     fridge1TempK = null;
     fridge2TempK = null;
+    tempKByPath.clear();
     awsKn = null;
     awaDeg = null;
     twaDeg = null;
@@ -1323,6 +1328,130 @@ class TankSlot {
   );
 }
 
+/// Tipos de sensor de temperatura. Solo deciden icono, color y qué umbral
+/// se aplica: los umbrales son por tipo, no por sensor ("todas las neveras
+/// igual", 2026-09-16).
+const kTempSensorRoles = <String, String>{
+  'nevera': 'Nevera',
+  'congelador': 'Congelador',
+  'equipo': 'Equipo',
+  'ambiente': 'Ambiente',
+  'mar': 'Mar',
+};
+
+/// Una temperatura que se muestra en la pantalla TMP.
+///
+/// Signal K no estandariza estas rutas: `environment.fridge_1.temperature`,
+/// `environment.sonoff.temperature` o `environment.venus.41.temperature` son
+/// nombres que pone cada instalación. REWIND publica 17 y QUINTO REAL solo
+/// una (comprobado 2026-09-16), así que la pantalla se construye desde esta
+/// lista, propia de cada servidor, en vez de desde rutas fijas en el código.
+class TempSensorSlot {
+  TempSensorSlot({
+    required this.path,
+    required this.label,
+    this.note = '',
+    this.role = 'equipo',
+    this.enabled = true,
+  });
+  String path;
+  String label;
+  /// Detalle corto bajo el número ("tapa", "puerta", "sala de máquinas").
+  String note;
+  String role;
+  bool enabled;
+
+  Map<String, dynamic> toJson() => {
+    'path': path,
+    'label': label,
+    'note': note,
+    'role': role,
+    'enabled': enabled,
+  };
+
+  factory TempSensorSlot.fromJson(Map<String, dynamic> j) => TempSensorSlot(
+    path: j['path'] as String? ?? '',
+    label: j['label'] as String? ?? '',
+    note: j['note'] as String? ?? '',
+    role: kTempSensorRoles.containsKey(j['role'])
+        ? j['role'] as String
+        : 'equipo',
+    enabled: j['enabled'] as bool? ?? true,
+  );
+
+  /// Tipo probable a partir del nombre de la ruta, solo como punto de
+  /// partida al descubrir sensores: siempre se puede cambiar en CFG.
+  static String roleFromPath(String path) {
+    final p = path.toLowerCase();
+    if (p.contains('freezer') || p.contains('congelador')) return 'congelador';
+    if (p.contains('fridge') || p.contains('nevera')) return 'nevera';
+    if (p.contains('water.temperature') || p.contains('sea')) return 'mar';
+    if (p.contains('outside') ||
+        p.contains('inside') ||
+        p.contains('interior') ||
+        p.contains('cabin') ||
+        p.contains('camarote')) {
+      return 'ambiente';
+    }
+    return 'equipo';
+  }
+
+  /// Nombre legible a partir de la ruta: environment.solar_fuses.temperature
+  /// se convierte en "Solar fuses".
+  static String labelFromPath(String path) {
+    final parts = path.split('.');
+    final name = parts.length >= 2 ? parts[parts.length - 2] : path;
+    final pretty = name.replaceAll('_', ' ').trim();
+    if (pretty.isEmpty) return path;
+    return pretty[0].toUpperCase() + pretty.substring(1);
+  }
+}
+
+/// Tarjetas que solo tienen sentido en algunos barcos, con la ruta que
+/// demuestra que el barco las tiene. El identificador es el que se guarda en
+/// SensorConfig.cardVisibility.
+const kOptionalCardLabels = <String, String>{
+  'bowthruster': 'Hélice de proa',
+  'starterBattery': 'Batería de arranque',
+  'dcLoads': 'Consumos DC',
+  'solar': 'Solar',
+};
+
+/// Decide si se pinta una tarjeta opcional.
+///
+/// `detected` = el barco publica esa ruta (árbol de Signal K o dato en vivo).
+/// El ajuste manual siempre manda sobre la detección.
+/// De todo lo que publica el barco, lo que sirve para decidir si una tarjeta
+/// tiene sentido. Se filtra para no guardar cientos de rutas irrelevantes en
+/// la configuración de cada servidor (REWIND publica más de 300).
+List<String> skDetectablePaths(List<String> allPaths) =>
+    allPaths
+        .where(
+          (p) =>
+              p.startsWith('electrical.') ||
+              p.startsWith('tanks.') ||
+              p.startsWith('propulsion.') ||
+              p.startsWith('environment.'),
+        )
+        .toSet()
+        .toList()
+      ..sort();
+
+bool optionalCardVisible(String mode, {required bool detected}) => switch (mode) {
+  'on' => true,
+  'off' => false,
+  _ => detected,
+};
+
+/// Rutas de temperatura que tiene sentido ofrecer en TMP. Se dejan fuera las
+/// que ya tienen su sitio propio: las baterías se ven en PWR, el motor en su
+/// panel y la Raspberry en Diagnóstico.
+bool isConfigurableTempPath(String path) =>
+    path.endsWith('.temperature') &&
+    !path.startsWith('electrical.') &&
+    !path.startsWith('propulsion.') &&
+    !path.startsWith('environment.rpi.');
+
 class SensorConfig {
   // Plain SensorConfig() defaults to THIS boat's actual known-good sensor
   // ids/paths — appropriate the first time the app ever runs, but very
@@ -1340,6 +1469,11 @@ class SensorConfig {
     ..fridge2Path = null
     ..depthPath = null
     ..enginePath = null
+    ..tempSensors = []
+    ..bowthrusterPath = null
+    ..dcLoadsPath = null
+    ..detectedPaths = []
+    ..cardVisibility = {}
     ..tanks = [];
 
   SensorConfig();
@@ -1365,6 +1499,56 @@ class SensorConfig {
   double solarFusesAlarmC = 60;
   double fridgeWarnC = 6;
   double fridgeAlarmC = 10;
+  double freezerWarnC = -12;
+  double freezerAlarmC = -6;
+  // Un único umbral para todo lo que es "equipo" (cuadro eléctrico,
+  // fusibles, cargadores…), en vez de uno por sensor.
+  double equipmentWarnC = 45;
+  double equipmentAlarmC = 60;
+  // Lo que se ve en TMP, en orden. Ver TempSensorSlot: las rutas de
+  // temperatura son distintas en cada barco.
+  List<TempSensorSlot> tempSensors = [
+    TempSensorSlot(
+      path: 'environment.sonoff.temperature',
+      label: 'Cuadro eléctrico',
+      role: 'equipo',
+    ),
+    TempSensorSlot(
+      path: 'environment.solar_fuses.temperature',
+      label: 'Fusibles solares',
+      role: 'equipo',
+    ),
+    TempSensorSlot(
+      path: 'environment.water.temperature',
+      label: 'T. mar',
+      role: 'mar',
+    ),
+    TempSensorSlot(
+      path: 'environment.fridge_1.temperature',
+      label: 'T. Nevera 1',
+      note: 'tapa',
+      role: 'nevera',
+    ),
+    TempSensorSlot(
+      path: 'environment.fridge_2.temperature',
+      label: 'T. Nevera 2',
+      note: 'puerta',
+      role: 'nevera',
+    ),
+  ];
+  // Hélice de proa y consumos DC: nombres propios de la instalación de
+  // REWIND (`bowthruster`, `venus`), no rutas estándar. Configurables y
+  // anulables, porque la mayoría de barcos no tienen ni una cosa ni la otra.
+  String? bowthrusterPath = 'electrical.batteries.bowthruster.voltage';
+  String? dcLoadsPath = 'electrical.venus.dcPower';
+  // Rutas que este servidor publicaba la última vez que se buscaron
+  // sensores. Es lo que permite ocultar la tarjeta de algo que el barco no
+  // tiene, sin preguntarle nada al usuario.
+  List<String> detectedPaths = [];
+  // Decisión manual por tarjeta: 'auto' (según lo detectado), 'on' o 'off'.
+  // Hace falta porque un sensor apagado justo el día que se configura no
+  // debe desaparecer para siempre.
+  Map<String, String> cardVisibility = {};
   String? depthPath = 'environment.depth.belowKeel';
   // Signal K's standard cumulative engine run time, e.g.
   // "propulsion.main.runTime" — seconds since the engine's counter started.
@@ -1424,6 +1608,15 @@ class SensorConfig {
     'solarFusesAlarmC': solarFusesAlarmC,
     'fridgeWarnC': fridgeWarnC,
     'fridgeAlarmC': fridgeAlarmC,
+    'freezerWarnC': freezerWarnC,
+    'freezerAlarmC': freezerAlarmC,
+    'equipmentWarnC': equipmentWarnC,
+    'equipmentAlarmC': equipmentAlarmC,
+    'tempSensors': [for (final s in tempSensors) s.toJson()],
+    'bowthrusterPath': bowthrusterPath,
+    'dcLoadsPath': dcLoadsPath,
+    'detectedPaths': detectedPaths,
+    'cardVisibility': cardVisibility,
     'depthPath': depthPath,
     'enginePath': enginePath,
     'engineModelId': engineModelId,
@@ -1460,6 +1653,78 @@ class SensorConfig {
         (j['solarFusesAlarmC'] as num?)?.toDouble() ?? c.solarFusesAlarmC;
     c.fridgeWarnC = (j['fridgeWarnC'] as num?)?.toDouble() ?? c.fridgeWarnC;
     c.fridgeAlarmC = (j['fridgeAlarmC'] as num?)?.toDouble() ?? c.fridgeAlarmC;
+    c.freezerWarnC = (j['freezerWarnC'] as num?)?.toDouble() ?? c.freezerWarnC;
+    c.freezerAlarmC =
+        (j['freezerAlarmC'] as num?)?.toDouble() ?? c.freezerAlarmC;
+    // Antes había un umbral para el cuadro y otro para los fusibles, ambos
+    // "equipo": el del cuadro es el que se hereda.
+    c.equipmentWarnC =
+        (j['equipmentWarnC'] as num?)?.toDouble() ?? c.sonoffWarnC;
+    c.equipmentAlarmC =
+        (j['equipmentAlarmC'] as num?)?.toDouble() ?? c.sonoffAlarmC;
+    final rawTemps = j['tempSensors'];
+    if (rawTemps is List) {
+      c.tempSensors = [
+        for (final s in rawTemps)
+          TempSensorSlot.fromJson(s as Map<String, dynamic>),
+      ];
+    } else {
+      // Configuración guardada antes de que existiera la lista: se
+      // reconstruye desde los campos sueltos (incluidos el nombre y la
+      // ubicación de cada nevera, que ahora viven aquí) para que la
+      // pantalla TMP se vea exactamente igual tras actualizar.
+      c.tempSensors = [
+        TempSensorSlot(
+          path: 'environment.sonoff.temperature',
+          label: 'Cuadro eléctrico',
+          role: 'equipo',
+        ),
+        TempSensorSlot(
+          path: 'environment.solar_fuses.temperature',
+          label: 'Fusibles solares',
+          role: 'equipo',
+        ),
+        TempSensorSlot(
+          path: 'environment.water.temperature',
+          label: 'T. mar',
+          role: 'mar',
+        ),
+        if (c.fridge1Path != null && c.fridge1Path!.isNotEmpty)
+          TempSensorSlot(
+            path: c.fridge1Path!,
+            label: 'T. ${c.fridge1Label}',
+            note: c.fridge1Location,
+            role: 'nevera',
+          ),
+        if (c.fridge2Path != null && c.fridge2Path!.isNotEmpty)
+          TempSensorSlot(
+            path: c.fridge2Path!,
+            label: 'T. ${c.fridge2Label}',
+            note: c.fridge2Location,
+            role: 'nevera',
+          ),
+      ];
+    }
+    // Una configuración anterior a estos campos conserva las rutas de
+    // REWIND: no se puede distinguir "no lo tengo" de "aún no se ha
+    // guardado", y quitarlas escondería tarjetas que hoy se ven.
+    if (j.containsKey('bowthrusterPath')) {
+      c.bowthrusterPath = j['bowthrusterPath'] as String?;
+    }
+    if (j.containsKey('dcLoadsPath')) {
+      c.dcLoadsPath = j['dcLoadsPath'] as String?;
+    }
+    final rawDetected = j['detectedPaths'];
+    if (rawDetected is List) {
+      c.detectedPaths = [for (final p in rawDetected) p.toString()];
+    }
+    final rawVisibility = j['cardVisibility'];
+    if (rawVisibility is Map) {
+      c.cardVisibility = {
+        for (final e in rawVisibility.entries)
+          e.key.toString(): e.value.toString(),
+      };
+    }
     c.depthPath = j['depthPath'] as String?;
     c.enginePath = j['enginePath'] as String?;
     c.engineModelId = j['engineModelId'] as String? ?? '';
@@ -3233,6 +3498,10 @@ class SettingsModel {
   // explicitly rather than assumed, and remembered once answered.
   bool? gpsFallbackConsent;
   bool keepAwake = true;
+  // Compartir la configuración del barco con los demás dispositivos a través
+  // del plugin REWIND del servidor (ver config_sync.dart). Se puede apagar
+  // por dispositivo: una tablet de invitados no debe cambiarle nada al barco.
+  bool syncConfigWithServer = true;
   String brightnessMode = 'dia'; // 'dia', 'noche', 'auto'
   // Historical-chart data source: 'auto' tries InfluxDB first and falls back
   // to the Signal K History API (e.g. KIP/SQLite) if that fails — 'influx'

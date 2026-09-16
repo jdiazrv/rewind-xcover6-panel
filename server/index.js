@@ -27,6 +27,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { createRecorder, DEFAULTS: HISTORY_DEFAULTS } = require('./history_recorder');
+const { createConfigStore } = require('./config_store');
 
 const EARTH_RADIUS_M = 6371000;
 const OWN_SOURCE_PREFIX = 'rewind-panel-anchor';
@@ -277,6 +278,45 @@ module.exports = function (app) {
         },
       },
     },
+  };
+
+  // ── Configuración del barco, compartida entre dispositivos ──────────────
+  // Se guarda aquí, y NO en la configuración del plugin, porque Signal K
+  // reinicia el plugin en cada guardado y eso tiraría lo que el grabador de
+  // histórico tenga en memoria. Ver server/config_store.js.
+  let configStore = null;
+
+  function ensureConfigStore() {
+    if (configStore) return configStore;
+    const dataDir =
+      typeof app.getDataDirPath === 'function'
+        ? app.getDataDirPath()
+        : path.join(process.cwd(), 'rewind-panel');
+    configStore = createConfigStore({ app, dataDir });
+    return configStore;
+  }
+
+  plugin.registerWithRouter = function (router) {
+    // Leer es libre (la app la necesita nada más conectar); escribir exige
+    // estar identificado en Signal K, como cualquier otro cambio del barco.
+    const open = typeof router.access === 'function' ? router.access('read') : router;
+    const guarded =
+      typeof router.access === 'function' ? router.access('readwrite') : router;
+
+    open.get('/panel-config', (req, res) => {
+      res.json(ensureConfigStore().read());
+    });
+    open.get('/panel-config/history', (req, res) => {
+      res.json(ensureConfigStore().history());
+    });
+    guarded.post('/panel-config', (req, res) => {
+      const result = ensureConfigStore().save(req.body);
+      res.status(result.status).json(result.body);
+    });
+    guarded.post('/panel-config/restore/:revision', (req, res) => {
+      const result = ensureConfigStore().restore(req.params.revision);
+      res.status(result.status).json(result.body);
+    });
   };
 
   let recorder = null;

@@ -397,12 +397,87 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
         _cfg.fridge2Path = d.fridgePaths[1];
       }
     }
+    // Lo que publica el barco, para poder ocultar la tarjeta de lo que no
+    // tiene (ver optionalCardVisible).
+    _cfg.detectedPaths = skDetectablePaths(d.allPaths);
+    if (_cfg.bowthrusterPath != null &&
+        !_cfg.detectedPaths.contains(_cfg.bowthrusterPath)) {
+      // Un barco que no publica la hélice de proa no debe heredar la ruta
+      // de REWIND como si fuera suya.
+      final found = _cfg.detectedPaths.firstWhere(
+        (p) => p.toLowerCase().contains('bowthruster') && p.endsWith('.voltage'),
+        orElse: () => '',
+      );
+      _cfg.bowthrusterPath = found.isEmpty ? null : found;
+    }
+    if (_cfg.dcLoadsPath != null &&
+        !_cfg.detectedPaths.contains(_cfg.dcLoadsPath)) {
+      _cfg.dcLoadsPath = null;
+    }
+    // Temperaturas: se añaden todas las que publique el barco y no estén ya
+    // en la lista. Las de environment.venus.<id> suelen ser el MISMO sensor
+    // publicado otra vez por el Cerbo (en REWIND, venus.41 es fridge_1), así
+    // que entran apagadas para no duplicar la tarjeta.
+    final knownTempPaths = {for (final s in _cfg.tempSensors) s.path};
+    for (final path in d.allPaths.where(isConfigurableTempPath)) {
+      if (!knownTempPaths.add(path)) continue;
+      _cfg.tempSensors.add(
+        TempSensorSlot(
+          path: path,
+          label: TempSensorSlot.labelFromPath(path),
+          role: TempSensorSlot.roleFromPath(path),
+          enabled: !path.startsWith('environment.venus.'),
+        ),
+      );
+    }
     if (_cfg.depthPath == null && d.depthPaths.isNotEmpty) {
       _cfg.depthPath = d.depthPaths[0];
     }
     if (_cfg.enginePath == null && d.enginePaths.isNotEmpty) {
       _cfg.enginePath = d.enginePaths[0];
     }
+  }
+
+  // Ruta que demuestra que este barco tiene esa tarjeta — ver
+  // optionalCardVisible.
+  String? _cardPath(String id) => switch (id) {
+    'bowthruster' => _cfg.bowthrusterPath,
+    'starterBattery' => _cfg.batteryStartId.isEmpty
+        ? null
+        : 'electrical.batteries.${_cfg.batteryStartId}.voltage',
+    'dcLoads' => _cfg.dcLoadsPath,
+    'solar' => _cfg.solarPath,
+    _ => null,
+  };
+
+  bool _cardDetected(String id) {
+    final path = _cardPath(id);
+    return path != null && path.isNotEmpty && _cfg.detectedPaths.contains(path);
+  }
+
+  String _cardStatusText(String id) {
+    if (_cfg.detectedPaths.isEmpty) {
+      // Sin haber buscado sensores no se oculta nada, así que tampoco se
+      // afirma aquí que falte algo.
+      return 'sin buscar sensores todavía';
+    }
+    final path = _cardPath(id);
+    if (path == null || path.isEmpty) return 'sin ruta asignada';
+    return _cardDetected(id) ? 'detectada en este barco' : 'no detectada';
+  }
+
+  // Rutas de temperatura que el barco publica y todavía no están en la
+  // lista — ver isConfigurableTempPath: baterías, motor y Raspberry quedan
+  // fuera porque ya se ven en su propia pantalla.
+  List<String> get _tempPathOptions {
+    final used = {for (final s in _cfg.tempSensors) s.path};
+    final found = (_discovery?.allPaths ?? const <String>[])
+        .where(isConfigurableTempPath)
+        .where((p) => !used.contains(p))
+        .toSet()
+        .toList()
+      ..sort();
+    return found;
   }
 
   List<String> get _batteryIdOptions {
@@ -609,12 +684,18 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     if (_cfg.batteryHouseCapacityAh < 0) {
       duplicates.add('La capacidad de servicio no puede ser negativa.');
     }
-    if (_cfg.fridge1Label.trim().isEmpty || _cfg.fridge2Label.trim().isEmpty) {
-      duplicates.add('Las neveras deben tener un nombre.');
+    final tempPaths = <String>{};
+    for (final s in _cfg.tempSensors.where((s) => s.enabled)) {
+      if (!tempPaths.add(s.path)) {
+        duplicates.add('El sensor ${s.path} está repetido.');
+      }
+      if (s.label.trim().isEmpty) {
+        duplicates.add('Cada sensor de temperatura necesita un nombre.');
+      }
     }
-    if (_cfg.sonoffWarnC >= _cfg.sonoffAlarmC ||
-        _cfg.solarFusesWarnC >= _cfg.solarFusesAlarmC ||
-        _cfg.fridgeWarnC >= _cfg.fridgeAlarmC) {
+    if (_cfg.fridgeWarnC >= _cfg.fridgeAlarmC ||
+        _cfg.freezerWarnC >= _cfg.freezerAlarmC ||
+        _cfg.equipmentWarnC >= _cfg.equipmentAlarmC) {
       duplicates.add('Cada aviso de temperatura debe ser menor que su alarma.');
     }
     final tankKeys = <String>{};
@@ -658,12 +739,12 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
         'La capacidad de la batería de servicio no puede ser negativa.',
       );
     }
-    if (_cfg.fridge1Label.trim().isEmpty || _cfg.fridge2Label.trim().isEmpty) {
-      errors.add('Las neveras necesitan un nombre visible.');
+    if (_cfg.tempSensors.any((s) => s.enabled && s.label.trim().isEmpty)) {
+      errors.add('Cada sensor de temperatura necesita un nombre visible.');
     }
-    if (_cfg.sonoffWarnC >= _cfg.sonoffAlarmC ||
-        _cfg.solarFusesWarnC >= _cfg.solarFusesAlarmC ||
-        _cfg.fridgeWarnC >= _cfg.fridgeAlarmC) {
+    if (_cfg.fridgeWarnC >= _cfg.fridgeAlarmC ||
+        _cfg.freezerWarnC >= _cfg.freezerAlarmC ||
+        _cfg.equipmentWarnC >= _cfg.equipmentAlarmC) {
       errors.add('Cada temperatura de aviso debe ser menor que su alarma.');
     }
     if (errors.isEmpty) {
@@ -1168,34 +1249,8 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                   setState(() => _cfg.enginePath = v),
                             ),
                             const SizedBox(height: 12),
-                            const Text('NEVERAS', style: lbl),
+                            const Text('NEVERAS (alarma y tarjeta NAV)', style: lbl),
                             const SizedBox(height: 4),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextFormField(
-                                    initialValue: _cfg.fridge1Label,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Nombre nevera 1',
-                                      isDense: true,
-                                    ),
-                                    onChanged: (v) => _cfg.fridge1Label = v,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: TextFormField(
-                                    initialValue: _cfg.fridge1Location,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Ubicación',
-                                      isDense: true,
-                                    ),
-                                    onChanged: (v) => _cfg.fridge1Location = v,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
                             DropdownButtonFormField<String?>(
                               initialValue: _cfg.fridge1Path,
                               decoration: const InputDecoration(
@@ -1214,32 +1269,6 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               ],
                               onChanged: (v) =>
                                   setState(() => _cfg.fridge1Path = v),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextFormField(
-                                    initialValue: _cfg.fridge2Label,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Nombre nevera 2',
-                                      isDense: true,
-                                    ),
-                                    onChanged: (v) => _cfg.fridge2Label = v,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: TextFormField(
-                                    initialValue: _cfg.fridge2Location,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Ubicación',
-                                      isDense: true,
-                                    ),
-                                    onChanged: (v) => _cfg.fridge2Location = v,
-                                  ),
-                                ),
-                              ],
                             ),
                             const SizedBox(height: 8),
                             DropdownButtonFormField<String?>(
@@ -1262,8 +1291,124 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                   setState(() => _cfg.fridge2Path = v),
                             ),
                             const SizedBox(height: 12),
+                            const Text('SENSORES DE TEMPERATURA', style: lbl),
                             const Text(
-                              'UMBRALES DE TEMPERATURA (°C)',
+                              'Lo que se ve en la pantalla TMP. Aquí se ponen el nombre y la ubicación de cada sensor, neveras incluidas.',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            ),
+                            const SizedBox(height: 4),
+                            if (_cfg.tempSensors.isEmpty)
+                              const Text(
+                                'Ninguno todavía — pulsa "Buscar sensores".',
+                                style: TextStyle(color: cMuted, fontSize: 12),
+                              ),
+                            for (final s in _cfg.tempSensors)
+                              Padding(
+                                key: ValueKey(s.path),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 2,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Checkbox(
+                                      value: s.enabled,
+                                      onChanged: (v) => setState(
+                                        () => s.enabled = v ?? false,
+                                      ),
+                                    ),
+                                    Expanded(
+                                      flex: 3,
+                                      child: TextFormField(
+                                        initialValue: s.label,
+                                        decoration: const InputDecoration(
+                                          isDense: true,
+                                          labelText: 'Nombre',
+                                        ),
+                                        onChanged: (v) => s.label = v,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      flex: 2,
+                                      child: TextFormField(
+                                        initialValue: s.note,
+                                        decoration: const InputDecoration(
+                                          isDense: true,
+                                          labelText: 'Ubicación',
+                                        ),
+                                        onChanged: (v) => s.note = v,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      flex: 2,
+                                      child: DropdownButtonFormField<String>(
+                                        initialValue: s.role,
+                                        decoration: const InputDecoration(
+                                          isDense: true,
+                                          labelText: 'Tipo',
+                                        ),
+                                        items: [
+                                          for (final e
+                                              in kTempSensorRoles.entries)
+                                            DropdownMenuItem(
+                                              value: e.key,
+                                              child: Text(e.value),
+                                            ),
+                                        ],
+                                        onChanged: (v) => setState(
+                                          () => s.role = v ?? s.role,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: s.path,
+                                      icon: const Icon(
+                                        Icons.delete_outline,
+                                        size: 18,
+                                      ),
+                                      onPressed: () => setState(
+                                        () => _cfg.tempSensors.remove(s),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            if (_tempPathOptions.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              DropdownButtonFormField<String?>(
+                                initialValue: null,
+                                decoration: const InputDecoration(
+                                  labelText: 'Añadir sensor de temperatura',
+                                  isDense: true,
+                                ),
+                                items: [
+                                  for (final p in _tempPathOptions)
+                                    DropdownMenuItem(
+                                      value: p,
+                                      child: Text(
+                                        p,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                ],
+                                onChanged: (v) {
+                                  if (v == null) return;
+                                  setState(
+                                    () => _cfg.tempSensors.add(
+                                      TempSensorSlot(
+                                        path: v,
+                                        label: TempSensorSlot.labelFromPath(v),
+                                        role: TempSensorSlot.roleFromPath(v),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+                            const Text(
+                              'UMBRALES POR TIPO (°C)',
                               style: lbl,
                             ),
                             const SizedBox(height: 4),
@@ -1272,37 +1417,114 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               runSpacing: 8,
                               children: [
                                 _numberField(
-                                  'Cuadro aviso',
-                                  _cfg.sonoffWarnC,
-                                  (v) => _cfg.sonoffWarnC = v,
-                                ),
-                                _numberField(
-                                  'Cuadro alarma',
-                                  _cfg.sonoffAlarmC,
-                                  (v) => _cfg.sonoffAlarmC = v,
-                                ),
-                                _numberField(
-                                  'Fusibles aviso',
-                                  _cfg.solarFusesWarnC,
-                                  (v) => _cfg.solarFusesWarnC = v,
-                                ),
-                                _numberField(
-                                  'Fusibles alarma',
-                                  _cfg.solarFusesAlarmC,
-                                  (v) => _cfg.solarFusesAlarmC = v,
-                                ),
-                                _numberField(
-                                  'Neveras aviso',
+                                  'Nevera aviso',
                                   _cfg.fridgeWarnC,
                                   (v) => _cfg.fridgeWarnC = v,
                                 ),
                                 _numberField(
-                                  'Neveras alarma',
+                                  'Nevera alarma',
                                   _cfg.fridgeAlarmC,
                                   (v) => _cfg.fridgeAlarmC = v,
                                 ),
+                                _numberField(
+                                  'Congelador aviso',
+                                  _cfg.freezerWarnC,
+                                  (v) => _cfg.freezerWarnC = v,
+                                ),
+                                _numberField(
+                                  'Congelador alarma',
+                                  _cfg.freezerAlarmC,
+                                  (v) => _cfg.freezerAlarmC = v,
+                                ),
+                                _numberField(
+                                  'Equipo aviso',
+                                  _cfg.equipmentWarnC,
+                                  (v) => _cfg.equipmentWarnC = v,
+                                ),
+                                _numberField(
+                                  'Equipo alarma',
+                                  _cfg.equipmentAlarmC,
+                                  (v) => _cfg.equipmentAlarmC = v,
+                                ),
                               ],
                             ),
+                            const SizedBox(height: 12),
+                            const Text('TARJETAS OPCIONALES', style: lbl),
+                            const Text(
+                              'En automático solo se ven si el barco publica ese dato. Si un sensor está apagado ahora mismo, ponlo en Mostrar.',
+                              style: TextStyle(color: cMuted, fontSize: 12),
+                            ),
+                            const SizedBox(height: 4),
+                            for (final card in kOptionalCardLabels.entries)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 3,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            card.value,
+                                            style: const TextStyle(
+                                              color: cText,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                          Text(
+                                            _cardStatusText(card.key),
+                                            style: TextStyle(
+                                              color: _cardDetected(card.key)
+                                                  ? cGreen
+                                                  : cMuted,
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    SegmentedButton<String>(
+                                      style: const ButtonStyle(
+                                        visualDensity: VisualDensity.compact,
+                                      ),
+                                      segments: const [
+                                        ButtonSegment(
+                                          value: 'auto',
+                                          label: Text(
+                                            'Auto',
+                                            style: TextStyle(fontSize: 11),
+                                          ),
+                                        ),
+                                        ButtonSegment(
+                                          value: 'on',
+                                          label: Text(
+                                            'Mostrar',
+                                            style: TextStyle(fontSize: 11),
+                                          ),
+                                        ),
+                                        ButtonSegment(
+                                          value: 'off',
+                                          label: Text(
+                                            'Ocultar',
+                                            style: TextStyle(fontSize: 11),
+                                          ),
+                                        ),
+                                      ],
+                                      selected: {
+                                        _cfg.cardVisibility[card.key] ?? 'auto',
+                                      },
+                                      onSelectionChanged: (v) => setState(
+                                        () => _cfg.cardVisibility[card.key] =
+                                            v.first,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             const SizedBox(height: 12),
                             const Text('TANQUES', style: lbl),
                             const SizedBox(height: 4),
