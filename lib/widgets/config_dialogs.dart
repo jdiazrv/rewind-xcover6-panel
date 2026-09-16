@@ -438,6 +438,47 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     }
   }
 
+  // Candidatas para la hélice de proa: cualquier voltaje de batería que
+  // publique el barco, porque el nombre lo pone cada instalación (en REWIND
+  // es "bowthruster", en otro barco puede ser "proa" o un número).
+  List<String?> get _bowthrusterOptions {
+    final found =
+        _cfg.detectedPaths
+            .where(
+              (p) =>
+                  p.startsWith('electrical.') &&
+                  (p.endsWith('.voltage') || p.endsWith('.current')),
+            )
+            .toList()
+          ..sort();
+    return [
+      null,
+      ...found,
+      if (_cfg.bowthrusterPath != null && !found.contains(_cfg.bowthrusterPath))
+        _cfg.bowthrusterPath,
+    ];
+  }
+
+  // Consumos DC: la salida total del cargador/inversor. En REWIND la publica
+  // el Cerbo como electrical.venus.dcPower; en otro barco tendrá otro nombre.
+  List<String?> get _dcLoadsOptions {
+    final found =
+        _cfg.detectedPaths
+            .where(
+              (p) =>
+                  p.startsWith('electrical.') &&
+                  p.toLowerCase().contains('power'),
+            )
+            .toList()
+          ..sort();
+    return [
+      null,
+      ...found,
+      if (_cfg.dcLoadsPath != null && !found.contains(_cfg.dcLoadsPath))
+        _cfg.dcLoadsPath,
+    ];
+  }
+
   // Ruta que demuestra que este barco tiene esa tarjeta — ver
   // optionalCardVisible.
   String? _cardPath(String id) => switch (id) {
@@ -1454,6 +1495,47 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               'En automático solo se ven si el barco publica ese dato. Si un sensor está apagado ahora mismo, ponlo en Mostrar.',
                               style: TextStyle(color: cMuted, fontSize: 12),
                             ),
+                            const SizedBox(height: 6),
+                            DropdownButtonFormField<String?>(
+                              initialValue: _cfg.bowthrusterPath,
+                              decoration: const InputDecoration(
+                                labelText: 'Hélice de proa (voltaje)',
+                                isDense: true,
+                              ),
+                              items: [
+                                for (final p in _bowthrusterOptions)
+                                  DropdownMenuItem(
+                                    value: p,
+                                    child: Text(
+                                      p ?? 'No tiene',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (v) =>
+                                  setState(() => _cfg.bowthrusterPath = v),
+                            ),
+                            const SizedBox(height: 8),
+                            DropdownButtonFormField<String?>(
+                              initialValue: _cfg.dcLoadsPath,
+                              decoration: const InputDecoration(
+                                labelText: 'Consumos DC (potencia total)',
+                                isDense: true,
+                              ),
+                              items: [
+                                for (final p in _dcLoadsOptions)
+                                  DropdownMenuItem(
+                                    value: p,
+                                    child: Text(
+                                      p ?? 'No tiene',
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (v) =>
+                                  setState(() => _cfg.dcLoadsPath = v),
+                            ),
+                            const SizedBox(height: 8),
                             const SizedBox(height: 4),
                             for (final card in kOptionalCardLabels.entries)
                               Padding(
