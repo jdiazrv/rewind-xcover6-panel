@@ -1373,11 +1373,15 @@ class PowerAuxTile extends StatelessWidget {
     this.customIcon,
     this.graphMetrics,
     this.onShowCurve,
+    this.subtitleFontSize = 18,
   });
   final String title;
   final String value;
   final String unit;
   final String subtitle;
+  // En TMP el subtítulo lleva el resumen de 24 h y a 18 px competía con el
+  // propio número (reportado en vivo 2026-09-16).
+  final double subtitleFontSize;
   final Color color;
   final IconData? icon;
   final Widget? customIcon;
@@ -1502,9 +1506,9 @@ class PowerAuxTile extends StatelessWidget {
                     child: Text(
                       subtitle,
                       maxLines: 1,
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: cMuted,
-                        fontSize: 18,
+                        fontSize: subtitleFontSize,
                         fontWeight: FontWeight.w700,
                       ),
                     ),

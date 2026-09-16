@@ -419,14 +419,26 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     // publicado otra vez por el Cerbo (en REWIND, venus.41 es fridge_1), así
     // que entran apagadas para no duplicar la tarjeta.
     final knownTempPaths = {for (final s in _cfg.tempSensors) s.path};
-    for (final path in d.allPaths.where(isConfigurableTempPath)) {
+    final descubiertas = d.allPaths.where(isConfigurableTempPath).toList();
+    // El Cerbo republica como environment.venus.<id> sensores que ya llegan
+    // con su nombre propio (en REWIND, venus.41 es fridge_1): si hay rutas
+    // con nombre, las de venus no se ofrecen siquiera, porque duplicarían
+    // cada tarjeta con un título tan útil como "41" (visto en vivo
+    // 2026-09-16). Solo se ofrecen si son lo único que publica el barco.
+    final conNombre = descubiertas
+        .where((p) => !p.startsWith('environment.venus.'))
+        .toList();
+    for (final path in conNombre.isEmpty ? descubiertas : conNombre) {
       if (!knownTempPaths.add(path)) continue;
+      final esVenus = path.startsWith('environment.venus.');
       _cfg.tempSensors.add(
         TempSensorSlot(
           path: path,
-          label: TempSensorSlot.labelFromPath(path),
+          label: esVenus
+              ? 'Venus ${TempSensorSlot.labelFromPath(path)}'
+              : TempSensorSlot.labelFromPath(path),
           role: TempSensorSlot.roleFromPath(path),
-          enabled: !path.startsWith('environment.venus.'),
+          enabled: !esVenus,
         ),
       );
     }

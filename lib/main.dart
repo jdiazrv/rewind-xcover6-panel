@@ -10743,6 +10743,9 @@ class _DashboardState extends State<Dashboard> {
                 value: tempValue(kelvin),
                 unit: tempUnit(kelvin) ?? '°C',
                 subtitle: subtitle,
+                // El resumen de 24 h es un apunte, no el dato: a su tamaño
+                // normal tapaba al propio número (visto en vivo 2026-09-16).
+                subtitleFontSize: 12,
                 color: color,
                 customIcon: s.role == 'congelador'
                     ? FridgeUprightGlyph(color: color)
@@ -10756,12 +10759,44 @@ class _DashboardState extends State<Dashboard> {
                 unit: tempUnit(kelvin),
                 color: color,
                 subtitle: subtitle,
+                subtitleFontSize: 12,
                 zoom: _showZoom,
                 graphMetrics: [metric],
               ),
       );
     }
-    return _grid3x2(children: cards, fillLastRow: true);
+    // Con más de seis sensores (REWIND publica 17 rutas de temperatura) una
+    // rejilla fija reparte la misma altura entre más filas y acaba recortando
+    // los números. Las filas mantienen su altura y la pantalla se desplaza.
+    const columns = 3;
+    const rowHeight = 168.0;
+    if (cards.length <= columns * 2) {
+      return _grid3x2(children: cards, fillLastRow: true);
+    }
+    final rows = <Widget>[];
+    for (var i = 0; i < cards.length; i += columns) {
+      final slice = cards.sublist(i, math.min(i + columns, cards.length));
+      rows.add(
+        SizedBox(
+          height: rowHeight,
+          child: Row(
+            children: [
+              for (var j = 0; j < columns; j++) ...[
+                if (j > 0) const SizedBox(width: 8),
+                Expanded(
+                  child: j < slice.length ? slice[j] : const SizedBox.shrink(),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+      rows.add(const SizedBox(height: 8));
+    }
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: ListView(padding: EdgeInsets.zero, children: rows),
+    );
   }
 
   // ─── Tank page ──────────────────────────────────────────────────────────────

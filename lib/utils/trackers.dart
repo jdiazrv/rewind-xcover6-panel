@@ -21,7 +21,9 @@ class _SlowValueHistory {
         : delta < -0.3
         ? '↘'
         : '→';
-    return '$arrow ${min.toStringAsFixed(1)}–${max.toStringAsFixed(1)}$unit';
+    // "24 h" delante: sin eso, el intervalo parecía otra medida de la
+    // tarjeta en vez del mínimo y el máximo del último día.
+    return '24 h ${min.toStringAsFixed(1)}–${max.toStringAsFixed(1)}$unit $arrow';
   }
 }
 
