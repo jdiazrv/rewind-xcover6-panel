@@ -63,32 +63,46 @@ void main() {
     });
 
     test('una racha real de 40 kt con 15 de media NO se pierde', () {
-      // El caso que preocupa: la racha se dispara sobre la media de su
-      // minuto, pero los minutos de al lado vienen altos porque el viento
-      // está arreciando de verdad.
-      final peak = plausibleGustPeak(
+      // 40 sobre 15 es 2,7 veces la media: una racha fuerte, no un fallo.
+      // Ni siquiera llega a sospechosa, esté sola o acompañada.
+      final acompanada = plausibleGustPeak(
         maxima: [p(0, 22), p(1, 28), p(2, 40), p(3, 26), p(4, 24)],
         averages: [p(0, 14), p(1, 15), p(2, 15), p(3, 15), p(4, 14)],
       );
-      expect(peak!.value, 40);
-    });
-
-    test('el mismo 40 kt aislado sí se descarta', () {
-      // Idéntico valor y media, pero sin nada alrededor: eso es la veleta.
-      final peak = plausibleGustPeak(
+      expect(acompanada!.value, 40);
+      final sola = plausibleGustPeak(
         maxima: [p(0, 15), p(1, 16), p(2, 40), p(3, 15), p(4, 16)],
         averages: [p(0, 14), p(1, 15), p(2, 15), p(3, 15), p(4, 14)],
       );
-      expect(peak!.value, 16);
+      expect(sola!.value, 40, reason: 'ante la duda, no se pierde la racha');
     });
 
     test('datos reales de QUINTO REAL: pico fuera, racha dentro', () {
-      // Minutos 13:23-13:27 medidos: el pico de 55,8 con vecinos ~17.
+      // Minutos 13:23-13:27 medidos: el pico de 55,8 (x4,1) con vecinos ~17.
       final peak = plausibleGustPeak(
         maxima: [p(0, 16.6), p(1, 17.3), p(2, 55.8), p(3, 16.2), p(4, 16.6)],
-        averages: [p(0, 13), p(1, 13), p(2, 12.9), p(3, 13), p(4, 13)],
+        averages: [p(0, 13), p(1, 13), p(2, 13.7), p(3, 13), p(4, 13)],
       );
       expect(peak!.value, 17.3);
+    });
+
+    test('dos fallos seguidos no se confirman entre ellos', () {
+      // El 16/09 la veleta dio 44,5 y 45,4 kt en minutos contiguos, ambos
+      // con 12 kt de media: uno "avalaba" al otro y la app enseñaba 45,4.
+      final peak = plausibleGustPeak(
+        maxima: [p(0, 17.6), p(1, 44.5), p(2, 23.7), p(3, 45.4), p(4, 16.4)],
+        averages: [p(0, 13), p(1, 12.8), p(2, 13), p(3, 12.5), p(4, 13)],
+      );
+      expect(peak!.value, 23.7);
+    });
+
+    test('un pico sí se salva si lo acompaña un minuto sano', () {
+      // Caso real del 16/09 a las 10:45: 41,5 kt con un vecino sano de 31.
+      final peak = plausibleGustPeak(
+        maxima: [p(0, 20), p(1, 31), p(2, 41.5), p(3, 19), p(4, 18)],
+        averages: [p(0, 12), p(1, 12.5), p(2, 11.5), p(3, 12), p(4, 12)],
+      );
+      expect(peak!.value, 41.5);
     });
 
     test('un temporal de verdad en un día flojo NO se pierde', () {

@@ -650,7 +650,7 @@ double? normalizeWindKn(double raw) {
 bool windReadingIsImplausible(
   double kn, {
   required double recentMeanKn,
-  double factor = 2.5,
+  double factor = 3,
   double marginKn = 15,
 }) =>
     recentMeanKn > 0 &&
@@ -672,7 +672,7 @@ bool windReadingIsImplausible(
 /// al 30-40% de su valor, y las rachas de verdad (31,8 / 26,6 kt) al 55-70%.
 /// Sin esta segunda condición se perdería una racha real de 40 kt con 15 de
 /// media, que es justo lo que no puede pasar en un barco.
-const kGustNeighbourRatio = 0.55;
+const kGustNeighbourRatio = 0.6;
 
 GraphPoint? plausibleGustPeak({
   required List<GraphPoint> maxima,
@@ -681,20 +681,30 @@ GraphPoint? plausibleGustPeak({
 }) {
   final meanByTime = {for (final a in averages) a.time: a.value};
   final ordered = [...maxima]..sort((a, b) => a.time.compareTo(b.time));
+  // Primera pasada: qué intervalos se disparan sobre la media de su propio
+  // minuto. Sin media no se marca nada — mejor una racha de más que perder
+  // una real por falta de datos.
+  final suspect = [
+    for (final p in ordered)
+      switch (meanByTime[p.time]) {
+        final mean? => windReadingIsImplausible(p.value, recentMeanKn: mean),
+        _ => false,
+      },
+  ];
   GraphPoint? best;
   for (var i = 0; i < ordered.length; i++) {
     final p = ordered[i];
-    final mean = meanByTime[p.time];
-    // Sin media del mismo intervalo no se descarta nada: mejor una racha de
-    // más que perder una real por falta de datos.
-    if (mean != null && windReadingIsImplausible(p.value, recentMeanKn: mean)) {
-      var neighbourPeak = 0.0;
+    if (suspect[i]) {
+      // Segunda pasada: un pico solo se salva si lo acompaña un vecino SANO.
+      // Sin esto, dos fallos seguidos de la veleta se confirman entre ellos,
+      // que es justo lo que pasó en QUINTO REAL el 16/09 (44,5 y 45,4 kt en
+      // minutos contiguos, ambos con 12 kt de media).
+      var healthyNeighbour = 0.0;
       for (var j = i - neighbourSpan; j <= i + neighbourSpan; j++) {
-        if (j == i || j < 0 || j >= ordered.length) continue;
-        neighbourPeak = math.max(neighbourPeak, ordered[j].value);
+        if (j == i || j < 0 || j >= ordered.length || suspect[j]) continue;
+        healthyNeighbour = math.max(healthyNeighbour, ordered[j].value);
       }
-      final isolated = neighbourPeak < p.value * kGustNeighbourRatio;
-      if (isolated) continue;
+      if (healthyNeighbour < p.value * kGustNeighbourRatio) continue;
     }
     if (best == null || p.value > best.value) best = p;
   }

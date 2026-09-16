@@ -39832,17 +39832,20 @@ if(n!=null&&m!=null)q.push(new A.Q9(o,n,m))
 r+=s}return q},
 bqp(a){if(!isFinite(a)||a<0||a>100)return null
 return a},
-bXi(a,b){return b>0&&a>b*2.5&&a-b>15},
-bVN(a,b){var s,r,q,p,o,n,m,l,k,j=A.A(t.CG,t.i)
+bXi(a,b){return b>0&&a>b*3&&a-b>15},
+bVN(a,b){var s,r,q,p,o,n,m,l,k,j,i,h=A.A(t.CG,t.i)
 for(s=J.b2(a);s.t();){r=s.gN()
-j.l(0,r.a,r.b)}s=A.F(b,t.LJ)
+h.l(0,r.a,r.b)}s=A.F(b,t.LJ)
 B.h.df(s,new A.bkq())
-for(q=null,p=0;p<s.length;++p){o=s[p]
-n=j.h(0,o.a)
-if(n!=null){r=o.b
-r=n>0&&r>n*2.5&&r-n>15}else r=!1
-if(r){for(m=p-2,r=p+2,l=s.length,k=0;m<=r;++m){if(m===p||m<0||m>=l)continue
-k=Math.max(k,s[m].b)}if(k<o.b*0.55)continue}if(q==null||o.b>q.b)q=o}return q},
+r=A.a([],t.HZ)
+for(q=s.length,p=0;o=s.length,p<o;s.length===q||(0,A.o)(s),++p){n=s[p]
+m=h.h(0,n.a)
+A:{if(m!=null){o=n.b
+o=m>0&&o>m*3&&o-m>15
+break A}o=!1
+break A}r.push(o)}for(l=null,k=0;k<o;++k){n=s[k]
+if(r[k]){for(j=k-2,h=k+2,i=0;j<=h;++j){if(j===k||j<0||j>=o||r[j])continue
+i=Math.max(i,s[j].b)}if(i<n.b*0.6)continue}if(l==null||n.b>l.b)l=n}return l},
 bir(a){var s
 A:{if("depthBelow"===a){s="Profundidad menor de"
 break A}if("windAbove"===a){s="Viento (aparente) mayor de"
