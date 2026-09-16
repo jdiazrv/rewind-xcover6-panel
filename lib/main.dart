@@ -4853,10 +4853,19 @@ class _DashboardState extends State<Dashboard> {
         // Mismo filtro que en el histórico (ver normalizeWindKn): un dato
         // corrupto no debe entrar ni en la lectura ni en el buffer de
         // rachas, que se queda con el máximo y lo arrastraría horas.
-        signalK.awsKn = n == null ? null : normalizeWindKn(n * 1.94384);
-        _dAws = _awsDamp.linear(signalK.awsKn);
-        _awsHistory.add(signalK.awsKn);
-        if (signalK.awsKn != null) signalK.awsUpdate = ts;
+        // accept() añade al buffer lo que pasa el filtro y descarta los picos
+        // sueltos de la veleta; un valor descartado NO borra la lectura
+        // buena anterior, solo se ignora.
+        final awsCandidate = n == null ? null : normalizeWindKn(n * 1.94384);
+        final awsAccepted = _awsHistory.accept(awsCandidate);
+        if (n == null) {
+          signalK.awsKn = null;
+          _dAws = _awsDamp.linear(null);
+        } else if (awsAccepted != null) {
+          signalK.awsKn = awsAccepted;
+          _dAws = _awsDamp.linear(awsAccepted);
+          signalK.awsUpdate = ts;
+        }
       case 'environment.wind.angleApparent':
         signalK.awaDeg = n == null ? null : n * 57.2957795;
         _dAwa = _awaDamp.angle(signalK.awaDeg);
@@ -4894,10 +4903,16 @@ class _DashboardState extends State<Dashboard> {
         _twdShiftHistory.add(_dTwd);
         signalK.twdUpdate = ts;
       case 'environment.wind.speedTrue':
-        signalK.twsKn = n == null ? null : normalizeWindKn(n * 1.94384);
-        _dTws = _twsDamp.linear(signalK.twsKn);
-        _twsHistory.add(signalK.twsKn);
-        if (signalK.twsKn != null) signalK.twsUpdate = ts;
+        final twsCandidate = n == null ? null : normalizeWindKn(n * 1.94384);
+        final twsAccepted = _twsHistory.accept(twsCandidate);
+        if (n == null) {
+          signalK.twsKn = null;
+          _dTws = _twsDamp.linear(null);
+        } else if (twsAccepted != null) {
+          signalK.twsKn = twsAccepted;
+          _dTws = _twsDamp.linear(twsAccepted);
+          signalK.twsUpdate = ts;
+        }
       case 'environment.water.temperature':
         signalK.waterTempK = n;
       case 'environment.outside.temperature':
@@ -6258,10 +6273,26 @@ class _DashboardState extends State<Dashboard> {
         );
       }
       _historicGustFetchedAt = DateTime.now();
-      GraphPoint? peak;
-      for (final p in pts) {
-        if (peak == null || p.value > peak.value) peak = p;
+      // La racha es el MÁXIMO de la ventana, así que una sola muestra
+      // corrupta manda en la pantalla durante horas. Se contrasta cada máximo
+      // con la media DE SU PROPIO MINUTO (ver plausibleGustPeak): en una
+      // racha real la media del minuto también sube; en un pico de la veleta,
+      // no (QUINTO REAL, 2026-09-16: 44,5 kt de máximo con 12,1 de media).
+      // Si no se puede traer la media, no se descarta nada.
+      var means = <GraphPoint>[];
+      try {
+        means = await skHistoryQuery(
+          host: settings.host,
+          port: settings.port,
+          authBase64: settings.authBase64,
+          def: mAws,
+          range: _historicGustWindow,
+          resolution: const Duration(minutes: 1),
+        );
+      } catch (_) {
+        means = const [];
       }
+      final peak = plausibleGustPeak(maxima: pts, averages: means);
       if (!mounted) return;
       setState(() {
         _historicGust = peak == null

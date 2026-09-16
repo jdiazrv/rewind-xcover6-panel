@@ -637,6 +637,70 @@ double? normalizeWindKn(double raw) {
   return raw;
 }
 
+/// ¿Es esta lectura un pico imposible del sensor y no viento de verdad?
+///
+/// El tope absoluto de 100 kt no sirve para esto: en QUINTO REAL la veleta
+/// suelta muestras de 44-56 kt con el viento a 12 kt, y como la racha que se
+/// enseña es el MÁXIMO de las últimas horas, un solo pico manda en la pantalla
+/// durante horas (reportado en vivo 2026-09-16). Una racha real sube también
+/// la media del minuto; un pico suelto, no.
+///
+/// Se exigen las dos condiciones para no castigar al viento flojo, donde
+/// pasar de 2 a 6 kt multiplica por tres pero son 4 kt de nada.
+bool windReadingIsImplausible(
+  double kn, {
+  required double recentMeanKn,
+  double factor = 2.5,
+  double marginKn = 15,
+}) =>
+    recentMeanKn > 0 &&
+    kn > recentMeanKn * factor &&
+    kn - recentMeanKn > marginKn;
+
+/// La racha más alta del histórico que no sea un pico del sensor.
+///
+/// Cada punto de [maxima] es el máximo de un intervalo y cada uno de
+/// [averages] la media DEL MISMO intervalo. Comparar el máximo con la media de
+/// su propio minuto es lo que distingue una racha de un pico: en una racha
+/// real sube también la media; en un pico suelto, no. Comparar contra la media
+/// de toda la ventana descartaría un temporal de verdad en un día flojo.
+/// Un pico solo se descarta si además de dispararse sobre la media de su
+/// intervalo está SOLO: los intervalos de al lado se quedan muy por debajo.
+///
+/// Es lo que separa los dos casos en datos reales de QUINTO REAL
+/// (2026-09-16): los picos del sensor (55,8 / 45,4 / 44,5 kt) tienen vecinos
+/// al 30-40% de su valor, y las rachas de verdad (31,8 / 26,6 kt) al 55-70%.
+/// Sin esta segunda condición se perdería una racha real de 40 kt con 15 de
+/// media, que es justo lo que no puede pasar en un barco.
+const kGustNeighbourRatio = 0.55;
+
+GraphPoint? plausibleGustPeak({
+  required List<GraphPoint> maxima,
+  required List<GraphPoint> averages,
+  int neighbourSpan = 2,
+}) {
+  final meanByTime = {for (final a in averages) a.time: a.value};
+  final ordered = [...maxima]..sort((a, b) => a.time.compareTo(b.time));
+  GraphPoint? best;
+  for (var i = 0; i < ordered.length; i++) {
+    final p = ordered[i];
+    final mean = meanByTime[p.time];
+    // Sin media del mismo intervalo no se descarta nada: mejor una racha de
+    // más que perder una real por falta de datos.
+    if (mean != null && windReadingIsImplausible(p.value, recentMeanKn: mean)) {
+      var neighbourPeak = 0.0;
+      for (var j = i - neighbourSpan; j <= i + neighbourSpan; j++) {
+        if (j == i || j < 0 || j >= ordered.length) continue;
+        neighbourPeak = math.max(neighbourPeak, ordered[j].value);
+      }
+      final isolated = neighbourPeak < p.value * kGustNeighbourRatio;
+      if (isolated) continue;
+    }
+    if (best == null || p.value > best.value) best = p;
+  }
+  return best;
+}
+
 const mTws = MetricDef(
   'environment.wind.speedTrue',
   'TWS',

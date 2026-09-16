@@ -143,6 +143,40 @@ class _WindHistory {
   // "racha" should be the actual peak, not just the last one seen.
   final List<(DateTime, double)> _confirmedGusts = [];
 
+  // Última lectura descartada por disparatada, a la espera de que la
+  // siguiente la confirme. Mismo criterio que el filtro de saltos del GPS en
+  // el fondeo: un pico suelto es ruido, dos seguidos parecidos son un
+  // fenómeno real.
+  double? _pendingSpikeKn;
+  static const _spikeConfirmTolerance = 0.25;
+
+  /// Filtra picos imposibles ANTES de que entren en la lectura y en el
+  /// buffer de rachas. Devuelve null cuando la muestra se descarta.
+  ///
+  /// Sin esto, un solo frame corrupto de la veleta se queda como "racha"
+  /// durante horas, porque la racha es el máximo de la ventana.
+  double? accept(double? value) {
+    if (value == null) return null;
+    final mean = _avg(Duration.zero, const Duration(minutes: 2));
+    if (mean == null ||
+        _samples.length < 10 ||
+        !windReadingIsImplausible(value, recentMeanKn: mean)) {
+      _pendingSpikeKn = null;
+      add(value);
+      return value;
+    }
+    final pending = _pendingSpikeKn;
+    if (pending != null &&
+        (value - pending).abs() <= pending * _spikeConfirmTolerance) {
+      // Dos lecturas altas seguidas y parecidas: es viento de verdad.
+      _pendingSpikeKn = null;
+      add(value);
+      return value;
+    }
+    _pendingSpikeKn = value;
+    return null;
+  }
+
   void add(double? value) {
     if (value == null) return;
     final now = DateTime.now();
