@@ -10581,10 +10581,13 @@ class _DashboardState extends State<Dashboard> {
     if (_sharedConfigBusy) return;
     _sharedConfigBusy = true;
     try {
+      // Con sesión iniciada se lee con el token; sin ella se intenta igual,
+      // porque hay servidores que permiten lectura anónima.
       final doc = await fetchPanelConfig(
         host: settings.host,
         port: settings.port,
         authBase64: settings.authBase64,
+        token: await _ensureSkConfigToken(),
       );
       if (!mounted || doc == null) return;
       if (!shouldAdoptRemote(

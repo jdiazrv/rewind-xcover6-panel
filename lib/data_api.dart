@@ -236,20 +236,27 @@ PanelConfigDoc _panelConfigFromJson(Map<String, dynamic> j) => (
       : <String, dynamic>{},
 );
 
-/// Lee la configuración compartida. Leer no exige identificarse: la app la
-/// necesita nada más conectar, antes incluso de que haya sesión.
+/// Lee la configuración compartida.
+///
+/// Signal K protege las rutas de un plugin, así que se manda el token de
+/// sesión cuando lo hay; sin él solo funciona en servidores que permitan
+/// lectura anónima, y la app se queda con su copia local.
 Future<PanelConfigDoc?> fetchPanelConfig({
   required String host,
   required int port,
   String authBase64 = '',
+  String? token,
 }) async {
   final uri = Uri.http('$host:$port', '/plugins/rewind-xcover6-panel/panel-config');
   final response = await http
       .get(
         uri,
-        headers: authBase64.isEmpty
-            ? {}
-            : {'Authorization': 'Basic $authBase64'},
+        headers: {
+          if (token != null && token.isNotEmpty)
+            'Authorization': 'Bearer $token'
+          else if (authBase64.isNotEmpty)
+            'Authorization': 'Basic $authBase64',
+        },
       )
       .timeout(const Duration(seconds: 10));
   if (response.statusCode != 200) return null;

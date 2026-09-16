@@ -297,9 +297,12 @@ module.exports = function (app) {
   }
 
   plugin.registerWithRouter = function (router) {
-    // Leer es libre (la app la necesita nada más conectar); escribir exige
-    // estar identificado en Signal K, como cualquier otro cambio del barco.
-    const open = typeof router.access === 'function' ? router.access('read') : router;
+    // 'readonly' es el nivel que entiende Signal K para "cualquiera que
+    // pueda leer el barco" (ver tokensecurity.js); con un nivel inventado
+    // la ruta cae al nivel por defecto, que es administrador, y la app se
+    // encuentra un 401 al leer (comprobado en vivo 2026-09-16).
+    const open =
+      typeof router.access === 'function' ? router.access('readonly') : router;
     const guarded =
       typeof router.access === 'function' ? router.access('readwrite') : router;
 
