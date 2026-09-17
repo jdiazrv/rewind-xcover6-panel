@@ -2107,7 +2107,10 @@ class TankCard extends StatelessWidget {
   }
 
   String _levelStatus(double percent, bool hasData) {
-    if (!hasData) return 'SIN DATOS';
+    // "Esperando datos", no "sin datos": el tanque está configurado y el
+    // sensor existe (puede haberse encontrado en el histórico), solo que aún
+    // no ha hablado. Petición en vivo 2026-09-17.
+    if (!hasData) return 'ESPERANDO DATOS';
     if (stale) return 'DATO ANTIGUO';
     if (!calibrated) return 'CAPACIDAD SIN CONFIGURAR';
     if (dangerWhenHigh) {

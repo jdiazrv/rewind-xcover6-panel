@@ -523,11 +523,13 @@ class _NativeAnchorViewState extends State<NativeAnchorView> {
           content: const Text(
             'Signal K no está enviando la posición del barco ahora mismo. '
             'Puedo usar el GPS de esta tablet/móvil como referencia mientras '
-            'tanto, solo en esta pantalla de fondeo. Es un dato de tu '
-            'dispositivo, no del barco — solo se usa si lo permites.\n\n'
-            'Importante: esta alarma no está garantizada en segundo plano. '
-            'REWIND debe permanecer abierta y visible, con el dispositivo a '
-            'bordo y la ubicación activa.',
+            'tanto: en el fondeo y también donde hace falta saber dónde estás, '
+            'como el pronóstico y el estado del mar. Es un dato de tu '
+            'dispositivo, no del barco — solo se usa si lo permites, y puedes '
+            'cambiarlo cuando quieras en CFG > Conexión.\n\n'
+            'Importante: la alarma de fondeo no está garantizada en segundo '
+            'plano. REWIND debe permanecer abierta y visible, con el '
+            'dispositivo a bordo y la ubicación activa.',
           ),
           actions: [
             TextButton(

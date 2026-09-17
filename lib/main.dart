@@ -5072,6 +5072,10 @@ class _DashboardState extends State<Dashboard> {
         setState(() {
           signalK.connected = false;
           signalK.status = status;
+          // Lo que sabíamos de cada ruta se queda en el barco anterior: sin
+          // esto, al cambiar de servidor VNT seguía viéndose unos minutos
+          // porque el viento del barco de antes aún contaba como reciente.
+          _pathUpdatedAt.clear();
         });
       },
     );
@@ -5782,6 +5786,17 @@ class _DashboardState extends State<Dashboard> {
       }
       if (c.depthPath == null && d.depthPaths.isNotEmpty) {
         c.depthPath = d.depthPaths.first;
+        changed = true;
+      }
+      // Solo se ENCIENDEN: que este barco no publique temperatura exterior no
+      // demuestra que el barco de al lado tampoco, y esta configuración se
+      // comparte entre todos (ver _hasMetData).
+      if (d.hasOutsideTemp && !c.hasOutsideTemp) {
+        c.hasOutsideTemp = true;
+        changed = true;
+      }
+      if (d.hasOutsidePressure && !c.hasOutsidePressure) {
+        c.hasOutsidePressure = true;
         changed = true;
       }
       // Controladores reales primero: con dos hay que coger sus dos
@@ -6715,29 +6730,29 @@ class _DashboardState extends State<Dashboard> {
     super.dispose();
   }
 
-  // Una pantalla sin datos no debe ocupar sitio, y tiene que volver sola en
-  // cuanto los datos vuelvan: si se apagan los instrumentos, VNT desaparece;
-  // al encenderlos, reaparece (petición en vivo 2026-09-17). Por eso se mira
-  // la frescura de lo que llega, no lo que se detectó una vez.
+  // VNT va con el dato EN VIVO: si se apagan los instrumentos desaparece, y
+  // vuelve sola en cuanto llega el primer dato de viento. Sin conexión
+  // tampoco hay viento, así que tampoco hay pantalla.
   //
-  // Sin conexión con Signal K se respeta lo configurado: ahí la ausencia de
-  // datos es la desconexión, no un barco sin sensores.
+  // TNK y TMP van con la CONFIGURACIÓN, no con el dato: un tanque que está
+  // configurado tiene que verse aunque su sensor lleve horas callado —la
+  // tarjeta dice "esperando datos"—, que para eso lo hemos encontrado en el
+  // histórico. Ocultar la pantalla dejaba al barco sin saber si el tanque
+  // existía siquiera (petición en vivo 2026-09-17).
+  //
   // Misma regla de frescura que usan las tarjetas (_pathIsStale), para no
   // tener dos criterios distintos de "esto está llegando".
   bool _anyPathFresh(Iterable<String> paths, Duration within) =>
       paths.any((p) => !_pathIsStale(p, within));
 
   static const _windPageIdleAfter = Duration(minutes: 5);
-  // Los tanques se publican despacio y las temperaturas aún más, así que su
-  // ventana es mucho más ancha. Un Mopeka puede pasar un cuarto de hora sin
-  // hablar (medido en AREA SECADA), y perder la pantalla TNK por eso sería
-  // justo el error que ya cometimos ocultando tanques configurados.
-  static const _tankPageIdleAfter = Duration(minutes: 60);
-  static const _tempPageIdleAfter = Duration(minutes: 45);
 
   bool get _hasWindData =>
       settings.demoMode ||
-      !signalK.connected ||
+      // Mientras no haya llegado NADA del barco no se puede afirmar que no
+      // haya viento, solo que aún no sabemos nada: esconder VNT en el
+      // arranque sería adivinar. En cuanto entran datos, manda el viento.
+      signalK.lastUpdate == null ||
       _anyPathFresh(const [
         'environment.wind.speedApparent',
         'environment.wind.angleApparent',
@@ -6745,19 +6760,39 @@ class _DashboardState extends State<Dashboard> {
         'environment.wind.directionTrue',
       ], _windPageIdleAfter);
 
-  bool get _hasTankData {
-    final enabled = settings.sensorConfig.tanks.where((t) => t.enabled);
-    if (enabled.isEmpty) return false;
-    if (settings.demoMode || !signalK.connected) return true;
-    return _anyPathFresh(enabled.map((t) => t.skPath), _tankPageIdleAfter);
+  // Tres opciones en una: no permitir, permitir aunque no haya Signal K, o
+  // permitir solo mientras Signal K esté presente. Por dentro siguen siendo
+  // el consentimiento y anchorPhoneGpsRequiresSignalK, pero el usuario lo ve
+  // como una sola decisión y en CONEXIÓN, no en FONDEO: desde que el GPS del
+  // teléfono alimenta también pronóstico y mar, el fondeo no es su sitio
+  // (petición en vivo 2026-09-17).
+  String get _phoneGpsMode => settings.gpsFallbackConsent == false
+      ? 'never'
+      : settings.anchorPhoneGpsRequiresSignalK
+      ? 'requiresSk'
+      : 'always';
+
+  void _setPhoneGpsMode(String mode) {
+    settings.gpsFallbackConsent = mode != 'never';
+    settings.anchorPhoneGpsRequiresSignalK = mode == 'requiresSk';
   }
 
-  bool get _hasTempData {
-    final enabled = settings.sensorConfig.tempSensors.where((s) => s.enabled);
-    if (enabled.isEmpty) return false;
-    if (settings.demoMode || !signalK.connected) return true;
-    return _anyPathFresh(enabled.map((s) => s.path), _tempPageIdleAfter);
-  }
+  // MET no puede depender solo del flag guardado: hasOutsideTemp es un hecho
+  // DE CADA BARCO y viaja en la configuración compartida, así que un barrido
+  // hecho en un barco sin sensor exterior lo pone a false y se lleva por
+  // delante la pantalla en los demás. Pasó en REWIND: publicaba temperatura
+  // exterior y presión con el flag a false (visto en vivo 2026-09-17). Si el
+  // dato está llegando, la pantalla existe, se haya barrido o no.
+  bool get _hasMetData =>
+      settings.sensorConfig.hasOutsideTemp ||
+      settings.sensorConfig.hasOutsidePressure ||
+      signalK.outsideTempK != null ||
+      signalK.outsidePressureHpa != null;
+
+  bool get _hasTankData => settings.sensorConfig.tanks.any((t) => t.enabled);
+
+  bool get _hasTempData =>
+      settings.sensorConfig.tempSensors.any((s) => s.enabled);
 
   List<String> get _pageIds => [
     'NAV',
@@ -6768,9 +6803,7 @@ class _DashboardState extends State<Dashboard> {
     'PWR',
     if (_hasTempData) 'TMP',
     if (_hasTankData) 'TNK',
-    if (settings.sensorConfig.hasOutsideTemp ||
-        settings.sensorConfig.hasOutsidePressure)
-      'MET',
+    if (_hasMetData) 'MET',
     'PRON',
     'MAR',
     'ANC',
@@ -7023,9 +7056,7 @@ class _DashboardState extends State<Dashboard> {
       ('PWR', Icons.bolt, _powerPage()),
       if (_hasTempData) ('TMP', Icons.thermostat, _tempPage()),
       if (_hasTankData) ('TNK', Icons.water_drop, _tankPage()),
-      if (settings.sensorConfig.hasOutsideTemp ||
-          settings.sensorConfig.hasOutsidePressure)
-        ('MET', Icons.cloud, _metPage()),
+      if (_hasMetData) ('MET', Icons.cloud, _metPage()),
       ('PRON', Icons.wb_sunny, _forecastPage()),
       ('MAR', Icons.waves, _marinePage()),
       ('ANC', Icons.anchor, _nativeAnchorPage()),
@@ -10700,7 +10731,7 @@ class _DashboardState extends State<Dashboard> {
         ? null
         : (tank.capacityL * pct / 100).round();
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         children: [
           Icon(tank.icon, size: 15, color: color),
@@ -10779,10 +10810,15 @@ class _DashboardState extends State<Dashboard> {
       icon: Icons.bolt,
       accent: houseColor,
       trailing: signalK.houseV == null ? null : fmt(signalK.houseV, 2, ' V'),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      // Número a la izquierda y chips en columna a la derecha. Apilados en
+      // vertical no cabían: el 95 % de 54 px más su pie desbordaban la altura
+      // del panel y acababan pisando a los chips (visto en el XCover,
+      // 2026-09-17).
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Expanded(
+            flex: 5,
             child: _summaryValue(
               fmt(signalK.houseSoc, 0, ''),
               '%',
@@ -10792,23 +10828,34 @@ class _DashboardState extends State<Dashboard> {
                   : '${amps >= 0 ? 'cargando' : 'consumiendo'} ${fmt(amps.abs(), 1, ' A')}',
             ),
           ),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              if (hasSolar)
-                _summaryChip('SOLAR', fmt(solarTotal, 0, ' W'), cYellow),
-              if (hasDc)
-                _summaryChip('CONSUMO', fmt(signalK.dcW, 0, ' W'), cOrange),
-              if (signalK.startV != null)
-                _summaryChip(
-                  'ARRANQUE',
-                  fmt(signalK.startV, 2, ' V'),
-                  voltageColor12V(signalK.startV),
-                ),
-              if (amps != null)
-                _summaryChip('CORRIENTE', fmt(amps, 1, ' A'), ampsColor),
-            ],
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 6,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final chip in [
+                  if (hasSolar)
+                    _summaryChip('SOLAR', fmt(solarTotal, 0, ' W'), cYellow),
+                  if (hasDc)
+                    _summaryChip('CONSUMO', fmt(signalK.dcW, 0, ' W'), cOrange),
+                  if (signalK.startV != null)
+                    _summaryChip(
+                      'ARRANQUE',
+                      fmt(signalK.startV, 2, ' V'),
+                      voltageColor12V(signalK.startV),
+                    ),
+                  if (amps != null)
+                    _summaryChip('CORRIENTE', fmt(amps, 1, ' A'), ampsColor),
+                ])
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: chip,
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -10874,32 +10921,28 @@ class _DashboardState extends State<Dashboard> {
       ),
     );
 
-    // "ON" no es que estemos suscritos —en esta pantalla lo estamos siempre—
-    // sino que entran blancos: un receptor apagado y un mar vacío se
-    // distinguen mirando si hay algún barco visible (expiran a los 18 min).
+    // Solo se dice "a la escucha" cuando se ve que el receptor está vivo, es
+    // decir, cuando entran blancos; sin nada que recibir se dice APAGADO y no
+    // se promete una vigilancia que no se está haciendo (petición en vivo
+    // 2026-09-17). Los blancos caducan a los 18 minutos, así que "hay
+    // blancos" equivale a "está llegando AIS".
     final recibiendo = aisOn && aisCount > 0;
     final ais = _summaryPanel(
       title: 'AIS',
       icon: Icons.radar,
       accent: recibiendo ? cGreen : cMuted,
-      trailing: !aisOn
-          ? 'OFF'
-          : recibiendo
-          ? 'RECIBIENDO'
-          : 'A LA ESCUCHA',
+      trailing: recibiendo ? 'A LA ESCUCHA' : 'APAGADO',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           _summaryValue(
-            aisOn ? '$aisCount' : '--',
-            aisOn ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
+            recibiendo ? '$aisCount' : '--',
+            recibiendo ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
             recibiendo ? cGreen : cMuted,
-            footer: !aisOn
-                ? 'sin suscripción al AIS'
-                : recibiendo
+            footer: recibiendo
                 ? 'barcos vistos en los últimos 18 min'
-                : 'receptor a la escucha, sin blancos ahora',
+                : 'no llega ningún blanco: receptor apagado o sin alcance',
           ),
         ],
       ),
@@ -10922,9 +10965,11 @@ class _DashboardState extends State<Dashboard> {
           Expanded(
             child: Row(
               children: [
-                Expanded(flex: 7, child: posicion),
+                // Mismos anchos que la fila de arriba: posición debajo de
+                // energía y AIS debajo de tanques, en dos columnas rectas.
+                Expanded(flex: 5, child: posicion),
                 const SizedBox(width: 8),
-                Expanded(flex: 4, child: ais),
+                Expanded(flex: 7, child: ais),
               ],
             ),
           ),
@@ -13324,10 +13369,10 @@ class _DashboardState extends State<Dashboard> {
               tab: 5,
             ),
             (
-              title: 'GPS del teléfono sin Signal K',
-              section: 'FONDEO · Fuente de posición',
-              keywords: 'gps telefono movil autonomo signalk segundo plano posicion respaldo',
-              tab: 5,
+              title: 'GPS del teléfono como posición',
+              section: 'CONEXIÓN · Fuente de posición',
+              keywords: 'gps telefono movil autonomo signalk segundo plano posicion respaldo fondeo pronostico mar meteo permiso ubicacion',
+              tab: 0,
             ),
             (
               title: 'Aviso si te llevas el móvil',
@@ -14053,6 +14098,86 @@ class _DashboardState extends State<Dashboard> {
                                   ],
                                 ),
                               ],
+                            ],
+                          ),
+                          SettingsGroup(
+                            title: 'FUENTE DE POSICIÓN',
+                            icon: Icons.gps_fixed,
+                            children: [
+                              const Text(
+                                'Cuando el barco no esté dando su posición, ¿puede REWIND usar el GPS de este teléfono o tablet? Se usa en el fondeo y también en todo lo que necesita saber dónde estás: pronóstico, estado del mar y meteo.',
+                                style: TextStyle(
+                                  color: cText,
+                                  fontSize: 12,
+                                  height: 1.35,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              SegmentedButton<String>(
+                                segments: const [
+                                  ButtonSegment(
+                                    value: 'never',
+                                    icon: Icon(Icons.block),
+                                    label: Text('No permitir'),
+                                  ),
+                                  ButtonSegment(
+                                    value: 'always',
+                                    icon: Icon(Icons.phone_android),
+                                    label: Text('Sin Signal K'),
+                                  ),
+                                  ButtonSegment(
+                                    value: 'requiresSk',
+                                    icon: Icon(Icons.dns_outlined),
+                                    label: Text('Requiere Signal K'),
+                                  ),
+                                ],
+                                selected: {_phoneGpsMode},
+                                showSelectedIcon: false,
+                                onSelectionChanged: (values) {
+                                  setSt(() => _setPhoneGpsMode(values.first));
+                                  setState(() {});
+                                  unawaited(_saveSettings());
+                                },
+                              ),
+                              if (settings.gpsFallbackConsent == null) ...[
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'Todavía no lo has decidido: se te preguntará la primera vez que haga falta.',
+                                  style: TextStyle(color: cMuted, fontSize: 11),
+                                ),
+                              ],
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: cOrange.withValues(alpha: 0.10),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: cOrange.withValues(alpha: 0.45),
+                                  ),
+                                ),
+                                child: const Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      Icons.warning_amber_rounded,
+                                      color: cOrange,
+                                      size: 19,
+                                    ),
+                                    SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        'Con el GPS del teléfono, la alarma de fondeo no vigila en segundo plano: REWIND debe permanecer abierta y visible, con el dispositivo a bordo, alimentación suficiente y permiso de ubicación activo.',
+                                        style: TextStyle(
+                                          color: cOrange,
+                                          fontSize: 11,
+                                          height: 1.35,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ],
                           ),
                         ],
@@ -15525,80 +15650,6 @@ class _DashboardState extends State<Dashboard> {
                       constraints: const BoxConstraints(maxWidth: 760),
                       child: SettingsResponsiveGroups(
                         children: [
-                          SettingsGroup(
-                            title: 'FUENTE DE POSICIÓN',
-                            icon: Icons.gps_fixed,
-                            children: [
-                              const Text(
-                                'Cuando falte la posición del barco, ¿puede ANC usar el GPS de este teléfono si tampoco hay conexión con Signal K?',
-                                style: TextStyle(
-                                  color: cText,
-                                  fontSize: 12,
-                                  height: 1.35,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              SegmentedButton<bool>(
-                                segments: const [
-                                  ButtonSegment(
-                                    value: false,
-                                    icon: Icon(Icons.phone_android),
-                                    label: Text('Sin Signal K'),
-                                  ),
-                                  ButtonSegment(
-                                    value: true,
-                                    icon: Icon(Icons.dns_outlined),
-                                    label: Text('Requiere Signal K'),
-                                  ),
-                                ],
-                                selected: {
-                                  settings.anchorPhoneGpsRequiresSignalK,
-                                },
-                                showSelectedIcon: false,
-                                onSelectionChanged: (values) {
-                                  setSt(
-                                    () =>
-                                        settings.anchorPhoneGpsRequiresSignalK =
-                                            values.first,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const SizedBox(height: 8),
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: cOrange.withValues(alpha: 0.10),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: cOrange.withValues(alpha: 0.45),
-                                  ),
-                                ),
-                                child: const Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Icon(
-                                      Icons.warning_amber_rounded,
-                                      color: cOrange,
-                                      size: 19,
-                                    ),
-                                    SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        'El modo sin Signal K no es una alarma en segundo plano: REWIND debe permanecer abierta y visible, con el teléfono a bordo, alimentación suficiente y permiso de ubicación activo.',
-                                        style: TextStyle(
-                                          color: cOrange,
-                                          fontSize: 11,
-                                          height: 1.35,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
                           SettingsGroup(
                             title: 'CAMBIO DE PROFUNDIDAD',
                             icon: Icons.water,
