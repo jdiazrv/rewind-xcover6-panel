@@ -118,6 +118,75 @@ void main() {
     });
   });
 
+  group('mezcla de sensores: un vacío no borra lo que ya hay', () {
+    test('el perfil del motor sobrevive a un servidor sin configurar', () {
+      // El fallo real de 2026-09-17: el barco tenía engineModelId vacío y al
+      // sincronizar desaparecía el consumo estimado del panel de motor.
+      final local = SettingsModel()
+        ..sensorConfig = (SensorConfig()
+          ..engineModelId = 'yanmar-4jh45'
+          ..engineDriveType = 'saildrive'
+          ..enginePropellerType = 'folding'
+          ..enginePath = 'propulsion.main.runTime');
+      final remoto = sharedConfigFromSettings(
+        SettingsModel()..sensorConfig = SensorConfig.empty(),
+      );
+
+      applySharedConfig(local, remoto);
+
+      expect(local.sensorConfig.engineModelId, 'yanmar-4jh45');
+      expect(local.sensorConfig.engineDriveType, 'saildrive');
+      expect(local.sensorConfig.enginePropellerType, 'folding');
+      expect(local.sensorConfig.enginePath, 'propulsion.main.runTime');
+    });
+
+    test('un valor real del servidor sí manda', () {
+      final local = SettingsModel()
+        ..sensorConfig = (SensorConfig()..batteryHouseId = '278');
+      final remoto = sharedConfigFromSettings(
+        SettingsModel()
+          ..sensorConfig = (SensorConfig()..batteryHouseId = 'house'),
+      );
+
+      applySharedConfig(local, remoto);
+
+      expect(local.sensorConfig.batteryHouseId, 'house');
+    });
+
+    test('mergeSensorJson: vacíos fuera, valores dentro', () {
+      final merged = mergeSensorJson(
+        local: {
+          'engineModelId': 'yanmar',
+          'dcLoadsPath': 'electrical.venus.dcPower',
+          'tanks': [
+            {'type': 'fuel'},
+          ],
+          'fridgeWarnC': 6,
+        },
+        remote: {
+          'engineModelId': '',
+          'dcLoadsPath': null,
+          'tanks': [],
+          'fridgeWarnC': 4,
+          'bowthrusterPath': 'electrical.batteries.proa.voltage',
+        },
+      );
+      expect(merged['engineModelId'], 'yanmar');
+      expect(merged['dcLoadsPath'], 'electrical.venus.dcPower');
+      expect(merged['tanks'], hasLength(1));
+      expect(merged['fridgeWarnC'], 4, reason: 'un número sí es un valor');
+      expect(merged['bowthrusterPath'], 'electrical.batteries.proa.voltage');
+    });
+
+    test('un false del servidor no se confunde con "sin valor"', () {
+      final merged = mergeSensorJson(
+        local: {'hasOutsideTemp': true},
+        remote: {'hasOutsideTemp': false},
+      );
+      expect(merged['hasOutsideTemp'], isFalse);
+    });
+  });
+
   group('cuándo se adopta lo del servidor', () {
     test('solo si la revisión es distinta de la última vista', () {
       expect(shouldAdoptRemote(remoteRevision: 4, localKnownRevision: 3), isTrue);

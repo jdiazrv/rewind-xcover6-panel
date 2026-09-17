@@ -72,6 +72,37 @@ Map<String, dynamic> sharedConfigFromSettings(SettingsModel s) => {
   },
 };
 
+/// ¿Trae este valor información de verdad, o es "no configurado"?
+bool _meaningful(dynamic v) {
+  if (v == null) return false;
+  if (v is String) return v.trim().isNotEmpty;
+  if (v is Iterable) return v.isNotEmpty;
+  if (v is Map) return v.isNotEmpty;
+  return true;
+}
+
+/// Mezcla la configuración de sensores del servidor sobre la de este
+/// dispositivo: el servidor manda, pero **un valor vacío nunca borra uno que
+/// ya está puesto**.
+///
+/// Sin esto, la primera sincronización con un barco cuya configuración aún no
+/// tenía modelo de motor se llevaba por delante el perfil local y con él el
+/// consumo estimado de la pantalla de motor (visto en vivo 2026-09-17).
+///
+/// La contrapartida, deliberada: borrar un valor en un dispositivo no lo
+/// borra en los demás. Quitar un sensor se hace donde está configurado, y es
+/// preferible a perder configuración por accidente.
+Map<String, dynamic> mergeSensorJson({
+  required Map<String, dynamic> local,
+  required Map<String, dynamic> remote,
+}) {
+  final merged = Map<String, dynamic>.from(local);
+  for (final entry in remote.entries) {
+    if (_meaningful(entry.value)) merged[entry.key] = entry.value;
+  }
+  return merged;
+}
+
 double? _double(dynamic v) => v is num ? v.toDouble() : null;
 int? _int(dynamic v) => v is num ? v.toInt() : null;
 
@@ -85,7 +116,11 @@ Map<String, dynamic>? _map(dynamic v) =>
 /// una más vieja ni al revés.
 void applySharedConfig(SettingsModel s, Map<String, dynamic> config) {
   final sensors = _map(config['sensors']);
-  if (sensors != null) s.sensorConfig = SensorConfig.fromJson(sensors);
+  if (sensors != null) {
+    s.sensorConfig = SensorConfig.fromJson(
+      mergeSensorJson(local: s.sensorConfig.toJson(), remote: sensors),
+    );
+  }
   final polar = _map(config['polar']);
   if (polar != null) s.polarConfigFromJson(polar);
   final ship = _map(config['ship']);
