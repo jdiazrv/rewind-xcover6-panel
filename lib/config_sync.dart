@@ -36,6 +36,22 @@ const kNeverSharedKeys = <String>[
   'usePhoneHeel',
   'phoneAttitudeCalibrated',
   'gpsFallbackConsent',
+  // Cómo avisa ESTE aparato, no qué vigila el barco: la tablet de la mesa de
+  // cartas puede sonar de noche y el móvil no. Los interruptores de "aviso
+  // sonoro" llevan su propia etiqueta en CFG para que se vea.
+  'alarmCorrederaSound',
+  'alarmAisSound',
+  'alarmEngineOilSound',
+  'alarmEngineTempSound',
+  'alarmEngineVoltSound',
+  'alarmEngineGlowPlugSound',
+  'alarmAnchorDepthSound',
+  'alarmAnchorWindSound',
+  // Detectar que te has ido con el móvil solo tiene sentido en el móvil.
+  'anchorDetectPhoneLeftByMotion',
+  'anchorDetectPhoneLeftBySteps',
+  'anchorDetectPhoneLeftByWifi',
+  'anchorShowElectrical',
 ];
 
 /// Lo que este dispositivo propone como configuración del barco.
@@ -60,6 +76,17 @@ Map<String, dynamic> sharedConfigFromSettings(SettingsModel s) => {
     'aisEnabled': s.alarmAisEnabled,
     'aisCpaNm': s.alarmAisCpaNm,
     'aisTcpaMin': s.alarmAisTcpaMin,
+    // Qué vigila el barco va con el barco. Antes la corredera y el "sin
+    // posición" eran las dos únicas alarmas que se quedaban en el aparato,
+    // mientras sus vecinas de la misma tarjeta sí viajaban: apagabas la
+    // corredera en la tablet y seguía sonando en el móvil.
+    'correderaEnabled': s.alarmCorrederaEnabled,
+    'anchorNoPositionEnabled': s.alarmAnchorNoPositionEnabled,
+    'anchorFilterGlitches': s.alarmAnchorFilterGlitches,
+    'anchorGlitchJumpM': s.alarmAnchorGlitchJumpM,
+    // Y a cuáles de ellas hay que avisar por push, ya que el topic —el dato
+    // que de verdad manda el aviso— también se comparte.
+    'ntfyKeys': s.ntfyAlarmKeys.toList()..sort(),
     'engineOilMinBar': s.alarmEngineOilMinBar,
     'engineTempMaxC': s.alarmEngineTempMaxC,
     'engineVoltMinV': s.alarmEngineVoltMinV,
@@ -171,6 +198,25 @@ void applySharedConfig(SettingsModel s, Map<String, dynamic> config) {
         alarms['anchorWindEnabled'] as bool? ?? s.alarmAnchorWindEnabled;
     s.alarmAnchorWindKn =
         _double(alarms['anchorWindKn']) ?? s.alarmAnchorWindKn;
+    s.alarmCorrederaEnabled =
+        alarms['correderaEnabled'] as bool? ?? s.alarmCorrederaEnabled;
+    s.alarmAnchorNoPositionEnabled =
+        alarms['anchorNoPositionEnabled'] as bool? ??
+        s.alarmAnchorNoPositionEnabled;
+    s.alarmAnchorFilterGlitches =
+        alarms['anchorFilterGlitches'] as bool? ?? s.alarmAnchorFilterGlitches;
+    s.alarmAnchorGlitchJumpM =
+        _double(alarms['anchorGlitchJumpM']) ?? s.alarmAnchorGlitchJumpM;
+    final ntfyKeys = alarms['ntfyKeys'];
+    // Misma regla que los sensores: una lista vacía no borra la que ya hay.
+    // Perder los avisos push porque un aparato recién estrenado subió su
+    // lista en blanco sería mucho peor que no propagar un "apágalos todos".
+    if (ntfyKeys is List && ntfyKeys.isNotEmpty) {
+      // Set final: se vacía y se rellena, no se sustituye.
+      s.ntfyAlarmKeys
+        ..clear()
+        ..addAll(ntfyKeys.whereType<String>());
+    }
     s.alarmsUseSkZones = alarms['useSkZones'] as bool? ?? s.alarmsUseSkZones;
     final custom = alarms['custom'];
     if (custom is List) {

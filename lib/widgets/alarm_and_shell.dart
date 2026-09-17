@@ -8,16 +8,105 @@ part of '../main.dart';
 // to the far trailing edge of whatever width the tab happens to be — the
 // three things CFG → Alarmas/Fondeo got called out for.
 
+/// Whether a setting travels with the BOAT (stored by the REWIND plugin on
+/// the server and pulled by every tablet, phone and browser — see
+/// config_sync.dart) or stays on THIS device only.
+///
+/// CFG used to leave this invisible, and it was not even consistent: the AIS
+/// alarm thresholds were shared while the "aviso sonoro" right next to them
+/// was not, and "Usar acelerómetro del dispositivo" sat inside the tab that
+/// announces "se guarda en el servidor". You changed a value on the tablet
+/// and could not tell whether the phone would follow. Now every group says
+/// which it is, and a row that differs from its group says so too.
+enum CfgScope {
+  boat('BARCO', Icons.sailing),
+  device('ESTE APARATO', Icons.phone_android);
+
+  const CfgScope(this.label, this.icon);
+  final String label;
+  final IconData icon;
+}
+
+/// The little badge that marks a group header or a single row.
+class CfgScopeTag extends StatelessWidget {
+  const CfgScopeTag(this.scope, {super.key, this.dense = false});
+  final CfgScope scope;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final boat = scope == CfgScope.boat;
+    final color = boat ? cCyan : cMuted;
+    return Tooltip(
+      message: boat
+          ? 'Se guarda en el barco: llega a todos los dispositivos.'
+          : 'Solo en este dispositivo.',
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: dense ? 5 : 7, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(scope.icon, size: dense ? 10 : 11, color: color),
+            const SizedBox(width: 4),
+            Text(
+              scope.label,
+              style: TextStyle(
+                color: color,
+                fontSize: dense ? 8 : 9,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A sub-heading inside a group, with the gap that always followed it.
+class SettingsSubLabel extends StatelessWidget {
+  const SettingsSubLabel(this.text, {super.key, this.scope, this.top = 0});
+  final String text;
+  final CfgScope? scope;
+  final double top;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.only(top: top, bottom: 6),
+    child: Row(
+      children: [
+        Flexible(child: Text(text, style: cfgSubLabel)),
+        if (scope != null) ...[
+          const SizedBox(width: 8),
+          CfgScopeTag(scope!, dense: true),
+        ],
+      ],
+    ),
+  );
+}
+
 class SettingsGroup extends StatelessWidget {
   const SettingsGroup({
     super.key,
     required this.title,
     required this.children,
     this.icon,
+    this.scope,
   });
   final String title;
   final IconData? icon;
   final List<Widget> children;
+
+  /// Shown as a badge in the header. Omitted only for groups that are pure
+  /// actions or read-outs (Diagnóstico), where "where is this stored" has no
+  /// meaning.
+  final CfgScope? scope;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -41,15 +130,21 @@ class SettingsGroup extends StatelessWidget {
                 Icon(icon, size: 15, color: cCyan),
                 const SizedBox(width: 6),
               ],
-              Text(
-                title,
-                style: const TextStyle(
-                  color: cText,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.4,
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: cText,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.4,
+                  ),
                 ),
               ),
+              if (scope != null) ...[
+                const SizedBox(width: 8),
+                CfgScopeTag(scope!),
+              ],
             ],
           ),
         ),
@@ -172,11 +267,16 @@ class SettingsSwitchRow extends StatelessWidget {
     required this.onChanged,
     required this.title,
     this.subtitle,
+    this.scope,
   });
   final bool value;
   final ValueChanged<bool> onChanged;
   final String title;
   final String? subtitle;
+
+  /// Only when this row does NOT follow its group's scope — e.g. an "aviso
+  /// sonoro" inside a group of boat-wide alarm thresholds.
+  final CfgScope? scope;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -195,9 +295,19 @@ class SettingsSwitchRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    style: const TextStyle(fontSize: 13, color: cText),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          style: const TextStyle(fontSize: 13, color: cText),
+                        ),
+                      ),
+                      if (scope != null) ...[
+                        const SizedBox(width: 6),
+                        CfgScopeTag(scope!, dense: true),
+                      ],
+                    ],
                   ),
                   if (subtitle != null)
                     Padding(
@@ -209,6 +319,116 @@ class SettingsSwitchRow extends StatelessWidget {
                     ),
                 ],
               ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+// Casilla de verificación con la misma disciplina que SettingsSwitchRow: un
+// CheckboxListTile dentro de estos recuadros con fondo propio pierde su color
+// y su efecto al pulsar, y Flutter lo avisa ("ListTile background color or ink
+// splashes may be invisible") — el test de CFG lo caza.
+class SettingsCheckRow extends StatelessWidget {
+  const SettingsCheckRow({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    required this.title,
+  });
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: () => onChanged(!value),
+    borderRadius: BorderRadius.circular(6),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 34,
+            height: 34,
+            child: Checkbox(
+              value: value,
+              onChanged: (v) => onChanged(v ?? false),
+            ),
+          ),
+          const SizedBox(width: 2),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(fontSize: 13, color: cText),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Igual que SettingsCheckRow pero para elegir uno de varios.
+///
+/// Sustituye a RadioListTile, que además de perder el fondo dentro de estas
+/// tarjetas arrastraba dos `groupValue`/`onChanged` marcados como obsoletos.
+class SettingsRadioRow extends StatelessWidget {
+  const SettingsRadioRow({
+    super.key,
+    required this.selected,
+    required this.onSelected,
+    required this.title,
+    this.subtitle,
+  });
+  final bool selected;
+  final VoidCallback onSelected;
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onSelected,
+    borderRadius: BorderRadius.circular(6),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_unchecked,
+              size: 20,
+              color: selected ? cCyan : cMuted,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: selected ? cText : cMuted,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (subtitle != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Text(
+                      subtitle!,
+                      style: const TextStyle(color: cMuted, fontSize: 12),
+                    ),
+                  ),
+              ],
             ),
           ),
         ],

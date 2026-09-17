@@ -47,6 +47,64 @@ void main() {
     });
   });
 
+  group('lo que vigila el barco viaja entero', () {
+    // Antes la corredera y el "sin posición" eran las dos únicas alarmas que
+    // se quedaban en el aparato, con sus vecinas de la misma tarjeta
+    // viajando: apagabas una en la tablet y seguía activa en el móvil.
+    test('corredera, sin posición y falsas alarmas se comparten', () {
+      final origen = SettingsModel()
+        ..alarmCorrederaEnabled = true
+        ..alarmAnchorNoPositionEnabled = false
+        ..alarmAnchorFilterGlitches = false
+        ..alarmAnchorGlitchJumpM = 75;
+      final destino = SettingsModel();
+
+      applySharedConfig(destino, sharedConfigFromSettings(origen));
+
+      expect(destino.alarmCorrederaEnabled, isTrue);
+      expect(destino.alarmAnchorNoPositionEnabled, isFalse);
+      expect(destino.alarmAnchorFilterGlitches, isFalse);
+      expect(destino.alarmAnchorGlitchJumpM, 75);
+    });
+
+    test('a qué alarmas avisa el push también', () {
+      final origen = SettingsModel()..ntfyAlarmKeys.addAll({'drag', 'wind'});
+      final destino = SettingsModel()..ntfyAlarmKeys.add('depth');
+
+      applySharedConfig(destino, sharedConfigFromSettings(origen));
+
+      expect(destino.ntfyAlarmKeys, {'drag', 'wind'});
+    });
+
+    test('una lista de push vacía no borra la que ya hay', () {
+      final destino = SettingsModel()..ntfyAlarmKeys.addAll({'drag'});
+
+      applySharedConfig(destino, sharedConfigFromSettings(SettingsModel()));
+
+      expect(destino.ntfyAlarmKeys, {'drag'});
+    });
+
+    test('cómo avisa cada aparato se queda en el aparato', () {
+      final origen = SettingsModel()
+        ..alarmAisSound = false
+        ..alarmAnchorWindSound = false
+        ..anchorShowElectrical = true
+        ..anchorDetectPhoneLeftByWifi = true;
+      final destino = SettingsModel()
+        ..alarmAisSound = true
+        ..alarmAnchorWindSound = true
+        ..anchorShowElectrical = false
+        ..anchorDetectPhoneLeftByWifi = false;
+
+      applySharedConfig(destino, sharedConfigFromSettings(origen));
+
+      expect(destino.alarmAisSound, isTrue);
+      expect(destino.alarmAnchorWindSound, isTrue);
+      expect(destino.anchorShowElectrical, isFalse);
+      expect(destino.anchorDetectPhoneLeftByWifi, isFalse);
+    });
+  });
+
   group('aplicar lo del servidor', () {
     test('ida y vuelta conserva la configuración del barco', () {
       final origen = SettingsModel()
@@ -189,7 +247,10 @@ void main() {
 
   group('cuándo se adopta lo del servidor', () {
     test('solo si la revisión es distinta de la última vista', () {
-      expect(shouldAdoptRemote(remoteRevision: 4, localKnownRevision: 3), isTrue);
+      expect(
+        shouldAdoptRemote(remoteRevision: 4, localKnownRevision: 3),
+        isTrue,
+      );
       expect(
         shouldAdoptRemote(remoteRevision: 3, localKnownRevision: 3),
         isFalse,
@@ -207,7 +268,10 @@ void main() {
 
     test('una revisión anterior también se adopta: manda el servidor', () {
       // Pasa al restaurar una versión antigua desde otro dispositivo.
-      expect(shouldAdoptRemote(remoteRevision: 2, localKnownRevision: 7), isTrue);
+      expect(
+        shouldAdoptRemote(remoteRevision: 2, localKnownRevision: 7),
+        isTrue,
+      );
     });
   });
 

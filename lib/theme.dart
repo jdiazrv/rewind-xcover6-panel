@@ -22,3 +22,15 @@ const cPurple = Color(0xffa98bff);
 // Default weather point for web/demo use when Signal K has not provided GPS.
 const kDefaultWeatherLat = 36.7213;
 const kDefaultWeatherLon = -4.4214;
+
+// ─── CFG ──────────────────────────────────────────────────────────────────────
+// Sub-heading inside a SettingsGroup card. One definition for the whole app:
+// this used to be a local const declared twice (settings page and sensor
+// dialog) plus five hand-written copies that had drifted to 10px, so the same
+// kind of heading rendered at two sizes on the same screen.
+const cfgSubLabel = TextStyle(
+  color: cMuted,
+  fontSize: 11,
+  letterSpacing: 1.1,
+  fontWeight: FontWeight.w700,
+);

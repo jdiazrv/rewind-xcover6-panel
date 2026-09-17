@@ -2636,6 +2636,8 @@ class _DashboardState extends State<Dashboard> {
   // — per explicit request, it must hide itself again every time the app
   // restarts, not just once opted into forever.
   bool _adminRevealed = false;
+  // Qué mitad de CFG > Diagnóstico se está mirando: 'estado' o 'datos'.
+  String _diagView = 'estado';
   // Per-host sensor/anchor config used to be keyed by literal "host:port" —
   // but the SAME boat reached locally (lysmarine.local) vs. remotely
   // (its Tailscale IP) has two different host:port pairs, so switching
@@ -3903,23 +3905,9 @@ class _DashboardState extends State<Dashboard> {
       final doc = jsonDecode(response.body) as Map<String, dynamic>;
       final data = doc['data'];
       if (data is! List) return;
-      final pts = <AnchorTrackPoint>[];
-      for (final row in data) {
-        if (row is! List || row.length < 2) continue;
-        final dt = DateTime.tryParse(row[0]?.toString() ?? '');
-        final pos = row[1];
-        // The v2 history API answers with [lon, lat] (a plain 2-element
-        // list, GeoJSON order) — NOT the {latitude, longitude} object shape
-        // live deltas use. Confirmed live 2026-09-02 against lysmarine.local
-        // (200 OK with real rows, but every one silently dropped here since
-        // `pos is! Map` was always true) — this was why history never
-        // seeded the own-track despite the endpoint working fine.
-        if (dt == null || pos is! List || pos.length < 2) continue;
-        final lon = _num(pos[0]);
-        final lat = _num(pos[1]);
-        if (lat == null || lon == null) continue;
-        pts.add(AnchorTrackPoint(dt, lat, lon));
-      }
+      // Las dos formas en que contestan los proveedores de histórico, en un
+      // sitio y con test: ver anchorTrackFromHistoryRows.
+      final pts = anchorTrackFromHistoryRows(data);
       if (pts.isNotEmpty && mounted) {
         setState(() => _ownTrack.seedFromHistory(pts));
       }
@@ -7343,11 +7331,2897 @@ class _DashboardState extends State<Dashboard> {
   ///
   /// Se guarda por servidor (ver polarConfigJsonByHost): el mismo APK
   /// sirve a varios barcos y cada uno tiene la suya.
+  /// Ficha del motor: qué motor monta, qué transmisión y qué hélice.
+  ///
+  /// Vivía dentro de CFG > Pantalla > "Apariencia y paneles", entre el modo
+  /// día/noche y la rejilla de NAV. No es apariencia: es la ficha técnica del
+  /// barco, se pone una vez al instalar y —como todo lo que cuelga de
+  /// sensorConfig— viaja al resto de dispositivos. Su sitio es SENSORES.
+  /// Tab: Conexión (Signal K)
+  Widget _cfgConnectionTab(
+    StateSetter setSt,
+    Future<void> Function() doSave,
+    Future<void> Function() testConnection,
+  ) {
+    const gap = SizedBox(height: 6);
+    final hostController = _hostController!;
+    final portController = _portController!;
+    final authController = _authController!;
+    final skUsernameController = _skUsernameController!;
+    final skPasswordController = _skPasswordController!;
+    return SettingsPageBody(
+      padding: const EdgeInsets.all(12),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SettingsGroup(
+              title: 'SERVIDOR SIGNAL K',
+              scope: CfgScope.device,
+              icon: Icons.dns_outlined,
+              children: [
+                SettingsStatusRow(
+                  label: 'Estado',
+                  value: signalK.connected ? 'Conectado' : 'Desconectado',
+                  color: signalK.connected ? cGreen : cRed,
+                ),
+                const SizedBox(height: 8),
+                _ThresholdRow(
+                  label: 'Tolerancia a cortes breves',
+                  unit: 's',
+                  value: settings.signalKDisconnectGraceSeconds.toDouble(),
+                  min: 3,
+                  max: 60,
+                  divisions: 57,
+                  onChanged: (value) {
+                    setSt(
+                      () => settings.signalKDisconnectGraceSeconds = value
+                          .round(),
+                    );
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+                const Text(
+                  'La reconexión empieza inmediatamente. Este tiempo solo evita declarar una desconexión por un microcorte y fija la espera inicial sin datos.',
+                  style: TextStyle(color: cMuted, fontSize: 11, height: 1.35),
+                ),
+                const SizedBox(height: 8),
+                if (_isSignalKWebapp) ...[
+                  const Text('SIGNAL K', style: cfgSubLabel),
+                  gap,
+                  Row(
+                    children: [
+                      Icon(
+                        settings.host == Uri.base.host
+                            ? Icons.check_circle
+                            : Icons.info_outline,
+                        color: settings.host == Uri.base.host ? cGreen : cCyan,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          settings.host == Uri.base.host
+                              ? 'Servido desde ${Uri.base.host} — normalmente no hace falta tocar esto.'
+                              : 'Esta página se sirve desde ${Uri.base.host}, pero apuntando manualmente a ${settings.host}:${settings.port}.',
+                          style: const TextStyle(color: cMuted, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                  gap,
+                  // A .local (mDNS) hostname only resolves on the
+                  // boat's own LAN — if you loaded this page that
+                  // way but are actually reachable remotely (e.g.
+                  // via Tailscale), there was previously no way to
+                  // point the app anywhere else at all. Confirmed
+                  // live 2026-09-02.
+                  const Text(
+                    'Si la conexión automática no funciona (por ejemplo, accediendo por '
+                    'red móvil/Tailscale a un servidor con nombre .local), pon aquí el '
+                    'host o IP por el que sí llegas:',
+                    style: TextStyle(color: cMuted, fontSize: 12),
+                  ),
+                  gap,
+                  TextField(
+                    controller: hostController,
+                    decoration: InputDecoration(
+                      labelText: 'Host (o IP)',
+                      isDense: true,
+                      errorText: hostController.text.trim().isEmpty
+                          ? 'El host es obligatorio'
+                          : null,
+                    ),
+                    onChanged: (_) =>
+                        setSt(() => _settingsConnectionDirty = true),
+                  ),
+                  gap,
+                  TextField(
+                    controller: portController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      labelText: 'Puerto',
+                      isDense: true,
+                      errorText:
+                          (int.tryParse(portController.text) ?? 0) < 1 ||
+                              (int.tryParse(portController.text) ?? 65536) >
+                                  65535
+                          ? 'Debe estar entre 1 y 65535'
+                          : null,
+                    ),
+                    onChanged: (_) =>
+                        setSt(() => _settingsConnectionDirty = true),
+                  ),
+                  gap,
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        icon: const Icon(Icons.save, size: 18),
+                        label: const Text('Guardar y reconectar'),
+                        onPressed: () => doSave(),
+                      ),
+                      if (_settingsConnectionDirty)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: Text(
+                            'Cambios sin guardar',
+                            style: TextStyle(
+                              color: cOrange,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.fact_check_outlined, size: 18),
+                        label: const Text('Probar'),
+                        onPressed: testConnection,
+                      ),
+                      const SizedBox(width: 8),
+                      if (settings.host != Uri.base.host ||
+                          (Uri.base.hasPort && settings.port != Uri.base.port))
+                        TextButton(
+                          onPressed: () async {
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.remove(
+                              'webappHostOverride:${Uri.base.origin}',
+                            );
+                            setSt(() {
+                              settings.host = Uri.base.host;
+                              if (Uri.base.hasPort) {
+                                settings.port = Uri.base.port;
+                              }
+                              hostController.text = settings.host;
+                              portController.text = '${settings.port}';
+                            });
+                            setState(() {});
+                            unawaited(doSave());
+                          },
+                          child: const Text('Volver a automático'),
+                        ),
+                    ],
+                  ),
+                ] else ...[
+                  const Text('SIGNAL K', style: cfgSubLabel),
+                  gap,
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _HostPresetChip(
+                        label: 'lysmarine.local',
+                        selected: settings.host == 'lysmarine.local',
+                        onTap: () {
+                          // Used to only fill the text field and
+                          // wait for a separate "Guardar y
+                          // reconectar" tap — picking a preset
+                          // should just connect. Confirmed live
+                          // 2026-09-02: tapping this looked like it
+                          // did nothing.
+                          setSt(() {
+                            settings.host = 'lysmarine.local';
+                            hostController.text = settings.host;
+                          });
+                          unawaited(doSave());
+                        },
+                      ),
+                      _HostPresetChip(
+                        label: '100.85.109.61',
+                        selected: settings.host == '100.85.109.61',
+                        onTap: () {
+                          setSt(() {
+                            settings.host = '100.85.109.61';
+                            hostController.text = settings.host;
+                          });
+                          unawaited(doSave());
+                        },
+                      ),
+                    ],
+                  ),
+                  gap,
+                  // Manual IP/hostname entry — the third option alongside the two
+                  // presets above: "lysmarine.local" only resolves on the network
+                  // it was set up on (mDNS is network-scoped), so a different boat
+                  // needs to type its own Signal K IP here, or use the scan below.
+                  TextField(
+                    controller: hostController,
+                    decoration: InputDecoration(
+                      labelText: 'Host (o escribe una IP manualmente)',
+                      isDense: true,
+                      errorText: hostController.text.trim().isEmpty
+                          ? 'El host es obligatorio'
+                          : null,
+                    ),
+                    onChanged: (_) =>
+                        setSt(() => _settingsConnectionDirty = true),
+                  ),
+                  gap,
+                  OutlinedButton.icon(
+                    icon: _lanScanning
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.wifi_find, size: 18),
+                    label: Text(
+                      _lanScanning
+                          ? 'Buscando… ($_lanScanChecked/$_lanScanTotal)'
+                          : 'Buscar Signal K en la red (puerto 3000)',
+                    ),
+                    onPressed: _lanScanning
+                        ? null
+                        : () async {
+                            setSt(() {
+                              _lanScanning = true;
+                              _lanScanResults = [];
+                              _lanScanChecked = 0;
+                              _lanScanTotal = 0;
+                            });
+                            try {
+                              final results = await scanLanForSignalK(
+                                3000,
+                                onProgress: (c, t) => setSt(() {
+                                  _lanScanChecked = c;
+                                  _lanScanTotal = t;
+                                }),
+                              );
+                              setSt(() {
+                                _lanScanResults = results;
+                                _lanScanning = false;
+                              });
+                            } catch (e) {
+                              setSt(() => _lanScanning = false);
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'No se pudo escanear la red: ${friendlyApiError(e)}',
+                                    ),
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                  ),
+                  if (!_lanScanning &&
+                      _lanScanResults.isEmpty &&
+                      _lanScanChecked > 0)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 6),
+                      child: Text(
+                        'No se encontró ningún Signal K en la red.',
+                        style: TextStyle(color: cMuted, fontSize: 12),
+                      ),
+                    ),
+                  if (_lanScanResults.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6, bottom: 4),
+                      child: Text(
+                        _lanScanResults.length == 1
+                            ? 'Encontrado: ${_lanScanResults.first}'
+                            : 'Encontrados ${_lanScanResults.length}: ${_lanScanResults.join(', ')}',
+                        style: const TextStyle(
+                          color: cGreen,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (_lanScanResults.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final ip in _lanScanResults)
+                            _HostPresetChip(
+                              label: ip,
+                              selected: settings.host == ip,
+                              onTap: () {
+                                setSt(() {
+                                  settings.host = ip;
+                                  hostController.text = ip;
+                                });
+                                unawaited(doSave());
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  gap,
+                  TextField(
+                    controller: portController,
+                    decoration: InputDecoration(
+                      labelText: 'Puerto',
+                      isDense: true,
+                      errorText:
+                          (int.tryParse(portController.text) ?? 0) < 1 ||
+                              (int.tryParse(portController.text) ?? 65536) >
+                                  65535
+                          ? 'Debe estar entre 1 y 65535'
+                          : null,
+                    ),
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) =>
+                        setSt(() => _settingsConnectionDirty = true),
+                  ),
+                  TextField(
+                    controller: authController,
+                    decoration: const InputDecoration(
+                      labelText: 'Contraseña codificada (Basic, avanzado)',
+                      helperText: 'Solo si tu servidor exige este tipo de autenticación para leer datos. La mayoría no lo necesita — usa el usuario/contraseña de abajo en su lugar.',
+                      helperMaxLines: 3,
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    icon: const Icon(Icons.save, size: 18),
+                    label: const Text('Guardar y reconectar'),
+                    onPressed: () => doSave(),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.fact_check_outlined, size: 18),
+                    label: const Text('Probar'),
+                    onPressed: testConnection,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'USUARIO Y CONTRASEÑA DE SIGNAL K',
+                    style: cfgSubLabel,
+                  ),
+                  gap,
+                  const Text(
+                    'Para que las pantallas de carta náutica (Freeboard) y fondeo puedan escribir — por ejemplo, fijar la posición del ancla. Se guarda en este dispositivo, no hace falta volver a escribirlo.',
+                    style: TextStyle(color: cMuted, fontSize: 11),
+                  ),
+                  gap,
+                  TextField(
+                    controller: skUsernameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Usuario Signal K',
+                      isDense: true,
+                    ),
+                  ),
+                  gap,
+                  TextField(
+                    controller: skPasswordController,
+                    decoration: const InputDecoration(
+                      labelText: 'Contraseña Signal K',
+                      helperText: 'Se guarda cifrada en el almacenamiento seguro del dispositivo.',
+                      helperMaxLines: 2,
+                      isDense: true,
+                    ),
+                    obscureText: true,
+                    onChanged: (_) =>
+                        setSt(() => _settingsConnectionDirty = true),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.login, size: 16),
+                        label: const Text('Guardar credenciales'),
+                        onPressed: () async {
+                          settings.skUsername = skUsernameController.text
+                              .trim();
+                          settings.skPassword = skPasswordController.text;
+                          // Este botón no anclaba lo escrito
+                          // a la entrada del servidor, así
+                          // que al volver a tocar un chip se
+                          // perdía y había que reescribirlo.
+                          _rememberCredentialsForCurrentServer();
+                          await _saveSettings();
+                          await _loginToSignalKResult();
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                      const SizedBox(width: 10),
+                      if (_skLoginOk == true)
+                        const Text(
+                          'Credenciales válidas ✓',
+                          style: TextStyle(color: cGreen, fontSize: 12),
+                        )
+                      else if (_skLoginOk == false)
+                        // Antes decía solo "no se pudo
+                        // iniciar sesión", que vale igual
+                        // para una contraseña rechazada que
+                        // para un servidor que no contesta —
+                        // y son dos problemas distintos con
+                        // dos soluciones distintas.
+                        Expanded(
+                          child: Text(
+                            _skLastLogin == null
+                                ? 'No se pudo iniciar sesión'
+                                : skLoginErrorText(
+                                    _skLastLogin!,
+                                    '${settings.host}:${settings.port}',
+                                  ),
+                            style: const TextStyle(color: cRed, fontSize: 12),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+            SettingsGroup(
+              title: 'FUENTE DE POSICIÓN',
+              scope: CfgScope.device,
+              icon: Icons.gps_fixed,
+              children: [
+                const Text(
+                  'Cuando el barco no esté dando su posición, ¿puede REWIND usar el GPS de este teléfono o tablet? Se usa en el fondeo y también en todo lo que necesita saber dónde estás: pronóstico, estado del mar y meteo.',
+                  style: TextStyle(color: cText, fontSize: 12, height: 1.35),
+                ),
+                const SizedBox(height: 8),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                      value: 'never',
+                      icon: Icon(Icons.block),
+                      label: Text('No permitir'),
+                    ),
+                    ButtonSegment(
+                      value: 'always',
+                      icon: Icon(Icons.phone_android),
+                      label: Text('Sin Signal K'),
+                    ),
+                    ButtonSegment(
+                      value: 'requiresSk',
+                      icon: Icon(Icons.dns_outlined),
+                      label: Text('Requiere Signal K'),
+                    ),
+                  ],
+                  selected: {_phoneGpsMode},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (values) {
+                    setSt(() => _setPhoneGpsMode(values.first));
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+                if (settings.gpsFallbackConsent == null) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Todavía no lo has decidido: se te preguntará la primera vez que haga falta.',
+                    style: TextStyle(color: cMuted, fontSize: 11),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: cOrange.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: cOrange.withValues(alpha: 0.45)),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.warning_amber_rounded,
+                        color: cOrange,
+                        size: 19,
+                      ),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Con el GPS del teléfono, la alarma de fondeo no vigila en segundo plano: REWIND debe permanecer abierta y visible, con el dispositivo a bordo, alimentación suficiente y permiso de ubicación activo.',
+                          style: TextStyle(
+                            color: cOrange,
+                            fontSize: 11,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Tab: Sensores
+  Widget _cfgSensorsTab(StateSetter setSt) => SettingsPageBody(
+    padding: const EdgeInsets.all(12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingsGroup(
+          title: 'MAPEO SIGNAL K',
+          scope: CfgScope.boat,
+          icon: Icons.sensors,
+          children: [
+            const Text(
+              'Descubre y asigna las señales de baterías, solar, profundidad, motor, neveras y tanques de este barco.',
+              style: TextStyle(color: cMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            SettingsResponsiveGroups(
+              children: [
+                SettingsStatusRow(
+                  label: 'Baterías',
+                  value:
+                      '${settings.sensorConfig.batteryHouseId} / ${settings.sensorConfig.batteryStartId}',
+                  color: cGreen,
+                  icon: Icons.battery_charging_full,
+                ),
+                SettingsStatusRow(
+                  label: 'Solar',
+                  value: settings.sensorConfig.solarPath == null
+                      ? 'Sin configurar'
+                      : settings.sensorConfig.solarPath2 == null
+                      ? '1 controlador'
+                      : '2 controladores',
+                  color: settings.sensorConfig.solarPath == null
+                      ? cMuted
+                      : cGreen,
+                  icon: Icons.solar_power_outlined,
+                ),
+                SettingsStatusRow(
+                  label: 'Profundidad',
+                  value: settings.sensorConfig.depthPath == null
+                      ? 'Sin configurar'
+                      : 'Configurada',
+                  color: settings.sensorConfig.depthPath == null
+                      ? cMuted
+                      : cGreen,
+                  icon: Icons.water,
+                ),
+                SettingsStatusRow(
+                  label: 'Horas de motor',
+                  value: settings.sensorConfig.enginePath == null
+                      ? 'Sin configurar'
+                      : 'Configuradas',
+                  color: settings.sensorConfig.enginePath == null
+                      ? cMuted
+                      : cGreen,
+                  icon: Icons.build_outlined,
+                ),
+                SettingsStatusRow(
+                  label: 'Tanques activos',
+                  value: settings.sensorConfig.tanks
+                      .where((tank) => tank.enabled)
+                      .length
+                      .toString(),
+                  color: settings.sensorConfig.tanks.any((tank) => tank.enabled)
+                      ? cGreen
+                      : cMuted,
+                  icon: Icons.opacity,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // Ver el comentario del interruptor de RESUMEN:
+            // aquí tampoco vale un ListTile.
+            SettingsSwitchRow(
+              value: settings.syncConfigWithServer,
+              onChanged: (v) {
+                setState(() => settings.syncConfigWithServer = v);
+                unawaited(_saveSettings());
+                if (v) unawaited(_pullSharedConfig());
+              },
+              title: 'Compartir la configuración con el barco',
+              subtitle:
+                  _sharedConfigStatus ??
+                  'Sensores, umbrales y alarmas se guardan en '
+                      'el servidor y llegan a todos los '
+                      'dispositivos. Nunca se comparten '
+                      'contraseñas.',
+              scope: CfgScope.device,
+            ),
+            const SizedBox(height: 4),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.tune, size: 18),
+              label: const Text('Configurar sensores'),
+              onPressed: () async {
+                final newCfg = await showDialog<SensorConfig>(
+                  context: context,
+                  builder: (_) => _SensorConfigDialog(
+                    initial: settings.sensorConfig,
+                    discover: discoverSkPaths,
+                  ),
+                );
+                if (newCfg != null) {
+                  setState(() => settings.sensorConfig = newCfg);
+                  await _saveSettings();
+                  // Lo que se acaba de configurar es del
+                  // BARCO: se comparte con los demás
+                  // dispositivos (ver _pushSharedConfig).
+                  unawaited(_pushSharedConfig());
+                  _connectSignalK();
+                }
+              },
+            ),
+          ],
+        ),
+        _cfgEngineGroup(),
+        SettingsGroup(
+          title: 'QUÍMICA DE BATERÍA',
+          scope: CfgScope.boat,
+          icon: Icons.battery_5_bar,
+          children: [
+            const Text(
+              'Para la curva aproximada de carga/descarga '
+              '(CFG > Sensores no aplica a Batería servicio, '
+              'que ya tiene SoC real). Independiente por '
+              'batería — no siempre son la misma química, y '
+              'no todos los barcos tienen batería de proa.',
+              style: TextStyle(color: cMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'Arranque',
+              style: TextStyle(color: cText, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            SegmentedButton<String>(
+              segments: _batteryChemistrySegments,
+              selected: {settings.batteryChemistryStart},
+              onSelectionChanged: (v) {
+                setSt(() => settings.batteryChemistryStart = v.first);
+                setState(() {});
+                unawaited(_saveSettings());
+              },
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Bow thruster',
+              style: TextStyle(color: cText, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            SegmentedButton<String>(
+              segments: _batteryChemistrySegments,
+              selected: {settings.batteryChemistryBow},
+              onSelectionChanged: (v) {
+                setSt(() => settings.batteryChemistryBow = v.first);
+                setState(() {});
+                unawaited(_saveSettings());
+              },
+            ),
+          ],
+        ),
+        _cfgBoatGroup(setSt),
+        if (!kIsWeb) ...[
+          SettingsGroup(
+            title: 'ESCORA (BALANCEO)',
+            scope: CfgScope.device,
+            icon: Icons.screen_rotation_alt_outlined,
+            children: [
+              SettingsSwitchRow(
+                value: settings.usePhoneHeel,
+                onChanged: (v) {
+                  setSt(() => settings.usePhoneHeel = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                title: 'Usar acelerómetro del dispositivo',
+                subtitle: 'Alternativa si el barco no publica navigation.attitude. El eje y la calibración se ajustan tocando “Escora” en NAV.',
+              ),
+            ],
+          ),
+        ],
+        _polarSettingsGroup(setSt),
+      ],
+    ),
+  );
+
+  /// Tab: Histórico de gráficas
+  Widget _cfgHistoryTab(
+    StateSetter setSt,
+    Future<void> Function() doSave,
+    Future<void> Function() testHistory,
+  ) {
+    const gap = SizedBox(height: 6);
+    final bucketController = _bucketController!;
+    final archiveBucketController = _archiveBucketController!;
+    final influxHostController = _influxHostController!;
+    final influxOrgController = _influxOrgController!;
+    final influxTokenController = _influxTokenController!;
+    return SettingsPageBody(
+      maxWidth: 760,
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SettingsGroup(
+            title: 'FUENTE Y ALMACENAMIENTO',
+            scope: CfgScope.device,
+            icon: Icons.history,
+            children: [
+              const Text(
+                'Fuente de datos',
+                style: TextStyle(color: cMuted, fontSize: 12),
+              ),
+              const SizedBox(height: 4),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: 'influx',
+                    label: Text('InfluxDB', style: TextStyle(fontSize: 12)),
+                  ),
+                  ButtonSegment(
+                    value: 'sk',
+                    label: Text(
+                      'Signal K (KIP…)',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  ButtonSegment(
+                    value: 'rewind',
+                    label: Text(
+                      'Grabador REWIND',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+                selected: {settings.historySource},
+                onSelectionChanged: (v) {
+                  setSt(() => settings.historySource = v.first);
+                  skHistoryProvider = skHistoryProviderFor(
+                    settings.historySource,
+                  );
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+              const SizedBox(height: 4),
+              Text(switch (settings.historySource) {
+                'influx' => 'Siempre usa InfluxDB.',
+                'sk' => 'Siempre usa el History API de Signal K (funciona con KIP/SQLite u otro proveedor registrado).',
+                'rewind' => 'Siempre usa el grabador de histórico del plugin REWIND en el servidor Signal K: guarda todo lo que muestra la app y apenas escribe en la tarjeta SD.',
+                _ => 'Prueba InfluxDB primero; si falla, usa el History API de Signal K (KIP/SQLite) automáticamente.',
+              }, style: const TextStyle(color: cMuted, fontSize: 11)),
+              if (settings.historySource != 'sk' &&
+                  settings.historySource != 'rewind') ...[
+                const SizedBox(height: 14),
+                const Text('INFLUXDB', style: cfgSubLabel),
+                gap,
+                TextField(
+                  controller: influxHostController,
+                  decoration: const InputDecoration(
+                    labelText: 'Host (vacío = el mismo que Signal K)',
+                    isDense: true,
+                  ),
+                  onChanged: (_) => setSt(() => _settingsHistoryDirty = true),
+                ),
+                gap,
+                TextField(
+                  controller: influxOrgController,
+                  decoration: const InputDecoration(
+                    labelText: 'Org',
+                    isDense: true,
+                  ),
+                  onChanged: (_) => setSt(() => _settingsHistoryDirty = true),
+                ),
+                gap,
+                TextField(
+                  controller: influxTokenController,
+                  decoration: InputDecoration(
+                    labelText: 'Token',
+                    helperText: kIsWeb
+                        ? 'En web queda en el almacenamiento local del navegador; usa HTTPS y un token de solo lectura.'
+                        : 'Se guarda cifrado en el almacenamiento seguro del dispositivo.',
+                    helperMaxLines: 2,
+                    isDense: true,
+                  ),
+                  obscureText: true,
+                  onChanged: (_) => setSt(() => _settingsHistoryDirty = true),
+                ),
+                gap,
+                TextField(
+                  controller: bucketController,
+                  decoration: const InputDecoration(
+                    labelText: 'Bucket',
+                    hintText: 'enjoy_raw',
+                    isDense: true,
+                  ),
+                  onChanged: (_) => setSt(() => _settingsHistoryDirty = true),
+                ),
+                gap,
+                TextField(
+                  controller: archiveBucketController,
+                  decoration: const InputDecoration(
+                    labelText: 'Bucket de archivo (7 días / 1 mes)',
+                    helperText:
+                        'Vacío = usar el mismo bucket para todos los periodos.',
+                    helperMaxLines: 2,
+                    isDense: true,
+                  ),
+                  onChanged: (_) => setSt(() => _settingsHistoryDirty = true),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    icon: const Icon(Icons.save, size: 18),
+                    label: const Text('Guardar configuración'),
+                    onPressed: () => doSave(),
+                  ),
+                  if (_settingsHistoryDirty)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 8),
+                      child: Text(
+                        'Cambios sin guardar',
+                        style: TextStyle(
+                          color: cOrange,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  if (_settingsConnectionDirty)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 8),
+                      child: Text(
+                        'Cambios sin guardar',
+                        style: TextStyle(
+                          color: cOrange,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.query_stats, size: 18),
+                    label: const Text('Probar fuente'),
+                    onPressed: testHistory,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Tab: Pantalla
+  Widget _cfgDisplayTab(StateSetter setSt) => SettingsPageBody(
+    maxWidth: 760,
+    padding: const EdgeInsets.all(12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingsGroup(
+          title: 'COMPORTAMIENTO',
+          scope: CfgScope.device,
+          icon: Icons.phone_android,
+          children: [
+            SettingsSwitchRow(
+              value: settings.keepAwake,
+              onChanged: (v) {
+                setState(() => settings.keepAwake = v);
+                _applyWakelock();
+                unawaited(_saveSettings());
+              },
+              title: 'Pantalla siempre activa',
+              subtitle: 'Evita que el dispositivo se bloquee mientras muestra instrumentos.',
+            ),
+            SettingsSwitchRow(
+              value: settings.autoHideHeaderOnNav,
+              onChanged: (v) {
+                setState(() => settings.autoHideHeaderOnNav = v);
+                unawaited(_saveSettings());
+              },
+              title: 'Ocultar menú automáticamente',
+              subtitle: 'En NAV, VNT, PWR y AIS. ANC y MAP siempre usan toda la pantalla.',
+            ),
+          ],
+        ),
+        SettingsGroup(
+          title: 'PANTALLA DE FONDEO (ANC)',
+          scope: CfgScope.device,
+          icon: Icons.bolt,
+          children: [
+            SettingsSwitchRow(
+              value: settings.anchorShowElectrical,
+              onChanged: (v) {
+                setSt(() => settings.anchorShowElectrical = v);
+                setState(() {});
+                unawaited(_saveSettings());
+              },
+              title: 'Mostrar datos eléctricos',
+              subtitle: 'Voltaje, SOC y corriente de la batería de servicio, junto a viento/profundidad',
+            ),
+          ],
+        ),
+        SettingsGroup(
+          title: 'APARIENCIA Y PANELES',
+          scope: CfgScope.device,
+          icon: Icons.palette_outlined,
+          children: [
+            const SettingsSubLabel('MODO'),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(
+                  value: 'dia',
+                  label: Text('Día'),
+                  icon: Icon(Icons.wb_sunny_outlined, size: 14),
+                ),
+                ButtonSegment(
+                  value: 'auto',
+                  label: Text('Auto (dispositivo)'),
+                  icon: Icon(Icons.brightness_auto, size: 14),
+                ),
+                ButtonSegment(
+                  value: 'noche',
+                  label: Text('Noche'),
+                  icon: Icon(Icons.nightlight_outlined, size: 14),
+                ),
+              ],
+              selected: {settings.brightnessMode},
+              onSelectionChanged: (v) {
+                setState(() => settings.brightnessMode = v.first);
+                unawaited(_saveSettings());
+              },
+              style: const ButtonStyle(
+                visualDensity: VisualDensity(horizontal: -2, vertical: -2),
+                tapTargetSize: MaterialTapTargetSize.padded,
+              ),
+            ),
+            const SettingsSubLabel('ESTILO NAV'),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'classic', label: Text('Clásica')),
+                ButtonSegment(value: 'premium', label: Text('Premium')),
+                ButtonSegment(value: 'both', label: Text('Ambas')),
+              ],
+              selected: {settings.navLayoutMode},
+              onSelectionChanged: (v) {
+                setState(() {
+                  settings.navLayoutMode = v.first;
+                  _navPageIndex = 0;
+                });
+                unawaited(_saveSettings());
+              },
+              style: const ButtonStyle(
+                visualDensity: VisualDensity(horizontal: -2, vertical: -2),
+                tapTargetSize: MaterialTapTargetSize.padded,
+              ),
+            ),
+            const SizedBox(height: 10),
+            const SettingsSubLabel('ESTILO MOTOR'),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'ninguno', label: Text('Ninguno')),
+                ButtonSegment(value: 'simple', label: Text('Simple')),
+                ButtonSegment(value: 'completo', label: Text('Completo')),
+              ],
+              selected: {
+                !settings.motorPanelEnabled
+                    ? 'ninguno'
+                    : settings.motorPanelDetailed
+                    ? 'completo'
+                    : 'simple',
+              },
+              onSelectionChanged: (v) {
+                setState(() {
+                  switch (v.first) {
+                    case 'ninguno':
+                      settings.motorPanelEnabled = false;
+                    case 'completo':
+                      settings.motorPanelEnabled = true;
+                      settings.motorPanelDetailed = true;
+                    default:
+                      settings.motorPanelEnabled = true;
+                      settings.motorPanelDetailed = false;
+                  }
+                });
+                unawaited(_saveSettings());
+              },
+              style: const ButtonStyle(
+                visualDensity: VisualDensity(horizontal: -2, vertical: -2),
+                tapTargetSize: MaterialTapTargetSize.padded,
+              ),
+            ),
+            const SizedBox(height: 10),
+            // SettingsSwitchRow, no SwitchListTile: dentro de
+            // estos recuadros con fondo propio, un ListTile
+            // pierde su color y su efecto al pulsar (Flutter
+            // lo avisa y lo caza el test de CFG).
+            SettingsSwitchRow(
+              value: settings.summaryPageEnabled,
+              onChanged: (v) {
+                setState(() => settings.summaryPageEnabled = v);
+                unawaited(_saveSettings());
+              },
+              title: 'Pantalla RESUMEN',
+              subtitle:
+                  'Energía, tanques, posición con hora y '
+                  'satélites, y estado del AIS en una sola '
+                  'pantalla. Pensada para barcos con pocos '
+                  'sensores.',
+            ),
+            const SizedBox(height: 10),
+            const SettingsSubLabel('REJILLA NAV CLÁSICA'),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 3, label: Text('3×2 (6 cartas)')),
+                ButtonSegment(value: 4, label: Text('4×2 (8 cartas)')),
+              ],
+              selected: {settings.navGridColumns},
+              onSelectionChanged: (v) {
+                setState(() => settings.navGridColumns = v.first);
+                unawaited(_saveSettings());
+              },
+              style: const ButtonStyle(
+                visualDensity: VisualDensity(horizontal: -2, vertical: -2),
+                tapTargetSize: MaterialTapTargetSize.padded,
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+
+  /// Tab: Alarmas
+  Widget _cfgAlarmsTab(BuildContext ctx, StateSetter setSt) => SettingsPageBody(
+    padding: const EdgeInsets.all(12),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 760),
+      child: SettingsResponsiveGroups(
+        children: [
+          SettingsGroup(
+            title: 'AVISO PUSH (ntfy.sh)',
+            scope: CfgScope.boat,
+            icon: Icons.notifications_active,
+            children: [
+              TextFormField(
+                initialValue: settings.ntfyTopic,
+                decoration: InputDecoration(
+                  labelText: 'Topic de ntfy',
+                  isDense: true,
+                  helperText: 'Trátalo como una contraseña: quien lo conozca puede recibir los avisos.',
+                  helperMaxLines: 2,
+                  suffixIcon: IconButton(
+                    tooltip: 'Copiar topic',
+                    icon: const Icon(Icons.copy, size: 18),
+                    onPressed: settings.ntfyTopic.trim().isEmpty
+                        ? null
+                        : () async {
+                            await Clipboard.setData(
+                              ClipboardData(text: settings.ntfyTopic.trim()),
+                            );
+                            if (ctx.mounted) {
+                              ScaffoldMessenger.of(ctx).showSnackBar(
+                                const SnackBar(content: Text('Topic copiado.')),
+                              );
+                            }
+                          },
+                  ),
+                ),
+                onChanged: (v) {
+                  setSt(() => settings.ntfyTopic = v);
+                  unawaited(_saveSettings());
+                  // Reported live 2026-09-04: changing the
+                  // topic here didn't reach the server
+                  // plugin's own backup watchdog until the
+                  // next reconnect. Debounced (not synced
+                  // on every keystroke) since this is a
+                  // REST call to the boat's own server.
+                  _ntfyTopicSyncDebounce?.cancel();
+                  _ntfyTopicSyncDebounce = Timer(
+                    const Duration(seconds: 1),
+                    () => unawaited(_syncOwnAnchorPluginConfig()),
+                  );
+                },
+              ),
+              if (settings.ntfyTopic.startsWith('SV_'))
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    'Este topic parece derivado del nombre del barco y puede ser predecible. Cámbialo por una cadena larga y aleatoria.',
+                    style: TextStyle(color: cOrange, fontSize: 12),
+                  ),
+                ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Intervalo mínimo entre avisos\n(app y vigilante del servidor)',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  DropdownButton<int>(
+                    value: settings.ntfyMinIntervalSec,
+                    dropdownColor: cPanel,
+                    items: const [30, 60, 300, 600, 900, 1800, 3600]
+                        .map(
+                          (s) => DropdownMenuItem(
+                            value: s,
+                            child: Text(s < 60 ? '$s seg' : '${s ~/ 60} min'),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setSt(() => settings.ntfyMinIntervalSec = v);
+                      setState(() {});
+                      unawaited(_saveSettings());
+                      // The server plugin's own backup
+                      // watchdog push-throttle
+                      // (pushMinIntervalSec) is kept equal
+                      // to this same value — otherwise the
+                      // app and the plugin could each
+                      // independently decide it's fine to
+                      // push again, doubling up a garreo
+                      // alert. Reported live 2026-09-04
+                      // ("debe respetarse que la app no
+                      // reitere la alarma a ntfy si no ha
+                      // pasado el tiempo de no repetición
+                      // que está en el plugin").
+                      _ntfyTopicSyncDebounce?.cancel();
+                      _ntfyTopicSyncDebounce = Timer(
+                        const Duration(seconds: 1),
+                        () => unawaited(_syncOwnAnchorPluginConfig()),
+                      );
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Avisar por ntfy en:',
+                style: TextStyle(
+                  color: cMuted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              // Las del fondeo se marcan en CFG > Fondeo,
+              // junto a su propio umbral: tenerlas aquí
+              // obligaba a ir y venir entre dos pestañas
+              // para configurar una sola alarma.
+              ..._ntfyKeyChecks(setSt, const [
+                ('corredera', 'Corredera (SOG sin STW)'),
+              ]),
+              const Text(
+                'Los avisos del fondeo (garreo, profundidad, viento, sin posición) se marcan en CFG > Fondeo.',
+                style: TextStyle(color: cMuted, fontSize: 11),
+              ),
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                onPressed: settings.ntfyTopic.trim().isEmpty
+                    ? null
+                    : () async {
+                        final ok = await _ntfyPush._sendNtfyTestPush();
+                        if (!ctx.mounted) return;
+                        ScaffoldMessenger.of(ctx).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              ok ? 'Prueba enviada a "${settings.ntfyTopic}"' : 'No se pudo enviar — revisa el topic y la conexión',
+                            ),
+                          ),
+                        );
+                      },
+                icon: const Icon(Icons.send, size: 16),
+                label: const Text('Enviar prueba'),
+              ),
+            ],
+          ),
+          SettingsGroup(
+            title: 'FUENTE',
+            scope: CfgScope.boat,
+            icon: Icons.settings_input_antenna,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmsUseSkZones,
+                onChanged: (v) {
+                  setSt(() => settings.alarmsUseSkZones = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Usar zonas de Signal K',
+                subtitle: 'Zonas configuradas en el propio servidor (notifications.*)',
+              ),
+              if (settings.alarmsUseSkZones) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'ALARMAS DETECTADAS EN ZONA',
+                  style: TextStyle(
+                    color: cMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                if (_notifications.isEmpty)
+                  const Text(
+                    'Ninguna alarma detectada todavía.',
+                    style: TextStyle(color: cMuted, fontSize: 12),
+                  )
+                else
+                  for (final path in _notifications.keys)
+                    _SkZoneAlarmRow(
+                      path: path,
+                      state: _notifications[path]!.state,
+                      setting: settings.skZoneAlarms[path],
+                      onChanged: (next) {
+                        setSt(() => settings.skZoneAlarms[path] = next);
+                        setState(() {});
+                        unawaited(_saveSettings());
+                        unawaited(_syncAlarmSound());
+                      },
+                    ),
+              ],
+            ],
+          ),
+          SettingsGroup(
+            title: 'CORREDERA',
+            scope: CfgScope.boat,
+            icon: Icons.speed,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmCorrederaEnabled,
+                onChanged: (v) {
+                  setSt(() => settings.alarmCorrederaEnabled = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Corredera (SOG sin STW)',
+                subtitle: 'Salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled/parada',
+              ),
+              if (settings.alarmCorrederaEnabled)
+                SettingsSwitchRow(
+                  value: settings.alarmCorrederaSound,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmCorrederaSound = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                    unawaited(_syncAlarmSound());
+                  },
+                  title: 'Aviso sonoro',
+                  scope: CfgScope.device,
+                ),
+            ],
+          ),
+          // Mostrar y avisar, juntos. Estaban en pestañas
+          // distintas con los mismos dos nombres —"CPA" y
+          //  "TCPA"— y cuatro campos: el filtro de la tarjeta
+          // de NAV en Pantalla y la alarma real aquí. Ahora
+          // se ven de una vez y se entiende cuál es cuál.
+          SettingsGroup(
+            title: 'AIS: AVISO Y VISTA EN NAV',
+            scope: CfgScope.boat,
+            icon: Icons.radar,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmAisEnabled,
+                onChanged: (v) {
+                  setSt(() => settings.alarmAisEnabled = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Alarma de colisión AIS',
+                subtitle: 'Salta cuando CPA y TCPA del blanco más cercano bajan de estos umbrales a la vez',
+              ),
+              if (settings.alarmAisEnabled) ...[
+                SettingsSwitchRow(
+                  value: settings.alarmAisSound,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAisSound = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                    unawaited(_syncAlarmSound());
+                  },
+                  title: 'Aviso sonoro',
+                  scope: CfgScope.device,
+                ),
+                _ThresholdRow(
+                  label: 'Alarma CPA',
+                  unit: 'NM',
+                  value: settings.alarmAisCpaNm,
+                  min: 0.1,
+                  max: 10,
+                  divisions: 99,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAisCpaNm = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+                _ThresholdRow(
+                  label: 'Alarma TCPA',
+                  unit: 'min',
+                  value: settings.alarmAisTcpaMin,
+                  min: 1,
+                  max: 60,
+                  divisions: 59,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAisTcpaMin = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+              ],
+              const SizedBox(height: 14),
+              const SettingsSubLabel(
+                'QUÉ SE VE EN LA TARJETA DE NAV',
+                scope: CfgScope.device,
+              ),
+              const Text(
+                'Solo filtra lo que se pinta. No avisa de nada: los umbrales de arriba son los que suenan.',
+                style: TextStyle(color: cMuted, fontSize: 12),
+              ),
+              _ThresholdRow(
+                label: 'CPA máximo mostrado',
+                unit: 'NM',
+                value: settings.aisCpaMaxNm,
+                min: 0.1,
+                max: 20,
+                divisions: 199,
+                onChanged: (v) {
+                  setSt(() => settings.aisCpaMaxNm = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+              _ThresholdRow(
+                label: 'TCPA máximo mostrado',
+                unit: 'min',
+                value: settings.aisTcpaMaxMin,
+                min: 1,
+                max: 120,
+                divisions: 119,
+                onChanged: (v) {
+                  setSt(() => settings.aisTcpaMaxMin = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+            ],
+          ),
+          SettingsGroup(
+            title: 'MOTOR',
+            scope: CfgScope.boat,
+            icon: Icons.build,
+            children: [
+              // Not optional — these are safety alarms,
+              // always active while the engine runs (no
+              // Enabled toggle, only Sound + threshold). Not
+              // PGN discrete-status flags either: this
+              // boat's NMEA2000 bridge (a Volvo Penta
+              // MDI-specific gateway) exposes oil pressure/
+              // coolant temp/alternator voltage as plain
+              // numbers, not ready-made J1939 DM1 fault bits
+              // (SPN 100/110/167 FMI 1/0/1), so these fire
+              // off the same thresholds the Motor screen's
+              // own lamps use — lamp and alarm always agree.
+              // If the bridge firmware is ever updated to
+              // decode DM1 directly, these thresholds are
+              // the honest stand-in for that until then. No
+              // signal at all for the glow-plug relay (SPN
+              // 677), so there's no alarm for it.
+              const Text(
+                'Presión de aceite baja',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: cMuted,
+                ),
+              ),
+              SettingsSwitchRow(
+                value: settings.alarmEngineOilSound,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineOilSound = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Aviso sonoro',
+                scope: CfgScope.device,
+              ),
+              _ThresholdRow(
+                label: 'Mínimo',
+                unit: 'bar',
+                value: settings.alarmEngineOilMinBar,
+                min: 0.1,
+                max: 10,
+                divisions: 99,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineOilMinBar = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Temperatura del motor alta',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: cMuted,
+                ),
+              ),
+              SettingsSwitchRow(
+                value: settings.alarmEngineTempSound,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineTempSound = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Aviso sonoro',
+                scope: CfgScope.device,
+              ),
+              _ThresholdRow(
+                label: 'Máximo',
+                unit: '°C',
+                value: settings.alarmEngineTempMaxC,
+                min: 60,
+                max: 130,
+                divisions: 70,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineTempMaxC = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Tensión de motor / alimentación MDI baja',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: cMuted,
+                ),
+              ),
+              SettingsSwitchRow(
+                value: settings.alarmEngineVoltSound,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineVoltSound = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Aviso sonoro',
+                scope: CfgScope.device,
+              ),
+              _ThresholdRow(
+                label: 'Mínimo',
+                unit: 'V',
+                value: settings.alarmEngineVoltMinV,
+                min: 8,
+                max: 30,
+                divisions: 88,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineVoltMinV = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'Fallo de calentadores o relé',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: cMuted,
+                ),
+              ),
+              SettingsSwitchRow(
+                value: settings.alarmEngineGlowPlugSound,
+                onChanged: (v) {
+                  setSt(() => settings.alarmEngineGlowPlugSound = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Aviso sonoro',
+                scope: CfgScope.device,
+              ),
+            ],
+          ),
+          SettingsGroup(
+            title: 'ALARMAS PERSONALIZADAS',
+            scope: CfgScope.boat,
+            icon: Icons.tune,
+            children: [
+              Align(
+                alignment: Alignment.centerRight,
+                child: IconButton(
+                  icon: const Icon(Icons.add_circle_outline, color: cCyan),
+                  onPressed: () async {
+                    final rule = await _showAddCustomAlarmDialog(context);
+                    if (rule == null) return;
+                    setSt(() => settings.customAlarms.add(rule));
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+              ),
+              if (settings.customAlarms.isEmpty)
+                const Text(
+                  'Ninguna. Toca + para añadir una.',
+                  style: TextStyle(color: cMuted, fontSize: 12),
+                )
+              else
+                for (final rule in settings.customAlarms)
+                  _CustomAlarmRow(
+                    rule: rule,
+                    onChanged: () {
+                      setSt(() {});
+                      setState(() {});
+                      unawaited(_saveSettings());
+                      unawaited(_syncAlarmSound());
+                    },
+                    onDelete: () {
+                      unawaited(() async {
+                        final confirmed = await confirmSettingsAction(
+                          context,
+                          title: '¿Borrar esta alarma?',
+                          message:
+                              'Se eliminará “${rule.label}” y no podrá recuperarse.',
+                          confirmLabel: 'Borrar',
+                          destructive: true,
+                        );
+                        if (!confirmed || !mounted) return;
+                        setSt(
+                          () => settings.customAlarms.removeWhere(
+                            (r) => r.id == rule.id,
+                          ),
+                        );
+                        setState(() {});
+                        await _saveSettings();
+                        await _syncAlarmSound();
+                      }());
+                    },
+                  ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+
+  /// Tab: Fondeo (native anchor watch alarms)
+  Widget _cfgAnchorTab(StateSetter setSt) => SettingsPageBody(
+    padding: const EdgeInsets.all(12),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 760),
+      child: SettingsResponsiveGroups(
+        children: [
+          // El aviso push de cada alarma, junto a su umbral.
+          // Estas casillas vivían todas juntas en CFG >
+          // Alarmas, lejos de lo que activan.
+          SettingsGroup(
+            title: 'GARREO',
+            scope: CfgScope.boat,
+            icon: Icons.anchor,
+            children: [
+              const Text(
+                'La vigilancia del garreo se arma en la propia pantalla ANC. Aquí solo se elige de qué avisa el push.',
+                style: TextStyle(color: cMuted, fontSize: 12),
+              ),
+              ..._ntfyKeyChecks(setSt, const [
+                ('anchorDrag', 'Avisar por push: garreando'),
+                (
+                  'anchorAutoRaise',
+                  'Avisar por push: ancla levantada automáticamente (>300 m)',
+                ),
+              ]),
+            ],
+          ),
+          SettingsGroup(
+            title: 'CAMBIO DE PROFUNDIDAD',
+            scope: CfgScope.boat,
+            icon: Icons.water,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmAnchorDepthEnabled,
+                onChanged: (v) {
+                  setSt(() => settings.alarmAnchorDepthEnabled = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Alertar si la profundidad cambia',
+                subtitle: 'Margen alrededor de la profundidad que había al fondear — no la del scope',
+              ),
+              if (settings.alarmAnchorDepthEnabled) ...[
+                SettingsSwitchRow(
+                  value: settings.alarmAnchorDepthSound,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAnchorDepthSound = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                    unawaited(_syncAlarmSound());
+                  },
+                  title: 'Aviso sonoro',
+                  scope: CfgScope.device,
+                ),
+                _ThresholdRow(
+                  label: 'Margen',
+                  unit: 'm',
+                  value: settings.alarmAnchorDepthMarginM,
+                  min: 0.1,
+                  max: 20,
+                  divisions: 199,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAnchorDepthMarginM = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+              ],
+              ..._ntfyKeyChecks(setSt, const [
+                ('anchorDepth', 'Avisar por push'),
+              ]),
+            ],
+          ),
+          SettingsGroup(
+            title: 'VIENTO',
+            scope: CfgScope.boat,
+            icon: Icons.air,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmAnchorWindEnabled,
+                onChanged: (v) {
+                  setSt(() => settings.alarmAnchorWindEnabled = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Alertar si el viento supera un umbral',
+              ),
+              if (settings.alarmAnchorWindEnabled) ...[
+                SettingsSwitchRow(
+                  value: settings.alarmAnchorWindSound,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAnchorWindSound = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                    unawaited(_syncAlarmSound());
+                  },
+                  title: 'Aviso sonoro',
+                  scope: CfgScope.device,
+                ),
+                _ThresholdRow(
+                  label: 'Umbral',
+                  unit: 'kt',
+                  value: settings.alarmAnchorWindKn,
+                  min: 5,
+                  max: 80,
+                  divisions: 75,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAnchorWindKn = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+              ],
+              ..._ntfyKeyChecks(setSt, const [
+                ('anchorWind', 'Avisar por push'),
+              ]),
+            ],
+          ),
+          SettingsGroup(
+            title: 'SIN POSICIÓN',
+            scope: CfgScope.boat,
+            icon: Icons.location_off,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmAnchorNoPositionEnabled,
+                onChanged: (v) {
+                  setSt(() => settings.alarmAnchorNoPositionEnabled = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                  unawaited(_syncAlarmSound());
+                },
+                title: 'Alertar si se pierde la posición estando fondeado',
+                subtitle: 'Ni Signal K ni el GPS del dispositivo tienen posición — no se puede vigilar el garreo',
+              ),
+              ..._ntfyKeyChecks(setSt, const [
+                ('anchorNoPosition', 'Avisar por push'),
+              ]),
+            ],
+          ),
+          SettingsGroup(
+            title: '¿TE HAS LLEVADO EL MÓVIL?',
+            scope: CfgScope.device,
+            icon: Icons.phone_iphone,
+            children: [
+              const Text(
+                'Solo actúan mientras la pantalla de fondeo usa el '
+                'GPS del dispositivo como respaldo (Signal K sin '
+                'posición) — evitan una falsa alarma de garreo si '
+                'sales del barco con el móvil.',
+                style: TextStyle(fontSize: 11, color: cMuted),
+              ),
+              const SizedBox(height: 4),
+              SettingsSwitchRow(
+                value: settings.anchorDetectPhoneLeftByMotion,
+                onChanged: (v) {
+                  setSt(() => settings.anchorDetectPhoneLeftByMotion = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                title: 'Por patrón de movimiento',
+                subtitle:
+                    'Alejarse en línea recta, no el vaivén típico del fondeo',
+              ),
+              SettingsSwitchRow(
+                value: settings.anchorDetectPhoneLeftBySteps,
+                onChanged: (v) {
+                  setSt(() => settings.anchorDetectPhoneLeftBySteps = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                title: 'Por podómetro',
+                subtitle: 'Pide permiso de actividad física la primera vez',
+              ),
+              SettingsSwitchRow(
+                value: settings.anchorDetectPhoneLeftByWifi,
+                onChanged: (v) {
+                  setSt(() => settings.anchorDetectPhoneLeftByWifi = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                title: 'Por WiFi del barco',
+                subtitle: 'Avisa si el móvil pierde la red WiFi del barco',
+              ),
+              if (settings.anchorDetectPhoneLeftByWifi) ...[
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _anchorWifiSsidController ??=
+                      TextEditingController(text: settings.anchorBoatWifiSsid),
+                  decoration: const InputDecoration(
+                    labelText: 'Nombre (SSID) de la WiFi del barco',
+                    isDense: true,
+                  ),
+                  onChanged: (v) {
+                    settings.anchorBoatWifiSsid = v;
+                    unawaited(_saveSettings());
+                  },
+                ),
+              ],
+            ],
+          ),
+          SettingsGroup(
+            title: 'FALSAS ALARMAS',
+            scope: CfgScope.boat,
+            icon: Icons.filter_alt_outlined,
+            children: [
+              SettingsSwitchRow(
+                value: settings.alarmAnchorFilterGlitches,
+                onChanged: (v) {
+                  setSt(() => settings.alarmAnchorFilterGlitches = v);
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                title: 'Ignorar saltos de posición aislados',
+                subtitle: 'Un único salto de GPS grande no cuenta como garreo — solo un movimiento sostenido',
+              ),
+              if (settings.alarmAnchorFilterGlitches)
+                _ThresholdRow(
+                  label: 'Salto considerado sospechoso',
+                  unit: 'm',
+                  value: settings.alarmAnchorGlitchJumpM,
+                  min: 5,
+                  max: 500,
+                  divisions: 99,
+                  onChanged: (v) {
+                    setSt(() => settings.alarmAnchorGlitchJumpM = v);
+                    setState(() {});
+                    unawaited(_saveSettings());
+                  },
+                ),
+            ],
+          ),
+          SettingsGroup(
+            title: 'TRAZA PROPIA',
+            scope: CfgScope.device,
+            icon: Icons.timeline,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _ownTrack.points.isEmpty
+                    ? null
+                    : () async {
+                        final count = _ownTrack.points.length;
+                        final confirmed = await confirmSettingsAction(
+                          context,
+                          title: '¿Borrar la traza?',
+                          message:
+                              'Se eliminarán $count puntos de la traza propia. La posición y el estado del ancla no cambiarán.',
+                          confirmLabel: 'Borrar traza',
+                          destructive: true,
+                        );
+                        if (!confirmed || !mounted) return;
+                        setSt(_ownTrack.clear);
+                        setState(() {});
+                      },
+                icon: const Icon(Icons.delete_outline, size: 16),
+                label: const Text('Borrar traza'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+
+  /// Tab: Diagnóstico
+  Widget _cfgDiagnosticsTab(BuildContext ctx, StateSetter setSt) => Builder(
+    builder: (_) {
+      final sc = settings.sensorConfig;
+      return SettingsPageBody(
+        maxWidth: 1100,
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            GestureDetector(
+              onLongPress: _adminRevealed
+                  ? null
+                  : () {
+                      HapticFeedback.mediumImpact();
+                      setSt(() => _adminRevealed = true);
+                      setState(() {});
+                    },
+              child: _AppVersionCard(
+                version: _pkgVersion,
+                buildNumber: _pkgBuild,
+                installSource: _installSourceLabel,
+              ),
+            ),
+            const SizedBox(height: 10),
+            // Diagnóstico eran dos pantallas en una: arriba
+            // "qué pasa y qué puedo hacer", abajo un volcado
+            // de ~45 lecturas en vivo con sus paths. Se usan
+            // en momentos distintos y juntas obligaban a
+            // recorrer 800 líneas de scroll.
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(
+                  value: 'estado',
+                  icon: Icon(Icons.monitor_heart_outlined),
+                  label: Text('Estado y herramientas'),
+                ),
+                ButtonSegment(
+                  value: 'datos',
+                  icon: Icon(Icons.data_object),
+                  label: Text('Datos en vivo'),
+                ),
+              ],
+              selected: {_diagView},
+              showSelectedIcon: false,
+              onSelectionChanged: (v) {
+                setSt(() => _diagView = v.first);
+                setState(() {});
+              },
+            ),
+            if (_diagView == 'estado') ...[
+              const SizedBox(height: 12),
+              SettingsGroup(
+                title: 'ESTADO DEL SISTEMA',
+                icon: Icons.monitor_heart_outlined,
+                children: [
+                  SettingsStatusRow(
+                    label: 'Signal K',
+                    value: signalK.connected ? 'Conectado' : 'Desconectado',
+                    color: signalK.connected ? cGreen : cRed,
+                  ),
+                  SettingsStatusRow(
+                    label: 'Servidor',
+                    value: '${settings.host}:${settings.port}',
+                    color: signalK.connected ? cGreen : cMuted,
+                    icon: Icons.dns_outlined,
+                  ),
+                  SettingsStatusRow(
+                    label: 'Último dato',
+                    value: signalK.lastUpdate == null
+                        ? 'Sin datos'
+                        : _lastUpdateText(signalK.lastUpdate),
+                    color: signalK.lastUpdate == null ? cMuted : cCyan,
+                    icon: Icons.schedule,
+                  ),
+                  SettingsStatusRow(
+                    label: 'Sesión de escritura',
+                    value: _skLoginOk == true
+                        ? 'Autenticada'
+                        : _skLoginOk == false
+                        ? 'Fallida'
+                        : 'Sin comprobar',
+                    color: _skLoginOk == true
+                        ? cGreen
+                        : _skLoginOk == false
+                        ? cRed
+                        : cMuted,
+                    icon: Icons.lock_outline,
+                  ),
+                ],
+              ),
+              SettingsGroup(
+                title: 'HERRAMIENTAS',
+                icon: Icons.build_outlined,
+                children: [
+                  SettingsSwitchRow(
+                    value: settings.demoMode,
+                    onChanged: (v) => setState(() => setDemoMode(v)),
+                    title: 'Modo DEMO',
+                    subtitle: 'Datos simulados para pruebas. No debe quedar activo durante la navegación real.',
+                  ),
+                  // Dos situaciones distintas piden pantallas
+                  // distintas: fondeado se mira ANC, navegando
+                  // se miran NAV y VNT.
+                  if (settings.demoMode) ...[
+                    const SizedBox(height: 6),
+                    for (final sc in kDemoScenarios)
+                      SettingsRadioRow(
+                        selected: settings.demoScenario == sc.id,
+                        onSelected: () {
+                          setSt(() {});
+                          setState(() => setDemoScenario(sc.id));
+                        },
+                        title: sc.label,
+                        subtitle: sc.description,
+                      ),
+                    const SizedBox(height: 4),
+                  ],
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        setSt(() => _adminRevealed = !_adminRevealed);
+                        setState(() {});
+                      },
+                      icon: Icon(
+                        _adminRevealed
+                            ? Icons.visibility_off_outlined
+                            : Icons.admin_panel_settings_outlined,
+                        size: 17,
+                      ),
+                      label: Text(
+                        _adminRevealed
+                            ? 'Ocultar modo técnico'
+                            : 'Mostrar modo técnico',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: settings.demoMode ? null : _connectSignalK,
+                        icon: const Icon(Icons.refresh, size: 17),
+                        label: const Text('Reconectar Signal K'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => showDialog<void>(
+                          context: context,
+                          builder: (_) => Dialog.fullscreen(
+                            backgroundColor: cBg,
+                            child: Stack(
+                              children: [
+                                const Positioned.fill(
+                                  child: _AnchorWebView(
+                                    host: 'sh-esp32-volvo-mdi.local',
+                                    port: 8080,
+                                    path: '/',
+                                    label: 'Diagnóstico MDI',
+                                    fullscreen: true,
+                                  ),
+                                ),
+                                Positioned(
+                                  top: 8,
+                                  right: 8,
+                                  child: IconButton.filled(
+                                    tooltip: 'Cerrar',
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                    icon: const Icon(Icons.close),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        icon: const Icon(Icons.memory_outlined, size: 17),
+                        label: const Text('Abrir diagnóstico MDI'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          final sc = settings.sensorConfig;
+                          final report = const JsonEncoder.withIndent('  ')
+                              .convert({
+                                'application': {
+                                  'name': 'REWIND Panel',
+                                  'version': _pkgVersion,
+                                  'build': _pkgBuild,
+                                  'installSource': _installSourceLabel,
+                                },
+                                'generatedAt': DateTime.now().toIso8601String(),
+                                'signalK': {
+                                  'connected': signalK.connected,
+                                  // No host, usuario, contraseña,
+                                  // token ni cabecera Basic.
+                                  'serverConfigured': settings.host.isNotEmpty,
+                                  'lastDataAt': signalK.lastUpdate
+                                      ?.toIso8601String(),
+                                  'writeSession': _skLoginOk,
+                                },
+                                'configuration': {
+                                  'historySource': settings.historySource,
+                                  'demoMode': settings.demoMode,
+                                  'activeTankCount': sc.tanks
+                                      .where((t) => t.enabled)
+                                      .length,
+                                  'solarConfigured': sc.solarPath != null,
+                                  'depthConfigured': sc.depthPath != null,
+                                  'engineConfigured': sc.enginePath != null,
+                                  'anchorArmed': settings.anchorConfig.armed,
+                                },
+                                'health': {
+                                  'activeAlarmCount': _activeAlarms.length,
+                                  'recentEventCount': _eventLog.length,
+                                  'hasRecordedCrash': lastCrashInfo != null,
+                                },
+                              });
+                          await Clipboard.setData(ClipboardData(text: report));
+                          if (ctx.mounted) {
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Diagnóstico copiado sin credenciales.',
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.copy_all_outlined, size: 17),
+                        label: const Text('Copiar diagnóstico JSON'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              if (lastCrashInfo != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xff3a0a0a),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: cRed),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.warning_amber_rounded,
+                            color: cRed,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 6),
+                          const Text(
+                            'ÚLTIMO ERROR',
+                            style: TextStyle(
+                              color: cRed,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () async {
+                              final confirmed = await confirmSettingsAction(
+                                context,
+                                title: '¿Borrar el último error?',
+                                message: 'Se eliminará este diagnóstico del dispositivo.',
+                                confirmLabel: 'Borrar',
+                                destructive: true,
+                              );
+                              if (confirmed && mounted) {
+                                setState(() => lastCrashInfo = null);
+                              }
+                            },
+                            child: const Text('Borrar'),
+                          ),
+                        ],
+                      ),
+                      Text(
+                        lastCrashInfo!,
+                        style: const TextStyle(
+                          color: cText,
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (_eventLog.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                SettingsGroup(
+                  title: 'EVENTOS RECIENTES',
+                  icon: Icons.receipt_long_outlined,
+                  children: [
+                    SelectableText(
+                      _eventLog.reversed.take(12).join('\n'),
+                      style: const TextStyle(
+                        color: cMuted,
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+            if (_diagView == 'datos') ...[
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('NAVEGACIÓN / VIENTO', style: cfgSubLabel),
+                        const SizedBox(height: 4),
+                        _diagRow(
+                          'Escora',
+                          signalK.heelDeg != null
+                              ? '${signalK.heelDeg!.abs().round()}° ${signalK.heelDeg! >= 0 ? 'E' : 'B'}'
+                              : '--',
+                          signalK.heelDeg != null ? cGreen : cRed,
+                          path: 'navigation.attitude.roll',
+                        ),
+                        _diagRow(
+                          'TWS',
+                          _dTws != null
+                              ? '${_dTws!.toStringAsFixed(1)} kt'
+                              : '--',
+                          _dTws != null ? cCyan : cMuted,
+                          path: 'environment.wind.speedTrue',
+                          updatedAt: signalK.twsUpdate,
+                        ),
+                        _diagRow(
+                          'TWA',
+                          _dTwa != null
+                              ? '${_dTwa!.toStringAsFixed(1)}°'
+                              : '--',
+                          _dTwa != null ? cCyan : cMuted,
+                          path: 'environment.wind.angleTrueWater',
+                          updatedAt: signalK.twaUpdate,
+                        ),
+                        _diagRow(
+                          'AWS',
+                          _dAws != null
+                              ? '${_dAws!.toStringAsFixed(1)} kt'
+                              : '--',
+                          _dAws != null ? cGreen : cMuted,
+                          path: 'environment.wind.speedApparent',
+                          updatedAt: signalK.awsUpdate,
+                        ),
+                        _diagRow(
+                          'AWA',
+                          _dAwa != null
+                              ? '${_dAwa!.toStringAsFixed(1)}°'
+                              : '--',
+                          _dAwa != null ? cGreen : cMuted,
+                          path: 'environment.wind.angleApparent',
+                          updatedAt: signalK.awaUpdate,
+                        ),
+                        _diagRow(
+                          'SOG',
+                          signalK.sogKn != null
+                              ? '${signalK.sogKn!.toStringAsFixed(1)} kt'
+                              : '--',
+                          signalK.sogKn != null ? cGreen : cMuted,
+                          path: 'navigation.speedOverGround',
+                          updatedAt: signalK.sogKnUpdate,
+                        ),
+                        _diagRow(
+                          'STW',
+                          signalK.stwKn != null
+                              ? '${signalK.stwKn!.toStringAsFixed(1)} kt'
+                              : '--',
+                          signalK.stwKn != null ? cGreen : cMuted,
+                          path: 'navigation.speedThroughWater',
+                          updatedAt: signalK.stwKnUpdate,
+                        ),
+                        _diagRow(
+                          'Rumbo',
+                          signalK.headingTrueDeg != null
+                              ? '${signalK.headingTrueDeg!.round()}°'
+                              : '--',
+                          signalK.headingTrueDeg != null ? cText : cMuted,
+                          path: 'navigation.headingTrue',
+                          updatedAt:
+                              signalK.headingTrueDegUpdate ??
+                              signalK.headingMagneticDegUpdate,
+                        ),
+                        _diagRow(
+                          'Profundidad',
+                          signalK.depthM != null
+                              ? '${signalK.depthM!.toStringAsFixed(1)} m'
+                              : '--',
+                          signalK.depthM != null ? cOrange : cMuted,
+                          path: sc.depthPath ?? '(sin configurar)',
+                        ),
+                        _diagRow(
+                          'Horas motor',
+                          (signalK.engineHours ?? signalK.lastEngineHours) !=
+                                  null
+                              ? '${(signalK.engineHours ?? signalK.lastEngineHours)!.toStringAsFixed(1)} h'
+                              : '--',
+                          (signalK.engineHours ?? signalK.lastEngineHours) !=
+                                  null
+                              ? cText
+                              : cMuted,
+                          path: sc.enginePath ?? '(sin configurar)',
+                          updatedAt:
+                              signalK.engineHoursUpdate ??
+                              signalK.lastEngineHoursAt,
+                        ),
+                        _diagRow(
+                          'COG',
+                          signalK.cogTrueDeg != null
+                              ? '${signalK.cogTrueDeg!.round()}°'
+                              : '--',
+                          signalK.cogTrueDeg != null ? cText : cMuted,
+                          path: 'navigation.courseOverGroundTrue',
+                        ),
+                        _diagRow(
+                          'Ancla',
+                          signalK.anchorArmed ? 'Armada' : 'Sin armar',
+                          signalK.anchorArmed ? cGreen : cMuted,
+                          path: 'navigation.anchor.state',
+                        ),
+                        _diagRow(
+                          'TWD',
+                          _dTwd != null
+                              ? '${_dTwd!.toStringAsFixed(0)}°'
+                              : '--',
+                          _dTwd != null ? cCyan : cMuted,
+                          path: 'environment.wind.directionTrue',
+                        ),
+                        _diagRow(
+                          'VMG viento',
+                          () {
+                            final twaForVmg = _freshTwaWater;
+                            final speed = _effectiveBoatSpeed;
+                            final twdForVmg = _freshWind(
+                              _dTwd,
+                              signalK.twdUpdate,
+                            );
+                            final angle = speed.overGround
+                                ? (twdForVmg != null && _freshCog != null
+                                      ? normalizeRelativeAngle(
+                                          twdForVmg - _freshCog!,
+                                        )
+                                      : null)
+                                : twaForVmg;
+                            final v = angle != null && speed.valueKn != null
+                                ? speed.valueKn! *
+                                      math.cos(angle * math.pi / 180)
+                                : null;
+                            return v != null
+                                ? '${v.toStringAsFixed(1)} kt'
+                                : '--';
+                          }(),
+                          cGreen,
+                          path: '(calculado)',
+                        ),
+                        _diagRow(
+                          'VMG ruta',
+                          signalK.courseVmgKn != null
+                              ? '${signalK.courseVmgKn!.toStringAsFixed(1)} kt'
+                              : '--',
+                          signalK.courseVmgKn != null ? cGreen : cMuted,
+                          path: 'navigation.course.calcValues.velocityMadeGood',
+                        ),
+                        _diagRow(
+                          'GNSS sats',
+                          signalK.gnssSatellites?.toString() ?? '--',
+                          signalK.gnssSatellites != null ? cGreen : cMuted,
+                          path: 'navigation.gnss.satellites',
+                        ),
+                        _diagRow(
+                          'GNSS HDOP',
+                          signalK.gnssHdop != null
+                              ? signalK.gnssHdop!.toStringAsFixed(1)
+                              : '--',
+                          signalK.gnssHdop != null ? cGreen : cMuted,
+                          path: 'navigation.gnss.horizontalDilution',
+                        ),
+                        _diagRow(
+                          'GNSS fix',
+                          signalK.gnssMethodQuality ??
+                              signalK.gnssFixType ??
+                              '--',
+                          (signalK.gnssMethodQuality ?? signalK.gnssFixType) !=
+                                  null
+                              ? cGreen
+                              : cMuted,
+                          path: 'navigation.gnss.methodQuality',
+                        ),
+                        _diagRow(
+                          'Altitud antena',
+                          signalK.gnssAntennaAltitudeM != null
+                              ? '${signalK.gnssAntennaAltitudeM!.toStringAsFixed(1)} m'
+                              : '--',
+                          signalK.gnssAntennaAltitudeM != null
+                              ? cGreen
+                              : cMuted,
+                          path: 'navigation.gnss.antennaAltitude',
+                        ),
+                        const SizedBox(height: 12),
+                        const Text('ENERGÍA', style: cfgSubLabel),
+                        const SizedBox(height: 4),
+                        _diagRow(
+                          'Batería de servicio V',
+                          signalK.houseV != null
+                              ? '${signalK.houseV!.toStringAsFixed(2)} V'
+                              : '--',
+                          signalK.houseV != null ? cCyan : cMuted,
+                          path:
+                              'electrical.batteries.${sc.batteryHouseId}.voltage',
+                        ),
+                        _diagRow(
+                          'Batería de servicio A',
+                          signalK.houseA != null
+                              ? '${signalK.houseA!.toStringAsFixed(1)} A'
+                              : '--',
+                          signalK.houseA != null ? cCyan : cMuted,
+                          path:
+                              'electrical.batteries.${sc.batteryHouseId}.current',
+                        ),
+                        _diagRow(
+                          'Batería de servicio SoC',
+                          signalK.houseSoc != null
+                              ? '${signalK.houseSoc!.round()}%'
+                              : '--',
+                          signalK.houseSoc != null ? cCyan : cMuted,
+                          path:
+                              'electrical.batteries.${sc.batteryHouseId}.capacity.stateOfCharge',
+                        ),
+                        _diagRow(
+                          'Batería arranque V',
+                          signalK.startV != null
+                              ? '${signalK.startV!.toStringAsFixed(2)} V'
+                              : '--',
+                          signalK.startV != null ? cCyan : cMuted,
+                          path:
+                              'electrical.batteries.${sc.batteryStartId}.voltage',
+                        ),
+                        _diagRow(
+                          'Solar',
+                          signalK.solarW != null
+                              ? '${signalK.solarW!.round()} W'
+                              : '--',
+                          signalK.solarW != null ? cOrange : cMuted,
+                          path: sc.solarPath ?? '(sin configurar)',
+                        ),
+                        if (sc.solarPath2 != null)
+                          _diagRow(
+                            'Solar 2',
+                            signalK.solarW2 != null
+                                ? '${signalK.solarW2!.round()} W'
+                                : '--',
+                            signalK.solarW2 != null ? cOrange : cMuted,
+                            path: sc.solarPath2!,
+                          ),
+                        _diagRow(
+                          'Bowthruster V',
+                          signalK.bowthrusterV != null
+                              ? '${signalK.bowthrusterV!.toStringAsFixed(2)} V'
+                              : '--',
+                          signalK.bowthrusterV != null ? cCyan : cMuted,
+                          path: 'electrical.batteries.bowthruster.voltage',
+                        ),
+                        const SizedBox(height: 12),
+                        const Text('TEMPERATURAS', style: cfgSubLabel),
+                        const SizedBox(height: 4),
+                        _diagRow(
+                          'Nevera 1',
+                          signalK.fridge1TempK != null
+                              ? '${(signalK.fridge1TempK! - 273.15).toStringAsFixed(1)} °C'
+                              : '--',
+                          signalK.fridge1TempK != null ? cCyan : cMuted,
+                          path: sc.fridge1Path ?? '(sin configurar)',
+                        ),
+                        _diagRow(
+                          'Nevera 2',
+                          signalK.fridge2TempK != null
+                              ? '${(signalK.fridge2TempK! - 273.15).toStringAsFixed(1)} °C'
+                              : '--',
+                          signalK.fridge2TempK != null ? cCyan : cMuted,
+                          path: sc.fridge2Path ?? '(sin configurar)',
+                        ),
+                        _diagRow(
+                          'Bowthruster',
+                          signalK.bowthrusterTempK != null
+                              ? '${(signalK.bowthrusterTempK! - 273.15).toStringAsFixed(1)} °C'
+                              : '--',
+                          signalK.bowthrusterTempK != null ? cCyan : cMuted,
+                          path: 'electrical.batteries.bowthruster.temperature',
+                        ),
+                        const SizedBox(height: 12),
+                        const Text('TANQUES', style: cfgSubLabel),
+                        const SizedBox(height: 4),
+                        for (final t in sc.tanks.where((t) => t.enabled))
+                          InkWell(
+                            onTap: () => _showRawSkNode(
+                              context,
+                              'tanks.${t.type}.${t.id}',
+                            ),
+                            child: _diagRow(
+                              t.groupLabel,
+                              signalK.tanks[t.tankKey] != null
+                                  ? '${signalK.tanks[t.tankKey]!.round()}%'
+                                  : '--',
+                              signalK.tanks[t.tankKey] != null ? cCyan : cMuted,
+                              path: '${t.skPath}  (toca para ver todo)',
+                            ),
+                          ),
+                        const SizedBox(height: 10),
+                        const Divider(color: Color(0xff1e3040), height: 1),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Dampening: TWS/AWS 5s · TWA/AWA 3s',
+                          style: TextStyle(
+                            color: Color(0xff4a6070),
+                            fontSize: 9,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('RASPBERRY PI', style: cfgSubLabel),
+                        const SizedBox(height: 4),
+                        _diagRow(
+                          'CPU temp',
+                          signalK.cpuTempK != null
+                              ? '${(signalK.cpuTempK! - 273.15).toStringAsFixed(1)} °C'
+                              : '--',
+                          signalK.cpuTempK != null ? cCyan : cMuted,
+                          path: 'environment.rpi.cpu.temperature',
+                        ),
+                        _diagRow(
+                          'GPU temp',
+                          signalK.gpuTempK != null
+                              ? '${(signalK.gpuTempK! - 273.15).toStringAsFixed(1)} °C'
+                              : '--',
+                          signalK.gpuTempK != null ? cCyan : cMuted,
+                          path: 'environment.rpi.gpu.temperature',
+                        ),
+                        _diagRow(
+                          'CPU uso',
+                          signalK.cpuUtil != null
+                              ? '${signalK.cpuUtil!.round()}%'
+                              : '--',
+                          signalK.cpuUtil != null ? cCyan : cMuted,
+                          path: 'environment.rpi.cpu.utilisation',
+                        ),
+                        _diagRow(
+                          'Memoria uso',
+                          signalK.memUtil != null
+                              ? '${signalK.memUtil!.round()}%'
+                              : '--',
+                          signalK.memUtil != null ? cCyan : cMuted,
+                          path: 'environment.rpi.memory.utilisation',
+                        ),
+                        _diagRow(
+                          'SD uso',
+                          signalK.sdUtil != null
+                              ? '${signalK.sdUtil!.round()}%'
+                              : '--',
+                          signalK.sdUtil != null ? cCyan : cMuted,
+                          path: 'environment.rpi.sd.utilisation',
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      );
+    },
+  );
+
+  /// Tab: Admin (hidden — long-press the version card above)
+  Widget _cfgTechnicalTab(StateSetter setSt) => SettingsPageBody(
+    maxWidth: 760,
+    padding: const EdgeInsets.all(12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingsGroup(
+          title: 'SERVIDORES GUARDADOS',
+          scope: CfgScope.device,
+          icon: Icons.dns,
+          children: [
+            const Text(
+              'Cambiar de servidor no toca la configuración '
+              'de sensores de este barco — cada servidor '
+              'guarda la suya propia.',
+              style: TextStyle(color: cMuted, fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            for (final s in settings.savedServers)
+              SavedServerRow(
+                key: ValueKey('${s.host}:${s.port}'),
+                server: s,
+                isCurrent: settings.host == s.host && settings.port == s.port,
+                onConnect: () => unawaited(_switchToSavedServer(s)),
+                onEdit: () async {
+                  final edited = await showDialog<SavedServer>(
+                    context: context,
+                    builder: (_) => ServerEditDialog(initial: s),
+                  );
+                  if (edited == null) return;
+                  setSt(() {
+                    final i = settings.savedServers.indexOf(s);
+                    settings.savedServers[i] = edited;
+                  });
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+                onDelete: () async {
+                  final confirmed = await confirmSettingsAction(
+                    context,
+                    title: '¿Borrar ${s.name}?',
+                    message: settings.host == s.host && settings.port == s.port
+                        ? 'Es el servidor seleccionado actualmente. Se borrará de la lista, pero la conexión actual continuará hasta que cambies de servidor.'
+                        : 'Se eliminará de la lista de servidores guardados.',
+                    confirmLabel: 'Borrar servidor',
+                    destructive: true,
+                  );
+                  if (!confirmed || !mounted) return;
+                  setSt(() => settings.savedServers.remove(s));
+                  setState(() {});
+                  unawaited(_saveSettings());
+                },
+              ),
+            if (settings.savedServers.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Sin servidores guardados.',
+                  style: TextStyle(color: cMuted, fontSize: 12),
+                ),
+              ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Añadir servidor'),
+              onPressed: () async {
+                final added = await showDialog<SavedServer>(
+                  context: context,
+                  builder: (_) => const ServerEditDialog(),
+                );
+                if (added == null) return;
+                setSt(() => settings.savedServers.add(added));
+                setState(() {});
+                unawaited(_saveSettings());
+              },
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+
+  /// Casillas de "avisar por ntfy" para un puñado de alarmas.
+  ///
+  /// Antes era un bucle suelto con las seis juntas dentro de CFG > Alarmas,
+  /// aunque cinco eran del fondeo y sus umbrales estaban en la pestaña de al
+  /// lado. Ahora cada pestaña enseña las suyas.
+  List<Widget> _ntfyKeyChecks(
+    StateSetter setSt,
+    List<(String, String)> entries,
+  ) => [
+    for (final entry in entries)
+      SettingsCheckRow(
+        value: settings.ntfyAlarmKeys.contains(entry.$1),
+        onChanged: (v) {
+          setSt(() {
+            if (v) {
+              settings.ntfyAlarmKeys.add(entry.$1);
+            } else {
+              settings.ntfyAlarmKeys.remove(entry.$1);
+            }
+          });
+          setState(() {});
+          unawaited(_saveSettings());
+        },
+        title: entry.$2,
+      ),
+  ];
+
+  Widget _cfgEngineGroup() => SettingsGroup(
+    title: 'MOTOR Y TRANSMISIÓN',
+    scope: CfgScope.boat,
+    icon: Icons.settings_input_component,
+    children: [
+      DropdownButtonFormField<String>(
+        initialValue:
+            engineFuelProfileById(settings.sensorConfig.engineModelId) == null
+            ? null
+            : settings.sensorConfig.engineModelId,
+        isExpanded: true,
+        decoration: const InputDecoration(
+          labelText: 'Motor para estimar consumo',
+          helperText:
+              'Estimación práctica: 70 % de la curva de carga de hélice.',
+          isDense: true,
+        ),
+        hint: const Text('Seleccionar motor'),
+        items: [
+          for (final profile in engineFuelProfiles)
+            DropdownMenuItem(value: profile.id, child: Text(profile.label)),
+        ],
+        onChanged: (value) {
+          setState(() => settings.sensorConfig.engineModelId = value ?? '');
+          unawaited(_saveSettings());
+        },
+      ),
+      const SizedBox(height: 10),
+      const Text('TRANSMISIÓN', style: cfgSubLabel),
+      const SizedBox(height: 5),
+      SegmentedButton<String>(
+        emptySelectionAllowed: true,
+        segments: const [
+          ButtonSegment(value: 'shaft', label: Text('Eje')),
+          ButtonSegment(value: 'saildrive', label: Text('Saildrive')),
+        ],
+        selected: settings.sensorConfig.engineDriveType.isEmpty
+            ? const <String>{}
+            : {settings.sensorConfig.engineDriveType},
+        onSelectionChanged: (values) {
+          setState(
+            () => settings.sensorConfig.engineDriveType = values.isEmpty
+                ? ''
+                : values.first,
+          );
+          unawaited(_saveSettings());
+        },
+      ),
+      const SizedBox(height: 10),
+      const Text('HÉLICE', style: cfgSubLabel),
+      const SizedBox(height: 5),
+      SegmentedButton<String>(
+        emptySelectionAllowed: true,
+        segments: const [
+          ButtonSegment(value: 'fixed', label: Text('Fija')),
+          ButtonSegment(value: 'folding', label: Text('Plegable')),
+          ButtonSegment(value: 'feathering', label: Text('Orientable')),
+        ],
+        selected: settings.sensorConfig.enginePropellerType.isEmpty
+            ? const <String>{}
+            : {settings.sensorConfig.enginePropellerType},
+        onSelectionChanged: (values) {
+          setState(
+            () => settings.sensorConfig.enginePropellerType = values.isEmpty
+                ? ''
+                : values.first,
+          );
+          unawaited(_saveSettings());
+        },
+      ),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          const Expanded(
+            child: Text(
+              'Porcentaje de la curva del fabricante',
+              style: TextStyle(
+                color: cText,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Text(
+            '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
+            style: const TextStyle(color: cOrange, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+      Slider(
+        value: settings.sensorConfig.engineFuelCalibrationPercent.clamp(
+          50,
+          120,
+        ),
+        min: 50,
+        max: 120,
+        divisions: 70,
+        label:
+            '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
+        onChanged: (value) => setState(
+          () => settings.sensorConfig.engineFuelCalibrationPercent = value,
+        ),
+        onChangeEnd: (_) => unawaited(_saveSettings()),
+      ),
+      const Text(
+        'Recomendado: 70 %. Ajustable entre 50 % y 120 %. Eje/saildrive y tipo de hélice se guardan como contexto y no añaden otra reducción. Calibra comparando con repostajes o un caudalímetro.',
+        style: TextStyle(color: cMuted, fontSize: 10.5),
+      ),
+    ],
+  );
+
+  /// La ficha fija del barco: cómo se dibuja y cuánto mide.
+  ///
+  /// El icono estaba en Pantalla y las medidas (roldana, cadena, GPS a proa)
+  /// dentro de Fondeo, aunque las dos cosas son lo mismo: datos del barco que
+  /// se ponen una vez, viajan al resto de dispositivos y no dependen ni de
+  /// quién mira ni de dónde se está fondeado.
+  Widget _cfgBoatGroup(StateSetter setSt) => SettingsGroup(
+    title: 'EL BARCO',
+    scope: CfgScope.boat,
+    icon: Icons.sailing,
+    children: [
+      const SettingsSubLabel('ICONO DEL BARCO'),
+      Row(
+        children: [
+          Container(
+            width: 64,
+            height: 64,
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: cBg,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Transform.rotate(
+              angle: math.pi / 2,
+              child: Image.asset(
+                boatIconById(settings.shipIconId).grandeAsset,
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  boatIconById(settings.shipIconId).label,
+                  style: const TextStyle(color: cText, fontSize: 13),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton(
+                  onPressed: () =>
+                      showShipIconPicker(context, settings.shipIconId, (id) {
+                        setState(() => settings.shipIconId = id);
+                        _reloadShipIcon();
+                        unawaited(_saveSettings());
+                      }),
+                  child: const Text('Cambiar icono'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 14),
+      const SettingsSubLabel('MEDIDAS (FONDEO)'),
+      const Text(
+        'Se publican en Signal K como design.* junto '
+        'con el resto del fondeo — no cambian de un '
+        'fondeo a otro.',
+        style: TextStyle(fontSize: 11, color: cMuted),
+      ),
+      const SizedBox(height: 6),
+      _ThresholdRow(
+        label: 'Altura del roller sobre el agua',
+        unit: 'm',
+        value: settings.anchorBowRollerHeightM,
+        min: 0,
+        max: 10,
+        divisions: 100,
+        onChanged: (v) {
+          setSt(() => settings.anchorBowRollerHeightM = v);
+          setState(() {});
+          unawaited(_saveSettings());
+        },
+      ),
+      _ThresholdRow(
+        label: 'Longitud total de cadena',
+        unit: 'm',
+        value: settings.anchorTotalChainLengthM,
+        min: 1,
+        max: 300,
+        divisions: 299,
+        onChanged: (v) {
+          setSt(() => settings.anchorTotalChainLengthM = v);
+          setState(() {});
+          unawaited(_saveSettings());
+        },
+      ),
+      _ThresholdRow(
+        label: 'Distancia GPS a proa (roldana)',
+        unit: 'm',
+        value: settings.anchorGpsToBowM,
+        min: 0,
+        max: 25,
+        divisions: 250,
+        onChanged: (v) {
+          setSt(() => settings.anchorGpsToBowM = v);
+          setState(() {});
+          unawaited(_saveSettings());
+        },
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        'La posición GPS del barco suele ser la de la '
+        'antena, no la de la roldana de proa — indica '
+        'cuánto más adelante está la proa (a lo largo '
+        'del eje del barco) para que el punto de '
+        'fondeo y el radio de vigilancia sean más '
+        'exactos. 0 si la antena está prácticamente '
+        'en la proa.',
+        style: TextStyle(fontSize: 11, color: cMuted),
+      ),
+    ],
+  );
+
   Widget _polarSettingsGroup(StateSetter setSt) {
     final active = _activePolar;
     final custom = settings.polarCustomJson != null;
     return SettingsGroup(
       title: 'POLAR DEL BARCO',
+      scope: CfgScope.boat,
       icon: Icons.speed_outlined,
       children: [
         const Text(
@@ -10879,7 +13753,10 @@ class _DashboardState extends State<Dashboard> {
       title: 'POSICIÓN Y HORA',
       icon: Icons.my_location,
       accent: lat == null ? cMuted : cGreen,
-      trailing: hhmm(now),
+      // Fecha y hora juntas en la cabecera: la fecha ocupaba un chip entero
+      // abajo y el panel se ha quedado más estrecho para hacerle sitio al
+      // motor (petición en vivo 2026-09-17).
+      trailing: '${ddmmyyyy(now)}  ${hhmm(now)}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
@@ -10910,8 +13787,110 @@ class _DashboardState extends State<Dashboard> {
               ),
               if (signalK.gnssFixType != null)
                 _summaryChip('FIJACIÓN', signalK.gnssFixType!, cCyan),
-              _summaryChip('FECHA', ddmmyyyy(now), cMuted),
             ],
+          ),
+        ],
+      ),
+    );
+
+    // Estado del motor de un vistazo: si está en marcha, a cuántas vueltas,
+    // cómo va de refrigerante y qué está dando el alternador. Son los cuatro
+    // datos que se miran al arrancar y al navegar a motor; el resto vive en
+    // la pantalla MOTOR (petición en vivo 2026-09-17).
+    //
+    // Se oculta entero en barcos sin telemetría de motor: AREA SECADA no
+    // publica ni una vuelta y un panel vacío ocupa el sitio de los que sí
+    // tienen datos.
+    final rpm = _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate);
+    final coolantK = _freshEngine(
+      signalK.engineCoolantTempK,
+      signalK.engineCoolantTempUpdate,
+    );
+    final alternatorV = _freshEngine(
+      signalK.engineAlternatorV,
+      signalK.engineAlternatorVUpdate,
+    );
+    final hasEngine =
+        settings.demoMode ||
+        rpm != null ||
+        coolantK != null ||
+        alternatorV != null ||
+        signalK.engineHours != null ||
+        _sensorDetected(settings.sensorConfig.enginePath);
+    final running = _engineRunning;
+    final contact = _engineContactOn;
+    final coolantC = coolantK == null ? null : coolantK - 273.15;
+    // Los mismos umbrales que las alarmas de CFG > Alarmas > Motor: dos
+    // criterios distintos para el mismo motor serían un error esperando.
+    final coolantColor = coolantC == null
+        ? cMuted
+        : coolantC >= settings.alarmEngineTempMaxC
+        ? cRed
+        : coolantC >= settings.alarmEngineTempMaxC - 10
+        ? cOrange
+        : cGreen;
+    final altColor = alternatorV == null
+        ? cMuted
+        : running && alternatorV < settings.alarmEngineVoltMinV
+        ? cRed
+        : cGreen;
+    final motorAccent = running
+        ? (coolantColor == cRed || altColor == cRed ? cRed : cGreen)
+        : contact
+        ? cOrange
+        : cMuted;
+    final motor = _summaryPanel(
+      title: 'MOTOR',
+      icon: Icons.settings_input_component,
+      accent: motorAccent,
+      trailing: running
+          ? 'EN MARCHA'
+          : contact
+          ? 'CONTACTO'
+          : 'APAGADO',
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            flex: 5,
+            child: _summaryValue(
+              running ? fmt(rpm, 0, '') : '--',
+              running ? 'rpm' : '',
+              motorAccent,
+              footer: running
+                  ? 'motor en marcha'
+                  : contact
+                  ? 'contacto puesto, sin arrancar'
+                  : 'motor parado',
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 5,
+            child: Center(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                children: [
+                  _summaryChip(
+                    'TEMP',
+                    coolantC == null ? '--' : fmt(coolantC, 0, ' °C'),
+                    coolantColor,
+                  ),
+                  _summaryChip(
+                    'ALTERN.',
+                    alternatorV == null ? '--' : fmt(alternatorV, 2, ' V'),
+                    altColor,
+                  ),
+                  if (signalK.engineHours != null)
+                    _summaryChip(
+                      'HORAS',
+                      fmt(signalK.engineHours, 1, ' h'),
+                      cCyan,
+                    ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -10937,8 +13916,8 @@ class _DashboardState extends State<Dashboard> {
             recibiendo ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
             recibiendo ? cGreen : cMuted,
             footer: recibiendo
-                ? 'barcos vistos en los últimos 18 min'
-                : 'no llega ningún blanco: receptor apagado o sin alcance',
+                ? 'vistos en 18 min'
+                : 'receptor apagado o sin alcance',
           ),
         ],
       ),
@@ -10961,11 +13940,18 @@ class _DashboardState extends State<Dashboard> {
           Expanded(
             child: Row(
               children: [
-                // Mismos anchos que la fila de arriba: posición debajo de
-                // energía y AIS debajo de tanques, en dos columnas rectas.
-                Expanded(flex: 5, child: posicion),
+                // Con motor la fila de abajo son tres: posición y AIS se
+                // estrechan para dejarle sitio, y el motor se queda con la
+                // parte ancha por ser el que lleva cifra grande y tres
+                // chips. Sin telemetría de motor vuelven a los anchos de la
+                // fila de arriba, posición bajo energía y AIS bajo tanques.
+                Expanded(flex: hasEngine ? 4 : 5, child: posicion),
                 const SizedBox(width: 8),
-                Expanded(flex: 7, child: ais),
+                if (hasEngine) ...[
+                  Expanded(flex: 5, child: motor),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(flex: hasEngine ? 3 : 7, child: ais),
               ],
             ),
           ),
@@ -12856,13 +15842,6 @@ class _DashboardState extends State<Dashboard> {
     );
     final influxTokenController = _influxTokenController ??=
         TextEditingController(text: settings.influxToken);
-    const lbl = TextStyle(
-      color: cMuted,
-      fontSize: 11,
-      letterSpacing: 1.1,
-      fontWeight: FontWeight.w700,
-    );
-    const gap = SizedBox(height: 6);
 
     Future<void> doSave() async {
       final newHost = hostController.text.trim();
@@ -13116,7 +16095,7 @@ class _DashboardState extends State<Dashboard> {
     }
 
     Future<void> showSettingsSearch(BuildContext tabContext) async {
-      const destinations =
+      final destinations =
           <({String title, String section, String keywords, int tab})>[
             // CONEXIÓN
             (
@@ -13198,6 +16177,15 @@ class _DashboardState extends State<Dashboard> {
               title: 'Tanques, capacidades y tipos',
               section: 'SENSORES · Mapeo Signal K',
               keywords: 'tanque tanques tnk agua diesel combustible fuel aguas negras grises waste black grey lpg gas glp propano capacidad litros nivel venus cerbo unknown tipo mostrar como',
+              tab: 1,
+            ),
+            (
+              title: 'Motor, transmisión y hélice',
+              section: 'SENSORES · Motor y transmisión',
+              keywords:
+                  'motor modelo volvo yanmar consumo gasoil diesel litros hora '
+                  'transmision eje saildrive helice fija plegable orientable '
+                  'calibracion curva fabricante porcentaje',
               tab: 1,
             ),
             (
@@ -13292,16 +16280,16 @@ class _DashboardState extends State<Dashboard> {
             ),
             (
               title: 'Icono del barco',
-              section: 'PANTALLA · Apariencia y paneles',
+              section: 'SENSORES · El barco',
               keywords:
                   'icono barco buque velero lancha forma simbolo ais mapa',
-              tab: 3,
+              tab: 1,
             ),
             (
               title: 'AIS mostrado en NAV',
-              section: 'PANTALLA · AIS mostrado en NAV',
+              section: 'ALARMAS · AIS: aviso y vista en NAV',
               keywords: 'ais blancos targets nav filtro cpa tcpa maximo mostrado distancia riesgo',
-              tab: 3,
+              tab: 4,
             ),
 
             // ALARMAS
@@ -13325,7 +16313,7 @@ class _DashboardState extends State<Dashboard> {
             ),
             (
               title: 'Alarma de colisión AIS',
-              section: 'ALARMAS · Colisión AIS',
+              section: 'ALARMAS · AIS: aviso y vista en NAV',
               keywords:
                   'ais colision blanco target cpa tcpa riesgo sonido umbral',
               tab: 4,
@@ -13378,9 +16366,17 @@ class _DashboardState extends State<Dashboard> {
             ),
             (
               title: 'Datos eléctricos en ANC',
-              section: 'FONDEO · Pantalla de ANC',
+              section: 'PANTALLA · Pantalla de fondeo (ANC)',
               keywords:
                   'anc pantalla electrico bateria voltaje soc corriente fondeo',
+              tab: 3,
+            ),
+            (
+              title: 'Avisos push del fondeo',
+              section: 'FONDEO · Garreo y avisos',
+              keywords:
+                  'ntfy push aviso movil garreo garreando ancla levantada '
+                  'profundidad viento sin posicion fondeo notificacion',
               tab: 5,
             ),
             (
@@ -13391,9 +16387,9 @@ class _DashboardState extends State<Dashboard> {
             ),
             (
               title: 'Geometría fija del barco',
-              section: 'FONDEO · Datos del barco',
+              section: 'SENSORES · El barco',
               keywords: 'roller roldana altura agua cadena longitud gps proa distancia geometria barco fondeo radio scope',
-              tab: 5,
+              tab: 1,
             ),
             (
               title: 'Traza propia de fondeo',
@@ -13459,6 +16455,17 @@ class _DashboardState extends State<Dashboard> {
               keywords: 'tecnico admin servidores barcos guardados energia temperaturas tanques raspberry pi rutas paths mapeo',
               tab: 6,
             ),
+            // Solo cuando el modo técnico está a la vista: si no, la
+            // pestaña ni existe y el buscador no puede llevar a ella.
+            if (_adminRevealed)
+              (
+                title: 'Servidores guardados',
+                section: 'TÉCNICO · Servidores guardados',
+                keywords:
+                    'servidor servidores guardados barco barcos cambiar '
+                    'tailscale host puerto añadir borrar',
+                tab: 7,
+              ),
           ];
       String normalize(String value) => value
           .toLowerCase()
@@ -13564,6 +16571,13 @@ class _DashboardState extends State<Dashboard> {
                           ),
                         ),
                         const SizedBox(width: 8),
+                        // Leyenda de las etiquetas que lleva cada grupo: sin
+                        // ella no hay forma de saber si lo que tocas viaja al
+                        // resto de dispositivos del barco o se queda aquí.
+                        const CfgScopeTag(CfgScope.boat, dense: true),
+                        const SizedBox(width: 4),
+                        const CfgScopeTag(CfgScope.device, dense: true),
+                        const SizedBox(width: 8),
                         const Flexible(
                           child: Text(
                             'INSTALACIÓN: conexión/sensores/histórico · USO: pantalla/alarmas/fondeo',
@@ -13612,3269 +16626,21 @@ class _DashboardState extends State<Dashboard> {
               builder: (ctx, setSt) => TabBarView(
                 children: [
                   // ── Tab: Conexión (Signal K) ─────────────────────────────────────
-                  SettingsPageBody(
-                    padding: const EdgeInsets.all(12),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 760),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          SettingsGroup(
-                            title: 'SERVIDOR SIGNAL K',
-                            icon: Icons.dns_outlined,
-                            children: [
-                              SettingsStatusRow(
-                                label: 'Estado',
-                                value: signalK.connected
-                                    ? 'Conectado'
-                                    : 'Desconectado',
-                                color: signalK.connected ? cGreen : cRed,
-                              ),
-                              const SizedBox(height: 8),
-                              _ThresholdRow(
-                                label: 'Tolerancia a cortes breves',
-                                unit: 's',
-                                value: settings.signalKDisconnectGraceSeconds
-                                    .toDouble(),
-                                min: 3,
-                                max: 60,
-                                divisions: 57,
-                                onChanged: (value) {
-                                  setSt(
-                                    () =>
-                                        settings.signalKDisconnectGraceSeconds =
-                                            value.round(),
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const Text(
-                                'La reconexión empieza inmediatamente. Este tiempo solo evita declarar una desconexión por un microcorte y fija la espera inicial sin datos.',
-                                style: TextStyle(
-                                  color: cMuted,
-                                  fontSize: 11,
-                                  height: 1.35,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              if (_isSignalKWebapp) ...[
-                                const Text('SIGNAL K', style: lbl),
-                                gap,
-                                Row(
-                                  children: [
-                                    Icon(
-                                      settings.host == Uri.base.host
-                                          ? Icons.check_circle
-                                          : Icons.info_outline,
-                                      color: settings.host == Uri.base.host
-                                          ? cGreen
-                                          : cCyan,
-                                      size: 16,
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Expanded(
-                                      child: Text(
-                                        settings.host == Uri.base.host
-                                            ? 'Servido desde ${Uri.base.host} — normalmente no hace falta tocar esto.'
-                                            : 'Esta página se sirve desde ${Uri.base.host}, pero apuntando manualmente a ${settings.host}:${settings.port}.',
-                                        style: const TextStyle(
-                                          color: cMuted,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                gap,
-                                // A .local (mDNS) hostname only resolves on the
-                                // boat's own LAN — if you loaded this page that
-                                // way but are actually reachable remotely (e.g.
-                                // via Tailscale), there was previously no way to
-                                // point the app anywhere else at all. Confirmed
-                                // live 2026-09-02.
-                                const Text(
-                                  'Si la conexión automática no funciona (por ejemplo, accediendo por '
-                                  'red móvil/Tailscale a un servidor con nombre .local), pon aquí el '
-                                  'host o IP por el que sí llegas:',
-                                  style: TextStyle(color: cMuted, fontSize: 12),
-                                ),
-                                gap,
-                                TextField(
-                                  controller: hostController,
-                                  decoration: InputDecoration(
-                                    labelText: 'Host (o IP)',
-                                    isDense: true,
-                                    errorText:
-                                        hostController.text.trim().isEmpty
-                                        ? 'El host es obligatorio'
-                                        : null,
-                                  ),
-                                  onChanged: (_) => setSt(
-                                    () => _settingsConnectionDirty = true,
-                                  ),
-                                ),
-                                gap,
-                                TextField(
-                                  controller: portController,
-                                  keyboardType: TextInputType.number,
-                                  decoration: InputDecoration(
-                                    labelText: 'Puerto',
-                                    isDense: true,
-                                    errorText:
-                                        (int.tryParse(portController.text) ??
-                                                    0) <
-                                                1 ||
-                                            (int.tryParse(
-                                                      portController.text,
-                                                    ) ??
-                                                    65536) >
-                                                65535
-                                        ? 'Debe estar entre 1 y 65535'
-                                        : null,
-                                  ),
-                                  onChanged: (_) => setSt(
-                                    () => _settingsConnectionDirty = true,
-                                  ),
-                                ),
-                                gap,
-                                Row(
-                                  children: [
-                                    FilledButton.icon(
-                                      icon: const Icon(Icons.save, size: 18),
-                                      label: const Text('Guardar y reconectar'),
-                                      onPressed: () => doSave(),
-                                    ),
-                                    if (_settingsConnectionDirty)
-                                      const Padding(
-                                        padding: EdgeInsets.only(left: 8),
-                                        child: Text(
-                                          'Cambios sin guardar',
-                                          style: TextStyle(
-                                            color: cOrange,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                      ),
-                                    const SizedBox(width: 8),
-                                    OutlinedButton.icon(
-                                      icon: const Icon(
-                                        Icons.fact_check_outlined,
-                                        size: 18,
-                                      ),
-                                      label: const Text('Probar'),
-                                      onPressed: testConnection,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    if (settings.host != Uri.base.host ||
-                                        (Uri.base.hasPort &&
-                                            settings.port != Uri.base.port))
-                                      TextButton(
-                                        onPressed: () async {
-                                          final prefs =
-                                              await SharedPreferences.getInstance();
-                                          await prefs.remove(
-                                            'webappHostOverride:${Uri.base.origin}',
-                                          );
-                                          setSt(() {
-                                            settings.host = Uri.base.host;
-                                            if (Uri.base.hasPort) {
-                                              settings.port = Uri.base.port;
-                                            }
-                                            hostController.text = settings.host;
-                                            portController.text =
-                                                '${settings.port}';
-                                          });
-                                          setState(() {});
-                                          unawaited(doSave());
-                                        },
-                                        child: const Text(
-                                          'Volver a automático',
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ] else ...[
-                                const Text('SIGNAL K', style: lbl),
-                                gap,
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    _HostPresetChip(
-                                      label: 'lysmarine.local',
-                                      selected:
-                                          settings.host == 'lysmarine.local',
-                                      onTap: () {
-                                        // Used to only fill the text field and
-                                        // wait for a separate "Guardar y
-                                        // reconectar" tap — picking a preset
-                                        // should just connect. Confirmed live
-                                        // 2026-09-02: tapping this looked like it
-                                        // did nothing.
-                                        setSt(() {
-                                          settings.host = 'lysmarine.local';
-                                          hostController.text = settings.host;
-                                        });
-                                        unawaited(doSave());
-                                      },
-                                    ),
-                                    _HostPresetChip(
-                                      label: '100.85.109.61',
-                                      selected:
-                                          settings.host == '100.85.109.61',
-                                      onTap: () {
-                                        setSt(() {
-                                          settings.host = '100.85.109.61';
-                                          hostController.text = settings.host;
-                                        });
-                                        unawaited(doSave());
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                gap,
-                                // Manual IP/hostname entry — the third option alongside the two
-                                // presets above: "lysmarine.local" only resolves on the network
-                                // it was set up on (mDNS is network-scoped), so a different boat
-                                // needs to type its own Signal K IP here, or use the scan below.
-                                TextField(
-                                  controller: hostController,
-                                  decoration: InputDecoration(
-                                    labelText:
-                                        'Host (o escribe una IP manualmente)',
-                                    isDense: true,
-                                    errorText:
-                                        hostController.text.trim().isEmpty
-                                        ? 'El host es obligatorio'
-                                        : null,
-                                  ),
-                                  onChanged: (_) => setSt(
-                                    () => _settingsConnectionDirty = true,
-                                  ),
-                                ),
-                                gap,
-                                OutlinedButton.icon(
-                                  icon: _lanScanning
-                                      ? const SizedBox(
-                                          width: 16,
-                                          height: 16,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Icon(Icons.wifi_find, size: 18),
-                                  label: Text(
-                                    _lanScanning
-                                        ? 'Buscando… ($_lanScanChecked/$_lanScanTotal)'
-                                        : 'Buscar Signal K en la red (puerto 3000)',
-                                  ),
-                                  onPressed: _lanScanning
-                                      ? null
-                                      : () async {
-                                          setSt(() {
-                                            _lanScanning = true;
-                                            _lanScanResults = [];
-                                            _lanScanChecked = 0;
-                                            _lanScanTotal = 0;
-                                          });
-                                          try {
-                                            final results =
-                                                await scanLanForSignalK(
-                                                  3000,
-                                                  onProgress: (c, t) =>
-                                                      setSt(() {
-                                                        _lanScanChecked = c;
-                                                        _lanScanTotal = t;
-                                                      }),
-                                                );
-                                            setSt(() {
-                                              _lanScanResults = results;
-                                              _lanScanning = false;
-                                            });
-                                          } catch (e) {
-                                            setSt(() => _lanScanning = false);
-                                            if (mounted) {
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                SnackBar(
-                                                  content: Text(
-                                                    'No se pudo escanear la red: ${friendlyApiError(e)}',
-                                                  ),
-                                                ),
-                                              );
-                                            }
-                                          }
-                                        },
-                                ),
-                                if (!_lanScanning &&
-                                    _lanScanResults.isEmpty &&
-                                    _lanScanChecked > 0)
-                                  const Padding(
-                                    padding: EdgeInsets.only(top: 6),
-                                    child: Text(
-                                      'No se encontró ningún Signal K en la red.',
-                                      style: TextStyle(
-                                        color: cMuted,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ),
-                                if (_lanScanResults.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(
-                                      top: 6,
-                                      bottom: 4,
-                                    ),
-                                    child: Text(
-                                      _lanScanResults.length == 1
-                                          ? 'Encontrado: ${_lanScanResults.first}'
-                                          : 'Encontrados ${_lanScanResults.length}: ${_lanScanResults.join(', ')}',
-                                      style: const TextStyle(
-                                        color: cGreen,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                if (_lanScanResults.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 6),
-                                    child: Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        for (final ip in _lanScanResults)
-                                          _HostPresetChip(
-                                            label: ip,
-                                            selected: settings.host == ip,
-                                            onTap: () {
-                                              setSt(() {
-                                                settings.host = ip;
-                                                hostController.text = ip;
-                                              });
-                                              unawaited(doSave());
-                                            },
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                gap,
-                                TextField(
-                                  controller: portController,
-                                  decoration: InputDecoration(
-                                    labelText: 'Puerto',
-                                    isDense: true,
-                                    errorText:
-                                        (int.tryParse(portController.text) ??
-                                                    0) <
-                                                1 ||
-                                            (int.tryParse(
-                                                      portController.text,
-                                                    ) ??
-                                                    65536) >
-                                                65535
-                                        ? 'Debe estar entre 1 y 65535'
-                                        : null,
-                                  ),
-                                  keyboardType: TextInputType.number,
-                                  onChanged: (_) => setSt(
-                                    () => _settingsConnectionDirty = true,
-                                  ),
-                                ),
-                                TextField(
-                                  controller: authController,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Contraseña codificada (Basic, avanzado)',
-                                    helperText: 'Solo si tu servidor exige este tipo de autenticación para leer datos. La mayoría no lo necesita — usa el usuario/contraseña de abajo en su lugar.',
-                                    helperMaxLines: 3,
-                                    isDense: true,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                FilledButton.icon(
-                                  icon: const Icon(Icons.save, size: 18),
-                                  label: const Text('Guardar y reconectar'),
-                                  onPressed: () => doSave(),
-                                ),
-                                const SizedBox(width: 8),
-                                OutlinedButton.icon(
-                                  icon: const Icon(
-                                    Icons.fact_check_outlined,
-                                    size: 18,
-                                  ),
-                                  label: const Text('Probar'),
-                                  onPressed: testConnection,
-                                ),
-                                const SizedBox(height: 16),
-                                const Text(
-                                  'USUARIO Y CONTRASEÑA DE SIGNAL K',
-                                  style: lbl,
-                                ),
-                                gap,
-                                const Text(
-                                  'Para que las pantallas de carta náutica (Freeboard) y fondeo puedan escribir — por ejemplo, fijar la posición del ancla. Se guarda en este dispositivo, no hace falta volver a escribirlo.',
-                                  style: TextStyle(color: cMuted, fontSize: 11),
-                                ),
-                                gap,
-                                TextField(
-                                  controller: skUsernameController,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Usuario Signal K',
-                                    isDense: true,
-                                  ),
-                                ),
-                                gap,
-                                TextField(
-                                  controller: skPasswordController,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Contraseña Signal K',
-                                    helperText: 'Se guarda cifrada en el almacenamiento seguro del dispositivo.',
-                                    helperMaxLines: 2,
-                                    isDense: true,
-                                  ),
-                                  obscureText: true,
-                                  onChanged: (_) => setSt(
-                                    () => _settingsConnectionDirty = true,
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                Row(
-                                  children: [
-                                    OutlinedButton.icon(
-                                      icon: const Icon(Icons.login, size: 16),
-                                      label: const Text('Guardar credenciales'),
-                                      onPressed: () async {
-                                        settings.skUsername =
-                                            skUsernameController.text.trim();
-                                        settings.skPassword =
-                                            skPasswordController.text;
-                                        // Este botón no anclaba lo escrito
-                                        // a la entrada del servidor, así
-                                        // que al volver a tocar un chip se
-                                        // perdía y había que reescribirlo.
-                                        _rememberCredentialsForCurrentServer();
-                                        await _saveSettings();
-                                        await _loginToSignalKResult();
-                                        if (mounted) setState(() {});
-                                      },
-                                    ),
-                                    const SizedBox(width: 10),
-                                    if (_skLoginOk == true)
-                                      const Text(
-                                        'Credenciales válidas ✓',
-                                        style: TextStyle(
-                                          color: cGreen,
-                                          fontSize: 12,
-                                        ),
-                                      )
-                                    else if (_skLoginOk == false)
-                                      // Antes decía solo "no se pudo
-                                      // iniciar sesión", que vale igual
-                                      // para una contraseña rechazada que
-                                      // para un servidor que no contesta —
-                                      // y son dos problemas distintos con
-                                      // dos soluciones distintas.
-                                      Expanded(
-                                        child: Text(
-                                          _skLastLogin == null
-                                              ? 'No se pudo iniciar sesión'
-                                              : skLoginErrorText(
-                                                  _skLastLogin!,
-                                                  '${settings.host}:${settings.port}',
-                                                ),
-                                          style: const TextStyle(
-                                            color: cRed,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'FUENTE DE POSICIÓN',
-                            icon: Icons.gps_fixed,
-                            children: [
-                              const Text(
-                                'Cuando el barco no esté dando su posición, ¿puede REWIND usar el GPS de este teléfono o tablet? Se usa en el fondeo y también en todo lo que necesita saber dónde estás: pronóstico, estado del mar y meteo.',
-                                style: TextStyle(
-                                  color: cText,
-                                  fontSize: 12,
-                                  height: 1.35,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              SegmentedButton<String>(
-                                segments: const [
-                                  ButtonSegment(
-                                    value: 'never',
-                                    icon: Icon(Icons.block),
-                                    label: Text('No permitir'),
-                                  ),
-                                  ButtonSegment(
-                                    value: 'always',
-                                    icon: Icon(Icons.phone_android),
-                                    label: Text('Sin Signal K'),
-                                  ),
-                                  ButtonSegment(
-                                    value: 'requiresSk',
-                                    icon: Icon(Icons.dns_outlined),
-                                    label: Text('Requiere Signal K'),
-                                  ),
-                                ],
-                                selected: {_phoneGpsMode},
-                                showSelectedIcon: false,
-                                onSelectionChanged: (values) {
-                                  setSt(() => _setPhoneGpsMode(values.first));
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              if (settings.gpsFallbackConsent == null) ...[
-                                const SizedBox(height: 6),
-                                const Text(
-                                  'Todavía no lo has decidido: se te preguntará la primera vez que haga falta.',
-                                  style: TextStyle(color: cMuted, fontSize: 11),
-                                ),
-                              ],
-                              const SizedBox(height: 8),
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: cOrange.withValues(alpha: 0.10),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: cOrange.withValues(alpha: 0.45),
-                                  ),
-                                ),
-                                child: const Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Icon(
-                                      Icons.warning_amber_rounded,
-                                      color: cOrange,
-                                      size: 19,
-                                    ),
-                                    SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        'Con el GPS del teléfono, la alarma de fondeo no vigila en segundo plano: REWIND debe permanecer abierta y visible, con el dispositivo a bordo, alimentación suficiente y permiso de ubicación activo.',
-                                        style: TextStyle(
-                                          color: cOrange,
-                                          fontSize: 11,
-                                          height: 1.35,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  _cfgConnectionTab(setSt, doSave, testConnection),
                   // ── Tab: Sensores ──────────────────────────────────────────────────
-                  SettingsPageBody(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SettingsGroup(
-                          title: 'MAPEO SIGNAL K',
-                          icon: Icons.sensors,
-                          children: [
-                            const Text(
-                              'Descubre y asigna las señales de baterías, solar, profundidad, motor, neveras y tanques de este barco.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            const SizedBox(height: 8),
-                            SettingsResponsiveGroups(
-                              children: [
-                                SettingsStatusRow(
-                                  label: 'Baterías',
-                                  value:
-                                      '${settings.sensorConfig.batteryHouseId} / ${settings.sensorConfig.batteryStartId}',
-                                  color: cGreen,
-                                  icon: Icons.battery_charging_full,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Solar',
-                                  value: settings.sensorConfig.solarPath == null
-                                      ? 'Sin configurar'
-                                      : settings.sensorConfig.solarPath2 == null
-                                      ? '1 controlador'
-                                      : '2 controladores',
-                                  color: settings.sensorConfig.solarPath == null
-                                      ? cMuted
-                                      : cGreen,
-                                  icon: Icons.solar_power_outlined,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Profundidad',
-                                  value: settings.sensorConfig.depthPath == null
-                                      ? 'Sin configurar'
-                                      : 'Configurada',
-                                  color: settings.sensorConfig.depthPath == null
-                                      ? cMuted
-                                      : cGreen,
-                                  icon: Icons.water,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Horas de motor',
-                                  value:
-                                      settings.sensorConfig.enginePath == null
-                                      ? 'Sin configurar'
-                                      : 'Configuradas',
-                                  color:
-                                      settings.sensorConfig.enginePath == null
-                                      ? cMuted
-                                      : cGreen,
-                                  icon: Icons.build_outlined,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Tanques activos',
-                                  value: settings.sensorConfig.tanks
-                                      .where((tank) => tank.enabled)
-                                      .length
-                                      .toString(),
-                                  color:
-                                      settings.sensorConfig.tanks.any(
-                                        (tank) => tank.enabled,
-                                      )
-                                      ? cGreen
-                                      : cMuted,
-                                  icon: Icons.opacity,
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            // Ver el comentario del interruptor de RESUMEN:
-                            // aquí tampoco vale un ListTile.
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Text(
-                                        'Compartir la configuración con el barco',
-                                        style: TextStyle(
-                                          color: cText,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                      Text(
-                                        _sharedConfigStatus ??
-                                            'Sensores, umbrales y alarmas se '
-                                                'guardan en el servidor y llegan '
-                                                'a todos los dispositivos. Nunca '
-                                                'se comparten contraseñas.',
-                                        style: const TextStyle(
-                                          color: cMuted,
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Switch(
-                                  value: settings.syncConfigWithServer,
-                                  onChanged: (v) {
-                                    setState(
-                                      () => settings.syncConfigWithServer = v,
-                                    );
-                                    unawaited(_saveSettings());
-                                    if (v) unawaited(_pullSharedConfig());
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            OutlinedButton.icon(
-                              icon: const Icon(Icons.tune, size: 18),
-                              label: const Text('Configurar sensores'),
-                              onPressed: () async {
-                                final newCfg = await showDialog<SensorConfig>(
-                                  context: context,
-                                  builder: (_) => _SensorConfigDialog(
-                                    initial: settings.sensorConfig,
-                                    discover: discoverSkPaths,
-                                  ),
-                                );
-                                if (newCfg != null) {
-                                  setState(
-                                    () => settings.sensorConfig = newCfg,
-                                  );
-                                  await _saveSettings();
-                                  // Lo que se acaba de configurar es del
-                                  // BARCO: se comparte con los demás
-                                  // dispositivos (ver _pushSharedConfig).
-                                  unawaited(_pushSharedConfig());
-                                  _connectSignalK();
-                                }
-                              },
-                            ),
-                          ],
-                        ),
-                        SettingsGroup(
-                          title: 'QUÍMICA DE BATERÍA',
-                          icon: Icons.battery_5_bar,
-                          children: [
-                            const Text(
-                              'Para la curva aproximada de carga/descarga '
-                              '(CFG > Sensores no aplica a Batería servicio, '
-                              'que ya tiene SoC real). Independiente por '
-                              'batería — no siempre son la misma química, y '
-                              'no todos los barcos tienen batería de proa.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            const SizedBox(height: 10),
-                            const Text(
-                              'Arranque',
-                              style: TextStyle(color: cText, fontSize: 13),
-                            ),
-                            const SizedBox(height: 4),
-                            SegmentedButton<String>(
-                              segments: _batteryChemistrySegments,
-                              selected: {settings.batteryChemistryStart},
-                              onSelectionChanged: (v) {
-                                setSt(
-                                  () =>
-                                      settings.batteryChemistryStart = v.first,
-                                );
-                                setState(() {});
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Bow thruster',
-                              style: TextStyle(color: cText, fontSize: 13),
-                            ),
-                            const SizedBox(height: 4),
-                            SegmentedButton<String>(
-                              segments: _batteryChemistrySegments,
-                              selected: {settings.batteryChemistryBow},
-                              onSelectionChanged: (v) {
-                                setSt(
-                                  () => settings.batteryChemistryBow = v.first,
-                                );
-                                setState(() {});
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                          ],
-                        ),
-                        if (!kIsWeb) ...[
-                          SettingsGroup(
-                            title: 'ESCORA (BALANCEO)',
-                            icon: Icons.screen_rotation_alt_outlined,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.usePhoneHeel,
-                                onChanged: (v) {
-                                  setSt(() => settings.usePhoneHeel = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Usar acelerómetro del dispositivo',
-                                subtitle: 'Alternativa si el barco no publica navigation.attitude. El eje y la calibración se ajustan tocando “Escora” en NAV.',
-                              ),
-                            ],
-                          ),
-                        ],
-                        _polarSettingsGroup(setSt),
-                      ],
-                    ),
-                  ),
+                  _cfgSensorsTab(setSt),
                   // ── Tab: Histórico de gráficas ────────────────────────────────────
-                  SettingsPageBody(
-                    maxWidth: 760,
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SettingsGroup(
-                          title: 'FUENTE Y ALMACENAMIENTO',
-                          icon: Icons.history,
-                          children: [
-                            const Text(
-                              'Fuente de datos',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            const SizedBox(height: 4),
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'influx',
-                                  label: Text(
-                                    'InfluxDB',
-                                    style: TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                                ButtonSegment(
-                                  value: 'sk',
-                                  label: Text(
-                                    'Signal K (KIP…)',
-                                    style: TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                                ButtonSegment(
-                                  value: 'rewind',
-                                  label: Text(
-                                    'Grabador REWIND',
-                                    style: TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                              ],
-                              selected: {settings.historySource},
-                              onSelectionChanged: (v) {
-                                setSt(() => settings.historySource = v.first);
-                                skHistoryProvider = skHistoryProviderFor(
-                                  settings.historySource,
-                                );
-                                setState(() {});
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              switch (settings.historySource) {
-                                'influx' => 'Siempre usa InfluxDB.',
-                                'sk' => 'Siempre usa el History API de Signal K (funciona con KIP/SQLite u otro proveedor registrado).',
-                                'rewind' => 'Siempre usa el grabador de histórico del plugin REWIND en el servidor Signal K: guarda todo lo que muestra la app y apenas escribe en la tarjeta SD.',
-                                _ => 'Prueba InfluxDB primero; si falla, usa el History API de Signal K (KIP/SQLite) automáticamente.',
-                              },
-                              style: const TextStyle(
-                                color: cMuted,
-                                fontSize: 11,
-                              ),
-                            ),
-                            if (settings.historySource != 'sk' &&
-                                settings.historySource != 'rewind') ...[
-                              const SizedBox(height: 14),
-                              const Text('INFLUXDB', style: lbl),
-                              gap,
-                              TextField(
-                                controller: influxHostController,
-                                decoration: const InputDecoration(
-                                  labelText:
-                                      'Host (vacío = el mismo que Signal K)',
-                                  isDense: true,
-                                ),
-                                onChanged: (_) =>
-                                    setSt(() => _settingsHistoryDirty = true),
-                              ),
-                              gap,
-                              TextField(
-                                controller: influxOrgController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Org',
-                                  isDense: true,
-                                ),
-                                onChanged: (_) =>
-                                    setSt(() => _settingsHistoryDirty = true),
-                              ),
-                              gap,
-                              TextField(
-                                controller: influxTokenController,
-                                decoration: InputDecoration(
-                                  labelText: 'Token',
-                                  helperText: kIsWeb
-                                      ? 'En web queda en el almacenamiento local del navegador; usa HTTPS y un token de solo lectura.'
-                                      : 'Se guarda cifrado en el almacenamiento seguro del dispositivo.',
-                                  helperMaxLines: 2,
-                                  isDense: true,
-                                ),
-                                obscureText: true,
-                                onChanged: (_) =>
-                                    setSt(() => _settingsHistoryDirty = true),
-                              ),
-                              gap,
-                              TextField(
-                                controller: bucketController,
-                                decoration: const InputDecoration(
-                                  labelText: 'Bucket',
-                                  hintText: 'enjoy_raw',
-                                  isDense: true,
-                                ),
-                                onChanged: (_) =>
-                                    setSt(() => _settingsHistoryDirty = true),
-                              ),
-                              gap,
-                              TextField(
-                                controller: archiveBucketController,
-                                decoration: const InputDecoration(
-                                  labelText:
-                                      'Bucket de archivo (7 días / 1 mes)',
-                                  helperText: 'Vacío = usar el mismo bucket para todos los periodos.',
-                                  helperMaxLines: 2,
-                                  isDense: true,
-                                ),
-                                onChanged: (_) =>
-                                    setSt(() => _settingsHistoryDirty = true),
-                              ),
-                            ],
-                            const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                FilledButton.icon(
-                                  icon: const Icon(Icons.save, size: 18),
-                                  label: const Text('Guardar configuración'),
-                                  onPressed: () => doSave(),
-                                ),
-                                if (_settingsHistoryDirty)
-                                  const Padding(
-                                    padding: EdgeInsets.only(left: 8),
-                                    child: Text(
-                                      'Cambios sin guardar',
-                                      style: TextStyle(
-                                        color: cOrange,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                if (_settingsConnectionDirty)
-                                  const Padding(
-                                    padding: EdgeInsets.only(left: 8),
-                                    child: Text(
-                                      'Cambios sin guardar',
-                                      style: TextStyle(
-                                        color: cOrange,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                OutlinedButton.icon(
-                                  icon: const Icon(Icons.query_stats, size: 18),
-                                  label: const Text('Probar fuente'),
-                                  onPressed: testHistory,
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                  _cfgHistoryTab(setSt, doSave, testHistory),
                   // ── Tab: Pantalla ──────────────────────────────────────────────────
-                  SettingsPageBody(
-                    maxWidth: 760,
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SettingsGroup(
-                          title: 'COMPORTAMIENTO',
-                          icon: Icons.phone_android,
-                          children: [
-                            SettingsSwitchRow(
-                              value: settings.keepAwake,
-                              onChanged: (v) {
-                                setState(() => settings.keepAwake = v);
-                                _applyWakelock();
-                                unawaited(_saveSettings());
-                              },
-                              title: 'Pantalla siempre activa',
-                              subtitle: 'Evita que el dispositivo se bloquee mientras muestra instrumentos.',
-                            ),
-                            SettingsSwitchRow(
-                              value: settings.autoHideHeaderOnNav,
-                              onChanged: (v) {
-                                setState(
-                                  () => settings.autoHideHeaderOnNav = v,
-                                );
-                                unawaited(_saveSettings());
-                              },
-                              title: 'Ocultar menú automáticamente',
-                              subtitle: 'En NAV, VNT, PWR y AIS. ANC y MAP siempre usan toda la pantalla.',
-                            ),
-                          ],
-                        ),
-                        SettingsGroup(
-                          title: 'APARIENCIA Y PANELES',
-                          icon: Icons.palette_outlined,
-                          children: [
-                            const Text(
-                              'MODO',
-                              style: TextStyle(
-                                color: cMuted,
-                                fontSize: 10,
-                                letterSpacing: 1.1,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'dia',
-                                  label: Text('Día'),
-                                  icon: Icon(Icons.wb_sunny_outlined, size: 14),
-                                ),
-                                ButtonSegment(
-                                  value: 'auto',
-                                  label: Text('Auto (dispositivo)'),
-                                  icon: Icon(Icons.brightness_auto, size: 14),
-                                ),
-                                ButtonSegment(
-                                  value: 'noche',
-                                  label: Text('Noche'),
-                                  icon: Icon(
-                                    Icons.nightlight_outlined,
-                                    size: 14,
-                                  ),
-                                ),
-                              ],
-                              selected: {settings.brightnessMode},
-                              onSelectionChanged: (v) {
-                                setState(
-                                  () => settings.brightnessMode = v.first,
-                                );
-                                unawaited(_saveSettings());
-                              },
-                              style: const ButtonStyle(
-                                visualDensity: VisualDensity(
-                                  horizontal: -2,
-                                  vertical: -2,
-                                ),
-                                tapTargetSize: MaterialTapTargetSize.padded,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'MOTOR Y CONSUMO',
-                              style: TextStyle(
-                                color: cMuted,
-                                fontSize: 10,
-                                letterSpacing: 1.1,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            DropdownButtonFormField<String>(
-                              initialValue:
-                                  engineFuelProfileById(
-                                        settings.sensorConfig.engineModelId,
-                                      ) ==
-                                      null
-                                  ? null
-                                  : settings.sensorConfig.engineModelId,
-                              isExpanded: true,
-                              decoration: const InputDecoration(
-                                labelText: 'Motor para estimar consumo',
-                                helperText: 'Estimación práctica: 70 % de la curva de carga de hélice.',
-                                isDense: true,
-                              ),
-                              hint: const Text('Seleccionar motor'),
-                              items: [
-                                for (final profile in engineFuelProfiles)
-                                  DropdownMenuItem(
-                                    value: profile.id,
-                                    child: Text(profile.label),
-                                  ),
-                              ],
-                              onChanged: (value) {
-                                setState(
-                                  () => settings.sensorConfig.engineModelId =
-                                      value ?? '',
-                                );
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            const SizedBox(height: 10),
-                            const Text('TRANSMISIÓN', style: lbl),
-                            const SizedBox(height: 5),
-                            SegmentedButton<String>(
-                              emptySelectionAllowed: true,
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'shaft',
-                                  label: Text('Eje'),
-                                ),
-                                ButtonSegment(
-                                  value: 'saildrive',
-                                  label: Text('Saildrive'),
-                                ),
-                              ],
-                              selected:
-                                  settings.sensorConfig.engineDriveType.isEmpty
-                                  ? const <String>{}
-                                  : {settings.sensorConfig.engineDriveType},
-                              onSelectionChanged: (values) {
-                                setState(
-                                  () => settings.sensorConfig.engineDriveType =
-                                      values.isEmpty ? '' : values.first,
-                                );
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            const SizedBox(height: 10),
-                            const Text('HÉLICE', style: lbl),
-                            const SizedBox(height: 5),
-                            SegmentedButton<String>(
-                              emptySelectionAllowed: true,
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'fixed',
-                                  label: Text('Fija'),
-                                ),
-                                ButtonSegment(
-                                  value: 'folding',
-                                  label: Text('Plegable'),
-                                ),
-                                ButtonSegment(
-                                  value: 'feathering',
-                                  label: Text('Orientable'),
-                                ),
-                              ],
-                              selected:
-                                  settings
-                                      .sensorConfig
-                                      .enginePropellerType
-                                      .isEmpty
-                                  ? const <String>{}
-                                  : {settings.sensorConfig.enginePropellerType},
-                              onSelectionChanged: (values) {
-                                setState(
-                                  () =>
-                                      settings
-                                          .sensorConfig
-                                          .enginePropellerType = values.isEmpty
-                                      ? ''
-                                      : values.first,
-                                );
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                const Expanded(
-                                  child: Text(
-                                    'Porcentaje de la curva del fabricante',
-                                    style: TextStyle(
-                                      color: cText,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
-                                  style: const TextStyle(
-                                    color: cOrange,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            Slider(
-                              value: settings
-                                  .sensorConfig
-                                  .engineFuelCalibrationPercent
-                                  .clamp(50, 120),
-                              min: 50,
-                              max: 120,
-                              divisions: 70,
-                              label:
-                                  '${settings.sensorConfig.engineFuelCalibrationPercent.round()} %',
-                              onChanged: (value) => setState(
-                                () =>
-                                    settings
-                                            .sensorConfig
-                                            .engineFuelCalibrationPercent =
-                                        value,
-                              ),
-                              onChangeEnd: (_) => unawaited(_saveSettings()),
-                            ),
-                            const Text(
-                              'Recomendado: 70 %. Ajustable entre 50 % y 120 %. Eje/saildrive y tipo de hélice se guardan como contexto y no añaden otra reducción. Calibra comparando con repostajes o un caudalímetro.',
-                              style: TextStyle(color: cMuted, fontSize: 10.5),
-                            ),
-                            const SizedBox(height: 10),
-                            const Text(
-                              'ESTILO NAV',
-                              style: TextStyle(
-                                color: cMuted,
-                                fontSize: 10,
-                                letterSpacing: 1.1,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'classic',
-                                  label: Text('Clásica'),
-                                ),
-                                ButtonSegment(
-                                  value: 'premium',
-                                  label: Text('Premium'),
-                                ),
-                                ButtonSegment(
-                                  value: 'both',
-                                  label: Text('Ambas'),
-                                ),
-                              ],
-                              selected: {settings.navLayoutMode},
-                              onSelectionChanged: (v) {
-                                setState(() {
-                                  settings.navLayoutMode = v.first;
-                                  _navPageIndex = 0;
-                                });
-                                unawaited(_saveSettings());
-                              },
-                              style: const ButtonStyle(
-                                visualDensity: VisualDensity(
-                                  horizontal: -2,
-                                  vertical: -2,
-                                ),
-                                tapTargetSize: MaterialTapTargetSize.padded,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            const Text(
-                              'ESTILO MOTOR',
-                              style: TextStyle(
-                                color: cMuted,
-                                fontSize: 10,
-                                letterSpacing: 1.1,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 'ninguno',
-                                  label: Text('Ninguno'),
-                                ),
-                                ButtonSegment(
-                                  value: 'simple',
-                                  label: Text('Simple'),
-                                ),
-                                ButtonSegment(
-                                  value: 'completo',
-                                  label: Text('Completo'),
-                                ),
-                              ],
-                              selected: {
-                                !settings.motorPanelEnabled
-                                    ? 'ninguno'
-                                    : settings.motorPanelDetailed
-                                    ? 'completo'
-                                    : 'simple',
-                              },
-                              onSelectionChanged: (v) {
-                                setState(() {
-                                  switch (v.first) {
-                                    case 'ninguno':
-                                      settings.motorPanelEnabled = false;
-                                    case 'completo':
-                                      settings.motorPanelEnabled = true;
-                                      settings.motorPanelDetailed = true;
-                                    default:
-                                      settings.motorPanelEnabled = true;
-                                      settings.motorPanelDetailed = false;
-                                  }
-                                });
-                                unawaited(_saveSettings());
-                              },
-                              style: const ButtonStyle(
-                                visualDensity: VisualDensity(
-                                  horizontal: -2,
-                                  vertical: -2,
-                                ),
-                                tapTargetSize: MaterialTapTargetSize.padded,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            // Fila con interruptor, no SwitchListTile: dentro
-                            // de estos recuadros con fondo propio, un
-                            // ListTile pierde su color y su efecto al pulsar
-                            // (Flutter lo avisa y lo caza el test de CFG).
-                            Row(
-                              children: [
-                                const Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        'Pantalla RESUMEN',
-                                        style: TextStyle(
-                                          color: cText,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                      Text(
-                                        'Energía, tanques, posición con hora y satélites, y estado del AIS en una sola pantalla. Pensada para barcos con pocos sensores.',
-                                        style: TextStyle(
-                                          color: cMuted,
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Switch(
-                                  value: settings.summaryPageEnabled,
-                                  onChanged: (v) {
-                                    setState(
-                                      () => settings.summaryPageEnabled = v,
-                                    );
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
-                            const Text(
-                              'REJILLA NAV CLÁSICA',
-                              style: TextStyle(
-                                color: cMuted,
-                                fontSize: 10,
-                                letterSpacing: 1.1,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            SegmentedButton<int>(
-                              segments: const [
-                                ButtonSegment(
-                                  value: 3,
-                                  label: Text('3×2 (6 cartas)'),
-                                ),
-                                ButtonSegment(
-                                  value: 4,
-                                  label: Text('4×2 (8 cartas)'),
-                                ),
-                              ],
-                              selected: {settings.navGridColumns},
-                              onSelectionChanged: (v) {
-                                setState(
-                                  () => settings.navGridColumns = v.first,
-                                );
-                                unawaited(_saveSettings());
-                              },
-                              style: const ButtonStyle(
-                                visualDensity: VisualDensity(
-                                  horizontal: -2,
-                                  vertical: -2,
-                                ),
-                                tapTargetSize: MaterialTapTargetSize.padded,
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            const Text('ICONO DEL BARCO', style: lbl),
-                            gap,
-                            Row(
-                              children: [
-                                Container(
-                                  width: 64,
-                                  height: 64,
-                                  padding: const EdgeInsets.all(6),
-                                  decoration: BoxDecoration(
-                                    color: cBg,
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.white12),
-                                  ),
-                                  child: Transform.rotate(
-                                    angle: math.pi / 2,
-                                    child: Image.asset(
-                                      boatIconById(settings.shipIconId)
-                                          .grandeAsset,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        boatIconById(settings.shipIconId).label,
-                                        style: const TextStyle(
-                                          color: cText,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      OutlinedButton(
-                                        onPressed: () => showShipIconPicker(
-                                          context,
-                                          settings.shipIconId,
-                                          (id) {
-                                            setState(
-                                              () => settings.shipIconId = id,
-                                            );
-                                            _reloadShipIcon();
-                                            unawaited(_saveSettings());
-                                          },
-                                        ),
-                                        child: const Text('Cambiar icono'),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        // Just what shows on the NAV AIS card — not an
-                        // alarm (see CFG → Alarmas for the real collision
-                        // alarm, which has its own, much tighter
-                        // thresholds and actually alerts).
-                        SettingsGroup(
-                          title: 'AIS MOSTRADO EN NAV',
-                          icon: Icons.radar,
-                          children: [
-                            const Text(
-                              'Estos límites solo filtran lo mostrado. Las alarmas de colisión tienen umbrales independientes.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            _ThresholdRow(
-                              label: 'CPA máximo mostrado',
-                              unit: 'NM',
-                              value: settings.aisCpaMaxNm,
-                              min: 0.1,
-                              max: 20,
-                              divisions: 199,
-                              onChanged: (v) {
-                                setSt(() => settings.aisCpaMaxNm = v);
-                                setState(() {});
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                            _ThresholdRow(
-                              label: 'TCPA máximo mostrado',
-                              unit: 'min',
-                              value: settings.aisTcpaMaxMin,
-                              min: 1,
-                              max: 120,
-                              divisions: 119,
-                              onChanged: (v) {
-                                setSt(() => settings.aisTcpaMaxMin = v);
-                                setState(() {});
-                                unawaited(_saveSettings());
-                              },
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                  _cfgDisplayTab(setSt),
                   // ── Tab: Alarmas ────────────────────────────────────────────────────
-                  SettingsPageBody(
-                    padding: const EdgeInsets.all(12),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 760),
-                      child: SettingsResponsiveGroups(
-                        children: [
-                          SettingsGroup(
-                            title: 'AVISO PUSH (ntfy.sh)',
-                            icon: Icons.notifications_active,
-                            children: [
-                              TextFormField(
-                                initialValue: settings.ntfyTopic,
-                                decoration: InputDecoration(
-                                  labelText: 'Topic de ntfy',
-                                  isDense: true,
-                                  helperText: 'Trátalo como una contraseña: quien lo conozca puede recibir los avisos.',
-                                  helperMaxLines: 2,
-                                  suffixIcon: IconButton(
-                                    tooltip: 'Copiar topic',
-                                    icon: const Icon(Icons.copy, size: 18),
-                                    onPressed: settings.ntfyTopic.trim().isEmpty
-                                        ? null
-                                        : () async {
-                                            await Clipboard.setData(
-                                              ClipboardData(
-                                                text: settings.ntfyTopic.trim(),
-                                              ),
-                                            );
-                                            if (ctx.mounted) {
-                                              ScaffoldMessenger.of(ctx)
-                                                  .showSnackBar(
-                                                    const SnackBar(
-                                                      content: Text(
-                                                        'Topic copiado.',
-                                                      ),
-                                                    ),
-                                                  );
-                                            }
-                                          },
-                                  ),
-                                ),
-                                onChanged: (v) {
-                                  setSt(() => settings.ntfyTopic = v);
-                                  unawaited(_saveSettings());
-                                  // Reported live 2026-09-04: changing the
-                                  // topic here didn't reach the server
-                                  // plugin's own backup watchdog until the
-                                  // next reconnect. Debounced (not synced
-                                  // on every keystroke) since this is a
-                                  // REST call to the boat's own server.
-                                  _ntfyTopicSyncDebounce?.cancel();
-                                  _ntfyTopicSyncDebounce = Timer(
-                                    const Duration(seconds: 1),
-                                    () =>
-                                        unawaited(_syncOwnAnchorPluginConfig()),
-                                  );
-                                },
-                              ),
-                              if (settings.ntfyTopic.startsWith('SV_'))
-                                const Padding(
-                                  padding: EdgeInsets.only(top: 6),
-                                  child: Text(
-                                    'Este topic parece derivado del nombre del barco y puede ser predecible. Cámbialo por una cadena larga y aleatoria.',
-                                    style: TextStyle(
-                                      color: cOrange,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                              const SizedBox(height: 10),
-                              Row(
-                                children: [
-                                  const Expanded(
-                                    child: Text(
-                                      'Intervalo mínimo entre avisos\n(app y vigilante del servidor)',
-                                      style: TextStyle(fontSize: 13),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  DropdownButton<int>(
-                                    value: settings.ntfyMinIntervalSec,
-                                    dropdownColor: cPanel,
-                                    items:
-                                        const [
-                                              30,
-                                              60,
-                                              300,
-                                              600,
-                                              900,
-                                              1800,
-                                              3600,
-                                            ]
-                                            .map(
-                                              (s) => DropdownMenuItem(
-                                                value: s,
-                                                child: Text(
-                                                  s < 60
-                                                      ? '$s seg'
-                                                      : '${s ~/ 60} min',
-                                                ),
-                                              ),
-                                            )
-                                            .toList(),
-                                    onChanged: (v) {
-                                      if (v == null) return;
-                                      setSt(
-                                        () => settings.ntfyMinIntervalSec = v,
-                                      );
-                                      setState(() {});
-                                      unawaited(_saveSettings());
-                                      // The server plugin's own backup
-                                      // watchdog push-throttle
-                                      // (pushMinIntervalSec) is kept equal
-                                      // to this same value — otherwise the
-                                      // app and the plugin could each
-                                      // independently decide it's fine to
-                                      // push again, doubling up a garreo
-                                      // alert. Reported live 2026-09-04
-                                      // ("debe respetarse que la app no
-                                      // reitere la alarma a ntfy si no ha
-                                      // pasado el tiempo de no repetición
-                                      // que está en el plugin").
-                                      _ntfyTopicSyncDebounce?.cancel();
-                                      _ntfyTopicSyncDebounce = Timer(
-                                        const Duration(seconds: 1),
-                                        () => unawaited(
-                                          _syncOwnAnchorPluginConfig(),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Avisar por ntfy en:',
-                                style: TextStyle(
-                                  color: cMuted,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              for (final entry in const [
-                                ('anchorDrag', 'Garreando'),
-                                (
-                                  'anchorAutoRaise',
-                                  'Ancla levantada automáticamente (>300 m)',
-                                ),
-                                ('anchorDepth', 'Cambio de profundidad'),
-                                ('anchorWind', 'Viento fuerte'),
-                                ('anchorNoPosition', 'Sin posición (fondeado)'),
-                                ('corredera', 'Corredera (SOG sin STW)'),
-                              ])
-                                CheckboxListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  controlAffinity:
-                                      ListTileControlAffinity.leading,
-                                  value: settings.ntfyAlarmKeys.contains(
-                                    entry.$1,
-                                  ),
-                                  onChanged: (v) {
-                                    setSt(() {
-                                      if (v == true) {
-                                        settings.ntfyAlarmKeys.add(entry.$1);
-                                      } else {
-                                        settings.ntfyAlarmKeys.remove(entry.$1);
-                                      }
-                                    });
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                  title: Text(
-                                    entry.$2,
-                                    style: const TextStyle(fontSize: 13),
-                                  ),
-                                ),
-                              const SizedBox(height: 6),
-                              OutlinedButton.icon(
-                                onPressed: settings.ntfyTopic.trim().isEmpty
-                                    ? null
-                                    : () async {
-                                        final ok = await _ntfyPush
-                                            ._sendNtfyTestPush();
-                                        if (!ctx.mounted) return;
-                                        ScaffoldMessenger.of(ctx).showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              ok
-                                                  ? 'Prueba enviada a "${settings.ntfyTopic}"'
-                                                  : 'No se pudo enviar — revisa el topic y la conexión',
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                icon: const Icon(Icons.send, size: 16),
-                                label: const Text('Enviar prueba'),
-                              ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'FUENTE',
-                            icon: Icons.settings_input_antenna,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmsUseSkZones,
-                                onChanged: (v) {
-                                  setSt(() => settings.alarmsUseSkZones = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Usar zonas de Signal K',
-                                subtitle: 'Zonas configuradas en el propio servidor (notifications.*)',
-                              ),
-                              if (settings.alarmsUseSkZones) ...[
-                                const SizedBox(height: 8),
-                                const Text(
-                                  'ALARMAS DETECTADAS EN ZONA',
-                                  style: TextStyle(
-                                    color: cMuted,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 0.6,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                if (_notifications.isEmpty)
-                                  const Text(
-                                    'Ninguna alarma detectada todavía.',
-                                    style: TextStyle(
-                                      color: cMuted,
-                                      fontSize: 12,
-                                    ),
-                                  )
-                                else
-                                  for (final path in _notifications.keys)
-                                    _SkZoneAlarmRow(
-                                      path: path,
-                                      state: _notifications[path]!.state,
-                                      setting: settings.skZoneAlarms[path],
-                                      onChanged: (next) {
-                                        setSt(
-                                          () => settings.skZoneAlarms[path] =
-                                              next,
-                                        );
-                                        setState(() {});
-                                        unawaited(_saveSettings());
-                                        unawaited(_syncAlarmSound());
-                                      },
-                                    ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'CORREDERA',
-                            icon: Icons.speed,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmCorrederaEnabled,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmCorrederaEnabled = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Corredera (SOG sin STW)',
-                                subtitle: 'Salta si SOG > 2 kt y STW = 0 durante al menos 3s — corredera fouled/parada',
-                              ),
-                              if (settings.alarmCorrederaEnabled)
-                                SettingsSwitchRow(
-                                  value: settings.alarmCorrederaSound,
-                                  onChanged: (v) {
-                                    setSt(
-                                      () => settings.alarmCorrederaSound = v,
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                    unawaited(_syncAlarmSound());
-                                  },
-                                  title: 'Aviso sonoro',
-                                ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'COLISIÓN AIS',
-                            icon: Icons.radar,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmAisEnabled,
-                                onChanged: (v) {
-                                  setSt(() => settings.alarmAisEnabled = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Alarma de colisión AIS',
-                                subtitle: 'Salta cuando CPA y TCPA del blanco más cercano bajan de estos umbrales a la vez',
-                              ),
-                              if (settings.alarmAisEnabled) ...[
-                                SettingsSwitchRow(
-                                  value: settings.alarmAisSound,
-                                  onChanged: (v) {
-                                    setSt(() => settings.alarmAisSound = v);
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                    unawaited(_syncAlarmSound());
-                                  },
-                                  title: 'Aviso sonoro',
-                                ),
-                                _ThresholdRow(
-                                  label: 'Alarma CPA',
-                                  unit: 'NM',
-                                  value: settings.alarmAisCpaNm,
-                                  min: 0.1,
-                                  max: 10,
-                                  divisions: 99,
-                                  onChanged: (v) {
-                                    setSt(() => settings.alarmAisCpaNm = v);
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                                _ThresholdRow(
-                                  label: 'Alarma TCPA',
-                                  unit: 'min',
-                                  value: settings.alarmAisTcpaMin,
-                                  min: 1,
-                                  max: 60,
-                                  divisions: 59,
-                                  onChanged: (v) {
-                                    setSt(() => settings.alarmAisTcpaMin = v);
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'MOTOR',
-                            icon: Icons.build,
-                            children: [
-                              // Not optional — these are safety alarms,
-                              // always active while the engine runs (no
-                              // Enabled toggle, only Sound + threshold). Not
-                              // PGN discrete-status flags either: this
-                              // boat's NMEA2000 bridge (a Volvo Penta
-                              // MDI-specific gateway) exposes oil pressure/
-                              // coolant temp/alternator voltage as plain
-                              // numbers, not ready-made J1939 DM1 fault bits
-                              // (SPN 100/110/167 FMI 1/0/1), so these fire
-                              // off the same thresholds the Motor screen's
-                              // own lamps use — lamp and alarm always agree.
-                              // If the bridge firmware is ever updated to
-                              // decode DM1 directly, these thresholds are
-                              // the honest stand-in for that until then. No
-                              // signal at all for the glow-plug relay (SPN
-                              // 677), so there's no alarm for it.
-                              const Text(
-                                'Presión de aceite baja',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: cMuted,
-                                ),
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.alarmEngineOilSound,
-                                onChanged: (v) {
-                                  setSt(() => settings.alarmEngineOilSound = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Aviso sonoro',
-                              ),
-                              _ThresholdRow(
-                                label: 'Mínimo',
-                                unit: 'bar',
-                                value: settings.alarmEngineOilMinBar,
-                                min: 0.1,
-                                max: 10,
-                                divisions: 99,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineOilMinBar = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Temperatura del motor alta',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: cMuted,
-                                ),
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.alarmEngineTempSound,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineTempSound = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Aviso sonoro',
-                              ),
-                              _ThresholdRow(
-                                label: 'Máximo',
-                                unit: '°C',
-                                value: settings.alarmEngineTempMaxC,
-                                min: 60,
-                                max: 130,
-                                divisions: 70,
-                                onChanged: (v) {
-                                  setSt(() => settings.alarmEngineTempMaxC = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Tensión de motor / alimentación MDI baja',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: cMuted,
-                                ),
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.alarmEngineVoltSound,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineVoltSound = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Aviso sonoro',
-                              ),
-                              _ThresholdRow(
-                                label: 'Mínimo',
-                                unit: 'V',
-                                value: settings.alarmEngineVoltMinV,
-                                min: 8,
-                                max: 30,
-                                divisions: 88,
-                                onChanged: (v) {
-                                  setSt(() => settings.alarmEngineVoltMinV = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const SizedBox(height: 10),
-                              const Text(
-                                'Fallo de calentadores o relé',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: cMuted,
-                                ),
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.alarmEngineGlowPlugSound,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmEngineGlowPlugSound = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Aviso sonoro',
-                              ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'ALARMAS PERSONALIZADAS',
-                            icon: Icons.tune,
-                            children: [
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: IconButton(
-                                  icon: const Icon(
-                                    Icons.add_circle_outline,
-                                    color: cCyan,
-                                  ),
-                                  onPressed: () async {
-                                    final rule =
-                                        await _showAddCustomAlarmDialog(
-                                          context,
-                                        );
-                                    if (rule == null) return;
-                                    setSt(
-                                      () => settings.customAlarms.add(rule),
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ),
-                              if (settings.customAlarms.isEmpty)
-                                const Text(
-                                  'Ninguna. Toca + para añadir una.',
-                                  style: TextStyle(color: cMuted, fontSize: 12),
-                                )
-                              else
-                                for (final rule in settings.customAlarms)
-                                  _CustomAlarmRow(
-                                    rule: rule,
-                                    onChanged: () {
-                                      setSt(() {});
-                                      setState(() {});
-                                      unawaited(_saveSettings());
-                                      unawaited(_syncAlarmSound());
-                                    },
-                                    onDelete: () {
-                                      unawaited(() async {
-                                        final confirmed =
-                                            await confirmSettingsAction(
-                                              context,
-                                              title: '¿Borrar esta alarma?',
-                                              message:
-                                                  'Se eliminará “${rule.label}” y no podrá recuperarse.',
-                                              confirmLabel: 'Borrar',
-                                              destructive: true,
-                                            );
-                                        if (!confirmed || !mounted) return;
-                                        setSt(
-                                          () =>
-                                              settings.customAlarms.removeWhere(
-                                                (r) => r.id == rule.id,
-                                              ),
-                                        );
-                                        setState(() {});
-                                        await _saveSettings();
-                                        await _syncAlarmSound();
-                                      }());
-                                    },
-                                  ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  _cfgAlarmsTab(ctx, setSt),
                   // ── Tab: Fondeo (native anchor watch alarms) ─────────────────────────
-                  SettingsPageBody(
-                    padding: const EdgeInsets.all(12),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 760),
-                      child: SettingsResponsiveGroups(
-                        children: [
-                          SettingsGroup(
-                            title: 'CAMBIO DE PROFUNDIDAD',
-                            icon: Icons.water,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmAnchorDepthEnabled,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmAnchorDepthEnabled = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Alertar si la profundidad cambia',
-                                subtitle: 'Margen alrededor de la profundidad que había al fondear — no la del scope',
-                              ),
-                              if (settings.alarmAnchorDepthEnabled) ...[
-                                SettingsSwitchRow(
-                                  value: settings.alarmAnchorDepthSound,
-                                  onChanged: (v) {
-                                    setSt(
-                                      () => settings.alarmAnchorDepthSound = v,
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                    unawaited(_syncAlarmSound());
-                                  },
-                                  title: 'Aviso sonoro',
-                                ),
-                                _ThresholdRow(
-                                  label: 'Margen',
-                                  unit: 'm',
-                                  value: settings.alarmAnchorDepthMarginM,
-                                  min: 0.1,
-                                  max: 20,
-                                  divisions: 199,
-                                  onChanged: (v) {
-                                    setSt(
-                                      () =>
-                                          settings.alarmAnchorDepthMarginM = v,
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'VIENTO',
-                            icon: Icons.air,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmAnchorWindEnabled,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.alarmAnchorWindEnabled = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Alertar si el viento supera un umbral',
-                              ),
-                              if (settings.alarmAnchorWindEnabled) ...[
-                                SettingsSwitchRow(
-                                  value: settings.alarmAnchorWindSound,
-                                  onChanged: (v) {
-                                    setSt(
-                                      () => settings.alarmAnchorWindSound = v,
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                    unawaited(_syncAlarmSound());
-                                  },
-                                  title: 'Aviso sonoro',
-                                ),
-                                _ThresholdRow(
-                                  label: 'Umbral',
-                                  unit: 'kt',
-                                  value: settings.alarmAnchorWindKn,
-                                  min: 5,
-                                  max: 80,
-                                  divisions: 75,
-                                  onChanged: (v) {
-                                    setSt(() => settings.alarmAnchorWindKn = v);
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'SIN POSICIÓN',
-                            icon: Icons.location_off,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmAnchorNoPositionEnabled,
-                                onChanged: (v) {
-                                  setSt(
-                                    () =>
-                                        settings.alarmAnchorNoPositionEnabled =
-                                            v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                  unawaited(_syncAlarmSound());
-                                },
-                                title: 'Alertar si se pierde la posición estando fondeado',
-                                subtitle: 'Ni Signal K ni el GPS del dispositivo tienen posición — no se puede vigilar el garreo',
-                              ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: '¿TE HAS LLEVADO EL MÓVIL?',
-                            icon: Icons.phone_iphone,
-                            children: [
-                              const Text(
-                                'Solo actúan mientras la pantalla de fondeo usa el '
-                                'GPS del dispositivo como respaldo (Signal K sin '
-                                'posición) — evitan una falsa alarma de garreo si '
-                                'sales del barco con el móvil.',
-                                style: TextStyle(fontSize: 11, color: cMuted),
-                              ),
-                              const SizedBox(height: 4),
-                              SettingsSwitchRow(
-                                value: settings.anchorDetectPhoneLeftByMotion,
-                                onChanged: (v) {
-                                  setSt(
-                                    () =>
-                                        settings.anchorDetectPhoneLeftByMotion =
-                                            v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Por patrón de movimiento',
-                                subtitle: 'Alejarse en línea recta, no el vaivén típico del fondeo',
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.anchorDetectPhoneLeftBySteps,
-                                onChanged: (v) {
-                                  setSt(
-                                    () =>
-                                        settings.anchorDetectPhoneLeftBySteps =
-                                            v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Por podómetro',
-                                subtitle: 'Pide permiso de actividad física la primera vez',
-                              ),
-                              SettingsSwitchRow(
-                                value: settings.anchorDetectPhoneLeftByWifi,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.anchorDetectPhoneLeftByWifi =
-                                        v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Por WiFi del barco',
-                                subtitle: 'Avisa si el móvil pierde la red WiFi del barco',
-                              ),
-                              if (settings.anchorDetectPhoneLeftByWifi) ...[
-                                const SizedBox(height: 6),
-                                TextField(
-                                  controller: _anchorWifiSsidController ??=
-                                      TextEditingController(
-                                        text: settings.anchorBoatWifiSsid,
-                                      ),
-                                  decoration: const InputDecoration(
-                                    labelText:
-                                        'Nombre (SSID) de la WiFi del barco',
-                                    isDense: true,
-                                  ),
-                                  onChanged: (v) {
-                                    settings.anchorBoatWifiSsid = v;
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              ],
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'PANTALLA DE ANC',
-                            icon: Icons.bolt,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.anchorShowElectrical,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.anchorShowElectrical = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Mostrar datos eléctricos',
-                                subtitle: 'Voltaje, SOC y corriente de la batería de servicio, junto a viento/profundidad',
-                              ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'FALSAS ALARMAS',
-                            icon: Icons.filter_alt_outlined,
-                            children: [
-                              SettingsSwitchRow(
-                                value: settings.alarmAnchorFilterGlitches,
-                                onChanged: (v) {
-                                  setSt(
-                                    () =>
-                                        settings.alarmAnchorFilterGlitches = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                                title: 'Ignorar saltos de posición aislados',
-                                subtitle: 'Un único salto de GPS grande no cuenta como garreo — solo un movimiento sostenido',
-                              ),
-                              if (settings.alarmAnchorFilterGlitches)
-                                _ThresholdRow(
-                                  label: 'Salto considerado sospechoso',
-                                  unit: 'm',
-                                  value: settings.alarmAnchorGlitchJumpM,
-                                  min: 5,
-                                  max: 500,
-                                  divisions: 99,
-                                  onChanged: (v) {
-                                    setSt(
-                                      () => settings.alarmAnchorGlitchJumpM = v,
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'DATOS DEL BARCO (fijos)',
-                            icon: Icons.anchor,
-                            children: [
-                              const Text(
-                                'Se publican en Signal K como design.* junto '
-                                'con el resto del fondeo — no cambian de un '
-                                'fondeo a otro.',
-                                style: TextStyle(fontSize: 11, color: cMuted),
-                              ),
-                              const SizedBox(height: 6),
-                              _ThresholdRow(
-                                label: 'Altura del roller sobre el agua',
-                                unit: 'm',
-                                value: settings.anchorBowRollerHeightM,
-                                min: 0,
-                                max: 10,
-                                divisions: 100,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.anchorBowRollerHeightM = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              _ThresholdRow(
-                                label: 'Longitud total de cadena',
-                                unit: 'm',
-                                value: settings.anchorTotalChainLengthM,
-                                min: 1,
-                                max: 300,
-                                divisions: 299,
-                                onChanged: (v) {
-                                  setSt(
-                                    () => settings.anchorTotalChainLengthM = v,
-                                  );
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              _ThresholdRow(
-                                label: 'Distancia GPS a proa (roldana)',
-                                unit: 'm',
-                                value: settings.anchorGpsToBowM,
-                                min: 0,
-                                max: 25,
-                                divisions: 250,
-                                onChanged: (v) {
-                                  setSt(() => settings.anchorGpsToBowM = v);
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                              const SizedBox(height: 4),
-                              const Text(
-                                'La posición GPS del barco suele ser la de la '
-                                'antena, no la de la roldana de proa — indica '
-                                'cuánto más adelante está la proa (a lo largo '
-                                'del eje del barco) para que el punto de '
-                                'fondeo y el radio de vigilancia sean más '
-                                'exactos. 0 si la antena está prácticamente '
-                                'en la proa.',
-                                style: TextStyle(fontSize: 11, color: cMuted),
-                              ),
-                            ],
-                          ),
-                          SettingsGroup(
-                            title: 'TRAZA PROPIA',
-                            icon: Icons.timeline,
-                            children: [
-                              OutlinedButton.icon(
-                                onPressed: _ownTrack.points.isEmpty
-                                    ? null
-                                    : () async {
-                                        final count = _ownTrack.points.length;
-                                        final confirmed =
-                                            await confirmSettingsAction(
-                                              context,
-                                              title: '¿Borrar la traza?',
-                                              message:
-                                                  'Se eliminarán $count puntos de la traza propia. La posición y el estado del ancla no cambiarán.',
-                                              confirmLabel: 'Borrar traza',
-                                              destructive: true,
-                                            );
-                                        if (!confirmed || !mounted) return;
-                                        setSt(_ownTrack.clear);
-                                        setState(() {});
-                                      },
-                                icon: const Icon(
-                                  Icons.delete_outline,
-                                  size: 16,
-                                ),
-                                label: const Text('Borrar traza'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  _cfgAnchorTab(setSt),
                   // ── Tab: Diagnóstico ───────────────────────────────────────────────
-                  Builder(
-                    builder: (_) {
-                      final sc = settings.sensorConfig;
-                      return SettingsPageBody(
-                        maxWidth: 1100,
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            GestureDetector(
-                              onLongPress: _adminRevealed
-                                  ? null
-                                  : () {
-                                      HapticFeedback.mediumImpact();
-                                      setSt(() => _adminRevealed = true);
-                                      setState(() {});
-                                    },
-                              child: _AppVersionCard(
-                                version: _pkgVersion,
-                                buildNumber: _pkgBuild,
-                                installSource: _installSourceLabel,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            SettingsGroup(
-                              title: 'ESTADO DEL SISTEMA',
-                              icon: Icons.monitor_heart_outlined,
-                              children: [
-                                SettingsStatusRow(
-                                  label: 'Signal K',
-                                  value: signalK.connected
-                                      ? 'Conectado'
-                                      : 'Desconectado',
-                                  color: signalK.connected ? cGreen : cRed,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Servidor',
-                                  value: '${settings.host}:${settings.port}',
-                                  color: signalK.connected ? cGreen : cMuted,
-                                  icon: Icons.dns_outlined,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Último dato',
-                                  value: signalK.lastUpdate == null
-                                      ? 'Sin datos'
-                                      : _lastUpdateText(signalK.lastUpdate),
-                                  color: signalK.lastUpdate == null
-                                      ? cMuted
-                                      : cCyan,
-                                  icon: Icons.schedule,
-                                ),
-                                SettingsStatusRow(
-                                  label: 'Sesión de escritura',
-                                  value: _skLoginOk == true
-                                      ? 'Autenticada'
-                                      : _skLoginOk == false
-                                      ? 'Fallida'
-                                      : 'Sin comprobar',
-                                  color: _skLoginOk == true
-                                      ? cGreen
-                                      : _skLoginOk == false
-                                      ? cRed
-                                      : cMuted,
-                                  icon: Icons.lock_outline,
-                                ),
-                              ],
-                            ),
-                            SettingsGroup(
-                              title: 'HERRAMIENTAS',
-                              icon: Icons.build_outlined,
-                              children: [
-                                SettingsSwitchRow(
-                                  value: settings.demoMode,
-                                  onChanged: (v) =>
-                                      setState(() => setDemoMode(v)),
-                                  title: 'Modo DEMO',
-                                  subtitle: 'Datos simulados para pruebas. No debe quedar activo durante la navegación real.',
-                                ),
-                                // Dos situaciones distintas piden pantallas
-                                // distintas: fondeado se mira ANC, navegando
-                                // se miran NAV y VNT.
-                                if (settings.demoMode) ...[
-                                  const SizedBox(height: 6),
-                                  for (final sc in kDemoScenarios)
-                                    RadioListTile<String>(
-                                      value: sc.id,
-                                      // ignore: deprecated_member_use
-                                      groupValue: settings.demoScenario,
-                                      // ignore: deprecated_member_use
-                                      onChanged: (v) {
-                                        if (v == null) return;
-                                        setSt(() {});
-                                        setState(() => setDemoScenario(v));
-                                      },
-                                      dense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                      activeColor: cCyan,
-                                      title: Text(
-                                        sc.label,
-                                        style: const TextStyle(
-                                          color: cText,
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        sc.description,
-                                        style: const TextStyle(
-                                          color: cMuted,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ),
-                                  const SizedBox(height: 4),
-                                ],
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: OutlinedButton.icon(
-                                    onPressed: () {
-                                      setSt(
-                                        () => _adminRevealed = !_adminRevealed,
-                                      );
-                                      setState(() {});
-                                    },
-                                    icon: Icon(
-                                      _adminRevealed
-                                          ? Icons.visibility_off_outlined
-                                          : Icons.admin_panel_settings_outlined,
-                                      size: 17,
-                                    ),
-                                    label: Text(
-                                      _adminRevealed
-                                          ? 'Ocultar modo técnico'
-                                          : 'Mostrar modo técnico',
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: [
-                                    OutlinedButton.icon(
-                                      onPressed: settings.demoMode
-                                          ? null
-                                          : _connectSignalK,
-                                      icon: const Icon(Icons.refresh, size: 17),
-                                      label: const Text('Reconectar Signal K'),
-                                    ),
-                                    OutlinedButton.icon(
-                                      onPressed: () => showDialog<void>(
-                                        context: context,
-                                        builder: (_) => Dialog.fullscreen(
-                                          backgroundColor: cBg,
-                                          child: Stack(
-                                            children: [
-                                              const Positioned.fill(
-                                                child: _AnchorWebView(
-                                                  host: 'sh-esp32-volvo-mdi.local',
-                                                  port: 8080,
-                                                  path: '/',
-                                                  label: 'Diagnóstico MDI',
-                                                  fullscreen: true,
-                                                ),
-                                              ),
-                                              Positioned(
-                                                top: 8,
-                                                right: 8,
-                                                child: IconButton.filled(
-                                                  tooltip: 'Cerrar',
-                                                  onPressed: () =>
-                                                      Navigator.of(context)
-                                                          .pop(),
-                                                  icon: const Icon(Icons.close),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                      icon: const Icon(
-                                        Icons.memory_outlined,
-                                        size: 17,
-                                      ),
-                                      label: const Text(
-                                        'Abrir diagnóstico MDI',
-                                      ),
-                                    ),
-                                    OutlinedButton.icon(
-                                      onPressed: () async {
-                                        final sc = settings.sensorConfig;
-                                        final report =
-                                            const JsonEncoder.withIndent(
-                                              '  ',
-                                            ).convert({
-                                              'application': {
-                                                'name': 'REWIND Panel',
-                                                'version': _pkgVersion,
-                                                'build': _pkgBuild,
-                                                'installSource':
-                                                    _installSourceLabel,
-                                              },
-                                              'generatedAt': DateTime.now()
-                                                  .toIso8601String(),
-                                              'signalK': {
-                                                'connected': signalK.connected,
-                                                // No host, usuario, contraseña,
-                                                // token ni cabecera Basic.
-                                                'serverConfigured':
-                                                    settings.host.isNotEmpty,
-                                                'lastDataAt': signalK.lastUpdate
-                                                    ?.toIso8601String(),
-                                                'writeSession': _skLoginOk,
-                                              },
-                                              'configuration': {
-                                                'historySource':
-                                                    settings.historySource,
-                                                'demoMode': settings.demoMode,
-                                                'activeTankCount': sc.tanks
-                                                    .where((t) => t.enabled)
-                                                    .length,
-                                                'solarConfigured':
-                                                    sc.solarPath != null,
-                                                'depthConfigured':
-                                                    sc.depthPath != null,
-                                                'engineConfigured':
-                                                    sc.enginePath != null,
-                                                'anchorArmed':
-                                                    settings.anchorConfig.armed,
-                                              },
-                                              'health': {
-                                                'activeAlarmCount':
-                                                    _activeAlarms.length,
-                                                'recentEventCount':
-                                                    _eventLog.length,
-                                                'hasRecordedCrash':
-                                                    lastCrashInfo != null,
-                                              },
-                                            });
-                                        await Clipboard.setData(
-                                          ClipboardData(text: report),
-                                        );
-                                        if (ctx.mounted) {
-                                          ScaffoldMessenger.of(ctx)
-                                              .showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Diagnóstico copiado sin credenciales.',
-                                                  ),
-                                                ),
-                                              );
-                                        }
-                                      },
-                                      icon: const Icon(
-                                        Icons.copy_all_outlined,
-                                        size: 17,
-                                      ),
-                                      label: const Text(
-                                        'Copiar diagnóstico JSON',
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                            if (lastCrashInfo != null) ...[
-                              const SizedBox(height: 12),
-                              Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xff3a0a0a),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: cRed),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        const Icon(
-                                          Icons.warning_amber_rounded,
-                                          color: cRed,
-                                          size: 16,
-                                        ),
-                                        const SizedBox(width: 6),
-                                        const Text(
-                                          'ÚLTIMO ERROR',
-                                          style: TextStyle(
-                                            color: cRed,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w700,
-                                            letterSpacing: 0.8,
-                                          ),
-                                        ),
-                                        const Spacer(),
-                                        TextButton(
-                                          onPressed: () async {
-                                            final confirmed =
-                                                await confirmSettingsAction(
-                                                  context,
-                                                  title: '¿Borrar el último error?',
-                                                  message: 'Se eliminará este diagnóstico del dispositivo.',
-                                                  confirmLabel: 'Borrar',
-                                                  destructive: true,
-                                                );
-                                            if (confirmed && mounted) {
-                                              setState(
-                                                () => lastCrashInfo = null,
-                                              );
-                                            }
-                                          },
-                                          child: const Text('Borrar'),
-                                        ),
-                                      ],
-                                    ),
-                                    Text(
-                                      lastCrashInfo!,
-                                      style: const TextStyle(
-                                        color: cText,
-                                        fontSize: 11,
-                                        fontFamily: 'monospace',
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                            if (_eventLog.isNotEmpty) ...[
-                              const SizedBox(height: 12),
-                              SettingsGroup(
-                                title: 'EVENTOS RECIENTES',
-                                icon: Icons.receipt_long_outlined,
-                                children: [
-                                  SelectableText(
-                                    _eventLog.reversed.take(12).join('\n'),
-                                    style: const TextStyle(
-                                      color: cMuted,
-                                      fontSize: 10,
-                                      fontFamily: 'monospace',
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                            const SizedBox(height: 12),
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const Text(
-                                        'NAVEGACIÓN / VIENTO',
-                                        style: lbl,
-                                      ),
-                                      const SizedBox(height: 4),
-                                      _diagRow(
-                                        'Escora',
-                                        signalK.heelDeg != null
-                                            ? '${signalK.heelDeg!.abs().round()}° ${signalK.heelDeg! >= 0 ? 'E' : 'B'}'
-                                            : '--',
-                                        signalK.heelDeg != null ? cGreen : cRed,
-                                        path: 'navigation.attitude.roll',
-                                      ),
-                                      _diagRow(
-                                        'TWS',
-                                        _dTws != null
-                                            ? '${_dTws!.toStringAsFixed(1)} kt'
-                                            : '--',
-                                        _dTws != null ? cCyan : cMuted,
-                                        path: 'environment.wind.speedTrue',
-                                        updatedAt: signalK.twsUpdate,
-                                      ),
-                                      _diagRow(
-                                        'TWA',
-                                        _dTwa != null
-                                            ? '${_dTwa!.toStringAsFixed(1)}°'
-                                            : '--',
-                                        _dTwa != null ? cCyan : cMuted,
-                                        path: 'environment.wind.angleTrueWater',
-                                        updatedAt: signalK.twaUpdate,
-                                      ),
-                                      _diagRow(
-                                        'AWS',
-                                        _dAws != null
-                                            ? '${_dAws!.toStringAsFixed(1)} kt'
-                                            : '--',
-                                        _dAws != null ? cGreen : cMuted,
-                                        path: 'environment.wind.speedApparent',
-                                        updatedAt: signalK.awsUpdate,
-                                      ),
-                                      _diagRow(
-                                        'AWA',
-                                        _dAwa != null
-                                            ? '${_dAwa!.toStringAsFixed(1)}°'
-                                            : '--',
-                                        _dAwa != null ? cGreen : cMuted,
-                                        path: 'environment.wind.angleApparent',
-                                        updatedAt: signalK.awaUpdate,
-                                      ),
-                                      _diagRow(
-                                        'SOG',
-                                        signalK.sogKn != null
-                                            ? '${signalK.sogKn!.toStringAsFixed(1)} kt'
-                                            : '--',
-                                        signalK.sogKn != null ? cGreen : cMuted,
-                                        path: 'navigation.speedOverGround',
-                                        updatedAt: signalK.sogKnUpdate,
-                                      ),
-                                      _diagRow(
-                                        'STW',
-                                        signalK.stwKn != null
-                                            ? '${signalK.stwKn!.toStringAsFixed(1)} kt'
-                                            : '--',
-                                        signalK.stwKn != null ? cGreen : cMuted,
-                                        path: 'navigation.speedThroughWater',
-                                        updatedAt: signalK.stwKnUpdate,
-                                      ),
-                                      _diagRow(
-                                        'Rumbo',
-                                        signalK.headingTrueDeg != null
-                                            ? '${signalK.headingTrueDeg!.round()}°'
-                                            : '--',
-                                        signalK.headingTrueDeg != null
-                                            ? cText
-                                            : cMuted,
-                                        path: 'navigation.headingTrue',
-                                        updatedAt:
-                                            signalK.headingTrueDegUpdate ??
-                                            signalK.headingMagneticDegUpdate,
-                                      ),
-                                      _diagRow(
-                                        'Profundidad',
-                                        signalK.depthM != null
-                                            ? '${signalK.depthM!.toStringAsFixed(1)} m'
-                                            : '--',
-                                        signalK.depthM != null
-                                            ? cOrange
-                                            : cMuted,
-                                        path:
-                                            sc.depthPath ?? '(sin configurar)',
-                                      ),
-                                      _diagRow(
-                                        'Horas motor',
-                                        (signalK.engineHours ??
-                                                    signalK.lastEngineHours) !=
-                                                null
-                                            ? '${(signalK.engineHours ?? signalK.lastEngineHours)!.toStringAsFixed(1)} h'
-                                            : '--',
-                                        (signalK.engineHours ??
-                                                    signalK.lastEngineHours) !=
-                                                null
-                                            ? cText
-                                            : cMuted,
-                                        path:
-                                            sc.enginePath ?? '(sin configurar)',
-                                        updatedAt:
-                                            signalK.engineHoursUpdate ??
-                                            signalK.lastEngineHoursAt,
-                                      ),
-                                      _diagRow(
-                                        'COG',
-                                        signalK.cogTrueDeg != null
-                                            ? '${signalK.cogTrueDeg!.round()}°'
-                                            : '--',
-                                        signalK.cogTrueDeg != null
-                                            ? cText
-                                            : cMuted,
-                                        path: 'navigation.courseOverGroundTrue',
-                                      ),
-                                      _diagRow(
-                                        'Ancla',
-                                        signalK.anchorArmed
-                                            ? 'Armada'
-                                            : 'Sin armar',
-                                        signalK.anchorArmed ? cGreen : cMuted,
-                                        path: 'navigation.anchor.state',
-                                      ),
-                                      _diagRow(
-                                        'TWD',
-                                        _dTwd != null
-                                            ? '${_dTwd!.toStringAsFixed(0)}°'
-                                            : '--',
-                                        _dTwd != null ? cCyan : cMuted,
-                                        path: 'environment.wind.directionTrue',
-                                      ),
-                                      _diagRow(
-                                        'VMG viento',
-                                        () {
-                                          final twaForVmg = _freshTwaWater;
-                                          final speed = _effectiveBoatSpeed;
-                                          final twdForVmg = _freshWind(
-                                            _dTwd,
-                                            signalK.twdUpdate,
-                                          );
-                                          final angle = speed.overGround
-                                              ? (twdForVmg != null &&
-                                                        _freshCog != null
-                                                    ? normalizeRelativeAngle(
-                                                        twdForVmg - _freshCog!,
-                                                      )
-                                                    : null)
-                                              : twaForVmg;
-                                          final v =
-                                              angle != null &&
-                                                  speed.valueKn != null
-                                              ? speed.valueKn! *
-                                                    math.cos(
-                                                      angle * math.pi / 180,
-                                                    )
-                                              : null;
-                                          return v != null
-                                              ? '${v.toStringAsFixed(1)} kt'
-                                              : '--';
-                                        }(),
-                                        cGreen,
-                                        path: '(calculado)',
-                                      ),
-                                      _diagRow(
-                                        'VMG ruta',
-                                        signalK.courseVmgKn != null
-                                            ? '${signalK.courseVmgKn!.toStringAsFixed(1)} kt'
-                                            : '--',
-                                        signalK.courseVmgKn != null
-                                            ? cGreen
-                                            : cMuted,
-                                        path: 'navigation.course.calcValues.velocityMadeGood',
-                                      ),
-                                      _diagRow(
-                                        'GNSS sats',
-                                        signalK.gnssSatellites?.toString() ??
-                                            '--',
-                                        signalK.gnssSatellites != null
-                                            ? cGreen
-                                            : cMuted,
-                                        path: 'navigation.gnss.satellites',
-                                      ),
-                                      _diagRow(
-                                        'GNSS HDOP',
-                                        signalK.gnssHdop != null
-                                            ? signalK.gnssHdop!.toStringAsFixed(
-                                                1,
-                                              )
-                                            : '--',
-                                        signalK.gnssHdop != null
-                                            ? cGreen
-                                            : cMuted,
-                                        path: 'navigation.gnss.horizontalDilution',
-                                      ),
-                                      _diagRow(
-                                        'GNSS fix',
-                                        signalK.gnssMethodQuality ??
-                                            signalK.gnssFixType ??
-                                            '--',
-                                        (signalK.gnssMethodQuality ??
-                                                    signalK.gnssFixType) !=
-                                                null
-                                            ? cGreen
-                                            : cMuted,
-                                        path: 'navigation.gnss.methodQuality',
-                                      ),
-                                      _diagRow(
-                                        'Altitud antena',
-                                        signalK.gnssAntennaAltitudeM != null
-                                            ? '${signalK.gnssAntennaAltitudeM!.toStringAsFixed(1)} m'
-                                            : '--',
-                                        signalK.gnssAntennaAltitudeM != null
-                                            ? cGreen
-                                            : cMuted,
-                                        path: 'navigation.gnss.antennaAltitude',
-                                      ),
-                                      const SizedBox(height: 12),
-                                      const Text('ENERGÍA', style: lbl),
-                                      const SizedBox(height: 4),
-                                      _diagRow(
-                                        'Batería de servicio V',
-                                        signalK.houseV != null
-                                            ? '${signalK.houseV!.toStringAsFixed(2)} V'
-                                            : '--',
-                                        signalK.houseV != null ? cCyan : cMuted,
-                                        path:
-                                            'electrical.batteries.${sc.batteryHouseId}.voltage',
-                                      ),
-                                      _diagRow(
-                                        'Batería de servicio A',
-                                        signalK.houseA != null
-                                            ? '${signalK.houseA!.toStringAsFixed(1)} A'
-                                            : '--',
-                                        signalK.houseA != null ? cCyan : cMuted,
-                                        path:
-                                            'electrical.batteries.${sc.batteryHouseId}.current',
-                                      ),
-                                      _diagRow(
-                                        'Batería de servicio SoC',
-                                        signalK.houseSoc != null
-                                            ? '${signalK.houseSoc!.round()}%'
-                                            : '--',
-                                        signalK.houseSoc != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path:
-                                            'electrical.batteries.${sc.batteryHouseId}.capacity.stateOfCharge',
-                                      ),
-                                      _diagRow(
-                                        'Batería arranque V',
-                                        signalK.startV != null
-                                            ? '${signalK.startV!.toStringAsFixed(2)} V'
-                                            : '--',
-                                        signalK.startV != null ? cCyan : cMuted,
-                                        path:
-                                            'electrical.batteries.${sc.batteryStartId}.voltage',
-                                      ),
-                                      _diagRow(
-                                        'Solar',
-                                        signalK.solarW != null
-                                            ? '${signalK.solarW!.round()} W'
-                                            : '--',
-                                        signalK.solarW != null
-                                            ? cOrange
-                                            : cMuted,
-                                        path:
-                                            sc.solarPath ?? '(sin configurar)',
-                                      ),
-                                      if (sc.solarPath2 != null)
-                                        _diagRow(
-                                          'Solar 2',
-                                          signalK.solarW2 != null
-                                              ? '${signalK.solarW2!.round()} W'
-                                              : '--',
-                                          signalK.solarW2 != null
-                                              ? cOrange
-                                              : cMuted,
-                                          path: sc.solarPath2!,
-                                        ),
-                                      _diagRow(
-                                        'Bowthruster V',
-                                        signalK.bowthrusterV != null
-                                            ? '${signalK.bowthrusterV!.toStringAsFixed(2)} V'
-                                            : '--',
-                                        signalK.bowthrusterV != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'electrical.batteries.bowthruster.voltage',
-                                      ),
-                                      const SizedBox(height: 12),
-                                      const Text('TEMPERATURAS', style: lbl),
-                                      const SizedBox(height: 4),
-                                      _diagRow(
-                                        'Nevera 1',
-                                        signalK.fridge1TempK != null
-                                            ? '${(signalK.fridge1TempK! - 273.15).toStringAsFixed(1)} °C'
-                                            : '--',
-                                        signalK.fridge1TempK != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path:
-                                            sc.fridge1Path ??
-                                            '(sin configurar)',
-                                      ),
-                                      _diagRow(
-                                        'Nevera 2',
-                                        signalK.fridge2TempK != null
-                                            ? '${(signalK.fridge2TempK! - 273.15).toStringAsFixed(1)} °C'
-                                            : '--',
-                                        signalK.fridge2TempK != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path:
-                                            sc.fridge2Path ??
-                                            '(sin configurar)',
-                                      ),
-                                      _diagRow(
-                                        'Bowthruster',
-                                        signalK.bowthrusterTempK != null
-                                            ? '${(signalK.bowthrusterTempK! - 273.15).toStringAsFixed(1)} °C'
-                                            : '--',
-                                        signalK.bowthrusterTempK != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'electrical.batteries.bowthruster.temperature',
-                                      ),
-                                      const SizedBox(height: 12),
-                                      const Text('TANQUES', style: lbl),
-                                      const SizedBox(height: 4),
-                                      for (final t in sc.tanks.where(
-                                        (t) => t.enabled,
-                                      ))
-                                        InkWell(
-                                          onTap: () => _showRawSkNode(
-                                            context,
-                                            'tanks.${t.type}.${t.id}',
-                                          ),
-                                          child: _diagRow(
-                                            t.groupLabel,
-                                            signalK.tanks[t.tankKey] != null
-                                                ? '${signalK.tanks[t.tankKey]!.round()}%'
-                                                : '--',
-                                            signalK.tanks[t.tankKey] != null
-                                                ? cCyan
-                                                : cMuted,
-                                            path:
-                                                '${t.skPath}  (toca para ver todo)',
-                                          ),
-                                        ),
-                                      const SizedBox(height: 10),
-                                      const Divider(
-                                        color: Color(0xff1e3040),
-                                        height: 1,
-                                      ),
-                                      const SizedBox(height: 6),
-                                      const Text(
-                                        'Dampening: TWS/AWS 5s · TWA/AWA 3s',
-                                        style: TextStyle(
-                                          color: Color(0xff4a6070),
-                                          fontSize: 9,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const Text('RASPBERRY PI', style: lbl),
-                                      const SizedBox(height: 4),
-                                      _diagRow(
-                                        'CPU temp',
-                                        signalK.cpuTempK != null
-                                            ? '${(signalK.cpuTempK! - 273.15).toStringAsFixed(1)} °C'
-                                            : '--',
-                                        signalK.cpuTempK != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'environment.rpi.cpu.temperature',
-                                      ),
-                                      _diagRow(
-                                        'GPU temp',
-                                        signalK.gpuTempK != null
-                                            ? '${(signalK.gpuTempK! - 273.15).toStringAsFixed(1)} °C'
-                                            : '--',
-                                        signalK.gpuTempK != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'environment.rpi.gpu.temperature',
-                                      ),
-                                      _diagRow(
-                                        'CPU uso',
-                                        signalK.cpuUtil != null
-                                            ? '${signalK.cpuUtil!.round()}%'
-                                            : '--',
-                                        signalK.cpuUtil != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'environment.rpi.cpu.utilisation',
-                                      ),
-                                      _diagRow(
-                                        'Memoria uso',
-                                        signalK.memUtil != null
-                                            ? '${signalK.memUtil!.round()}%'
-                                            : '--',
-                                        signalK.memUtil != null
-                                            ? cCyan
-                                            : cMuted,
-                                        path: 'environment.rpi.memory.utilisation',
-                                      ),
-                                      _diagRow(
-                                        'SD uso',
-                                        signalK.sdUtil != null
-                                            ? '${signalK.sdUtil!.round()}%'
-                                            : '--',
-                                        signalK.sdUtil != null ? cCyan : cMuted,
-                                        path: 'environment.rpi.sd.utilisation',
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
+                  _cfgDiagnosticsTab(ctx, setSt),
                   // ── Tab: Admin (hidden — long-press the version card above) ────────
-                  if (_adminRevealed)
-                    SettingsPageBody(
-                      maxWidth: 760,
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          SettingsGroup(
-                            title: 'SERVIDORES GUARDADOS',
-                            icon: Icons.dns,
-                            children: [
-                              const Text(
-                                'Cambiar de servidor no toca la configuración '
-                                'de sensores de este barco — cada servidor '
-                                'guarda la suya propia.',
-                                style: TextStyle(color: cMuted, fontSize: 12),
-                              ),
-                              const SizedBox(height: 10),
-                              for (final s in settings.savedServers)
-                                SavedServerRow(
-                                  key: ValueKey('${s.host}:${s.port}'),
-                                  server: s,
-                                  isCurrent:
-                                      settings.host == s.host &&
-                                      settings.port == s.port,
-                                  onConnect: () =>
-                                      unawaited(_switchToSavedServer(s)),
-                                  onEdit: () async {
-                                    final edited =
-                                        await showDialog<SavedServer>(
-                                          context: context,
-                                          builder: (_) =>
-                                              ServerEditDialog(initial: s),
-                                        );
-                                    if (edited == null) return;
-                                    setSt(() {
-                                      final i = settings.savedServers.indexOf(
-                                        s,
-                                      );
-                                      settings.savedServers[i] = edited;
-                                    });
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                  onDelete: () async {
-                                    final confirmed =
-                                        await confirmSettingsAction(
-                                          context,
-                                          title: '¿Borrar ${s.name}?',
-                                          message:
-                                              settings.host == s.host &&
-                                                  settings.port == s.port
-                                              ? 'Es el servidor seleccionado actualmente. Se borrará de la lista, pero la conexión actual continuará hasta que cambies de servidor.'
-                                              : 'Se eliminará de la lista de servidores guardados.',
-                                          confirmLabel: 'Borrar servidor',
-                                          destructive: true,
-                                        );
-                                    if (!confirmed || !mounted) return;
-                                    setSt(
-                                      () => settings.savedServers.remove(s),
-                                    );
-                                    setState(() {});
-                                    unawaited(_saveSettings());
-                                  },
-                                ),
-                              if (settings.savedServers.isEmpty)
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Text(
-                                    'Sin servidores guardados.',
-                                    style: TextStyle(
-                                      color: cMuted,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                              const SizedBox(height: 10),
-                              OutlinedButton.icon(
-                                icon: const Icon(Icons.add, size: 16),
-                                label: const Text('Añadir servidor'),
-                                onPressed: () async {
-                                  final added = await showDialog<SavedServer>(
-                                    context: context,
-                                    builder: (_) => const ServerEditDialog(),
-                                  );
-                                  if (added == null) return;
-                                  setSt(() => settings.savedServers.add(added));
-                                  setState(() {});
-                                  unawaited(_saveSettings());
-                                },
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
+                  if (_adminRevealed) _cfgTechnicalTab(setSt),
                 ],
               ),
             ),

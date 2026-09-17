@@ -114,6 +114,90 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  // Las siete pestañas visibles de CFG se reordenaron y se partieron en
+  // métodos propios (antes eran una sola función de 4.000 líneas). Esto
+  // comprueba que todas siguen dibujándose sin excepciones y que cada ajuste
+  // movido está en su pestaña nueva, no en la vieja.
+  testWidgets('CFG dibuja las siete pestañas y cada ajuste está en su sitio', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.drag(find.text('VNT'), const Offset(-900, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CFG'));
+    await tester.pumpAndSettle();
+
+    for (final tab in const [
+      'CONEXIÓN',
+      'SENSORES',
+      'HISTÓRICO',
+      'PANTALLA',
+      'ALARMAS',
+      'FONDEO',
+      'DIAGNÓSTICO',
+    ]) {
+      await tester.tap(find.text(tab));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: tab);
+    }
+
+    // La ficha del barco dejó Pantalla y Fondeo y vive en Sensores.
+    await tester.tap(find.text('SENSORES'));
+    await tester.pumpAndSettle();
+    expect(find.text('MOTOR Y TRANSMISIÓN'), findsOneWidget);
+    expect(find.text('EL BARCO'), findsOneWidget);
+
+    // Mostrar y avisar del AIS, en un solo sitio y ya no en Pantalla.
+    await tester.tap(find.text('ALARMAS'));
+    await tester.pumpAndSettle();
+    expect(find.text('AIS: AVISO Y VISTA EN NAV'), findsOneWidget);
+
+    // Diagnóstico son dos vistas, no un scroll de 800 líneas.
+    // La barra de pestañas hace scroll: a 915 px DIAGNÓSTICO queda fuera.
+    await tester.ensureVisible(find.text('DIAGNÓSTICO'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('DIAGNÓSTICO'));
+    await tester.pumpAndSettle();
+    expect(find.text('ESTADO DEL SISTEMA'), findsOneWidget);
+    expect(find.text('Datos en vivo'), findsOneWidget);
+    await tester.tap(find.text('Datos en vivo'));
+    await tester.pumpAndSettle();
+    expect(find.text('ESTADO DEL SISTEMA'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  // Cada grupo dice si lo que toca viaja al barco o se queda en el aparato.
+  testWidgets('CFG marca qué se comparte con el barco', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.drag(find.text('VNT'), const Offset(-900, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CFG'));
+    await tester.pumpAndSettle();
+
+    // La leyenda de la cabecera, siempre visible.
+    expect(find.text('BARCO'), findsWidgets);
+    expect(find.text('ESTE APARATO'), findsWidgets);
+
+    await tester.tap(find.text('FONDEO'));
+    await tester.pumpAndSettle();
+    // Grupos del barco y filas del aparato conviviendo, cada una marcada.
+    expect(find.text('BARCO'), findsWidgets);
+    expect(find.text('ESTE APARATO'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('CFG search finds concrete DEMO and motor settings', (
     WidgetTester tester,
   ) async {
@@ -137,6 +221,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Modo DEMO'), findsOneWidget);
 
+    // Con DEMO encendido aparece la lista de escenarios: antes eran
+    // RadioListTile dentro de una tarjeta con fondo propio, que Flutter avisa
+    // que pierden color y efecto al pulsar.
+    final demoSwitch = find.descendant(
+      of: find.ancestor(
+        of: find.text('Modo DEMO'),
+        matching: find.byType(SettingsSwitchRow),
+      ),
+      matching: find.byType(Switch),
+    );
+    await tester.ensureVisible(demoSwitch);
+    await tester.pumpAndSettle();
+    await tester.tap(demoSwitch);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byIcon(Icons.radio_button_checked), findsWidgets);
+    expect(tester.takeException(), isNull);
+
     await tester.tap(find.byTooltip('Buscar ajuste'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).last, 'motor completo');
@@ -145,6 +247,89 @@ void main() {
     await tester.tap(find.text('Pantalla del motor'));
     await tester.pumpAndSettle();
     expect(find.text('ESTILO MOTOR'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  // RESUMEN es la pantalla de los barcos con pocos sensores, y ahora lleva
+  // también el estado del motor. Cuatro paneles en 915x412 se desbordan a la
+  // mínima, así que esto comprueba que caben y que la fecha está en la
+  // cabecera de POSICIÓN Y HORA, no gastando un chip abajo.
+  testWidgets('RESUMEN cabe con el panel de motor', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.drag(find.text('VNT'), const Offset(-900, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CFG'));
+    await tester.pumpAndSettle();
+
+    // DEMO da datos de motor; sin ellos el panel se oculta a propósito. Se
+    // llega por el buscador: a 915 px la barra de pestañas no enseña
+    // DIAGNÓSTICO sin hacer scroll.
+    await tester.tap(find.byTooltip('Buscar ajuste'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'DEMO');
+    await tester.pump();
+    await tester.tap(find.text('Modo DEMO y escenarios simulados'));
+    await tester.pumpAndSettle();
+    final demoSwitch = find.descendant(
+      of: find.ancestor(
+        of: find.text('Modo DEMO'),
+        matching: find.byType(SettingsSwitchRow),
+      ),
+      matching: find.byType(Switch),
+    );
+    await tester.ensureVisible(demoSwitch);
+    await tester.pumpAndSettle();
+    await tester.tap(demoSwitch);
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Buscar ajuste'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'RESUMEN');
+    await tester.pump();
+    await tester.tap(find.text('Pantalla RESUMEN').last);
+    await tester.pumpAndSettle();
+    final resSwitch = find.descendant(
+      of: find.ancestor(
+        of: find.text('Pantalla RESUMEN'),
+        matching: find.byType(SettingsSwitchRow),
+      ),
+      matching: find.byType(Switch),
+    );
+    await tester.ensureVisible(resSwitch);
+    await tester.pumpAndSettle();
+    await tester.tap(resSwitch);
+    await tester.pumpAndSettle();
+
+    await tester.drag(find.text('CFG'), const Offset(900, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('RES'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('ENERGÍA'), findsOneWidget);
+    expect(find.text('TANQUES'), findsOneWidget);
+    expect(find.text('POSICIÓN Y HORA'), findsOneWidget);
+    expect(find.text('MOTOR'), findsOneWidget);
+    // 'AIS' también es una pestaña de la barra de navegación.
+    expect(find.text('AIS'), findsWidgets);
+
+    // Fecha y hora en la cabecera, y ya no como chip.
+    expect(
+      find.textContaining(RegExp(r'\d{2}/\d{2}/\d{4}  \d{2}:\d{2}')),
+      findsOneWidget,
+    );
+    expect(find.text('FECHA'), findsNothing);
+
+    // El motor dice en qué estado está y con qué cifras.
+    expect(find.text('TEMP'), findsOneWidget);
+    expect(find.text('ALTERN.'), findsOneWidget);
+
     expect(tester.takeException(), isNull);
   });
 
@@ -276,7 +461,10 @@ void main() {
     await tester.tap(find.text('INFORME VIENTO'));
     await tester.pumpAndSettle();
 
-    expect(find.text('en verde, barco navegando (SOG > 0.5 kt)'), findsOneWidget);
+    expect(
+      find.text('en verde, barco navegando (SOG > 0.5 kt)'),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 

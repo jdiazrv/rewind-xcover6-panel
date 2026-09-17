@@ -1102,12 +1102,6 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
 
   @override
   Widget build(BuildContext context) {
-    const lbl = TextStyle(
-      color: cMuted,
-      fontSize: 11,
-      letterSpacing: 1.1,
-      fontWeight: FontWeight.w700,
-    );
     return Dialog.fullscreen(
       backgroundColor: cBg,
       child: SafeArea(
@@ -1191,656 +1185,717 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('BATERÍAS', style: lbl),
-                            const SizedBox(height: 4),
-                            // Stacked, not side-by-side — two dropdowns
-                            // sharing a Row in this narrower right-hand
-                            // column overlapped/clipped each other.
-                            DropdownButtonFormField<String>(
-                              initialValue: _cfg.batteryHouseId,
-                              decoration: const InputDecoration(
-                                labelText: 'Servicio',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final id in _batteryIdOptions)
-                                  DropdownMenuItem(
-                                    value: id,
-                                    child: Text(
-                                      id,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) => setState(
-                                () => _cfg.batteryHouseId =
-                                    v ?? _cfg.batteryHouseId,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String>(
-                              initialValue: _cfg.batteryStartId,
-                              decoration: const InputDecoration(
-                                labelText: 'Arranque',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final id in _batteryIdOptions)
-                                  DropdownMenuItem(
-                                    value: id,
-                                    child: Text(
-                                      id,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) => setState(
-                                () => _cfg.batteryStartId =
-                                    v ?? _cfg.batteryStartId,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            TextFormField(
-                              initialValue: _cfg.batteryHouseCapacityAh == 0
-                                  ? ''
-                                  : _cfg.batteryHouseCapacityAh.toStringAsFixed(
-                                      0,
-                                    ),
-                              decoration: const InputDecoration(
-                                labelText: 'Capacidad servicio (Ah, opcional)',
-                                helperText: 'Permite estimar autonomía solo con corriente reciente.',
-                                isDense: true,
-                              ),
-                              keyboardType:
-                                  const TextInputType.numberWithOptions(
-                                    decimal: true,
-                                  ),
-                              onChanged: (raw) => _cfg.batteryHouseCapacityAh =
-                                  double.tryParse(raw.replaceAll(',', '.')) ??
-                                  0,
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('SOLAR', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.solarPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de potencia solar',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _solarOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.solarPath = v),
-                            ),
-                            const SizedBox(height: 8),
-                            // Optional — only for boats with two independent
-                            // solar controllers. With just the first path set,
-                            // nothing changes: that reading already is "the
-                            // total". With both, PWR shows the sum plus each
-                            // panel's own reading.
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.solarPath2,
-                              decoration: const InputDecoration(
-                                labelText:
-                                    'Path del 2º controlador solar (opcional)',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _solarOptions2)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.solarPath2 = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('PROFUNDIDAD', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.depthPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de profundidad',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _depthOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.depthPath = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('HORAS DE MOTOR', style: lbl),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.enginePath,
-                              decoration: const InputDecoration(
-                                labelText: 'Path de horas de motor (runTime)',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _engineOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguno',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.enginePath = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'NEVERAS (alarma y tarjeta NAV)',
-                              style: lbl,
-                            ),
-                            const SizedBox(height: 4),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.fridge1Path,
-                              decoration: const InputDecoration(
-                                labelText: 'Nevera 1',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _fridgeOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguna',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.fridge1Path = v),
-                            ),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.fridge2Path,
-                              decoration: const InputDecoration(
-                                labelText: 'Nevera 2',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _fridgeOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'Ninguna',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.fridge2Path = v),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('SENSORES DE TEMPERATURA', style: lbl),
-                            const Text(
-                              'Lo que se ve en la pantalla TMP. Aquí se ponen el nombre y la ubicación de cada sensor, neveras incluidas.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            const SizedBox(height: 4),
-                            if (_cfg.tempSensors.isEmpty)
-                              const Text(
-                                'Ninguno todavía — pulsa "Buscar sensores".',
-                                style: TextStyle(color: cMuted, fontSize: 12),
-                              ),
-                            for (final s in _cfg.tempSensors)
-                              Padding(
-                                key: ValueKey(s.path),
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 2,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Checkbox(
-                                      value: s.enabled,
-                                      onChanged: (v) => setState(
-                                        () => s.enabled = v ?? false,
-                                      ),
-                                    ),
-                                    Expanded(
-                                      flex: 3,
-                                      child: TextFormField(
-                                        initialValue: s.label,
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Nombre',
-                                        ),
-                                        onChanged: (v) => s.label = v,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Expanded(
-                                      flex: 2,
-                                      child: TextFormField(
-                                        initialValue: s.note,
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Ubicación',
-                                        ),
-                                        onChanged: (v) => s.note = v,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    Expanded(
-                                      flex: 2,
-                                      child: DropdownButtonFormField<String>(
-                                        initialValue: s.role,
-                                        decoration: const InputDecoration(
-                                          isDense: true,
-                                          labelText: 'Tipo',
-                                        ),
-                                        items: [
-                                          for (final e
-                                              in kTempSensorRoles.entries)
-                                            DropdownMenuItem(
-                                              value: e.key,
-                                              child: Text(e.value),
-                                            ),
-                                        ],
-                                        onChanged: (v) => setState(
-                                          () => s.role = v ?? s.role,
-                                        ),
-                                      ),
-                                    ),
-                                    if (_showsBatteryPicker(s.batteryPath)) ...[
-                                      const SizedBox(width: 6),
-                                      Expanded(
-                                        flex: 2,
-                                        child: DropdownButtonFormField<String?>(
-                                          initialValue: s.batteryPath,
-                                          isExpanded: true,
-                                          decoration: const InputDecoration(
-                                            isDense: true,
-                                            labelText: 'Pila',
-                                          ),
-                                          items: [
-                                            for (final p in _batteryPathOptions(
-                                              s.batteryPath,
-                                            ))
-                                              DropdownMenuItem(
-                                                value: p,
-                                                child: Text(
-                                                  p == null
-                                                      ? 'Sin pila'
-                                                      : _pilaCorta(p),
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: const TextStyle(
-                                                    fontSize: 12,
-                                                  ),
-                                                ),
-                                              ),
-                                          ],
-                                          onChanged: (v) =>
-                                              setState(() => s.batteryPath = v),
-                                        ),
-                                      ),
-                                    ],
-                                    IconButton(
-                                      tooltip: s.path,
-                                      icon: const Icon(
-                                        Icons.delete_outline,
-                                        size: 18,
-                                      ),
-                                      onPressed: () => setState(
-                                        () => _cfg.tempSensors.remove(s),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            if (_tempPathOptions.isNotEmpty) ...[
-                              const SizedBox(height: 4),
-                              DropdownButtonFormField<String?>(
-                                initialValue: null,
-                                decoration: const InputDecoration(
-                                  labelText: 'Añadir sensor de temperatura',
-                                  isDense: true,
-                                ),
-                                items: [
-                                  for (final p in _tempPathOptions)
-                                    DropdownMenuItem(
-                                      value: p,
-                                      child: Text(
-                                        p,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                ],
-                                onChanged: (v) {
-                                  if (v == null) return;
-                                  setState(
-                                    () => _cfg.tempSensors.add(
-                                      TempSensorSlot(
-                                        path: v,
-                                        label: TempSensorSlot.labelFromPath(v),
-                                        role: TempSensorSlot.roleFromPath(v),
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ],
-                            const SizedBox(height: 12),
-                            const Text('UMBRALES POR TIPO (°C)', style: lbl),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
+                            SettingsGroup(
+                              title: 'BATERÍAS',
+                              icon: Icons.battery_full,
                               children: [
-                                _numberField(
-                                  'Nevera aviso',
-                                  _cfg.fridgeWarnC,
-                                  (v) => _cfg.fridgeWarnC = v,
-                                ),
-                                _numberField(
-                                  'Nevera alarma',
-                                  _cfg.fridgeAlarmC,
-                                  (v) => _cfg.fridgeAlarmC = v,
-                                ),
-                                _numberField(
-                                  'Congelador aviso',
-                                  _cfg.freezerWarnC,
-                                  (v) => _cfg.freezerWarnC = v,
-                                ),
-                                _numberField(
-                                  'Congelador alarma',
-                                  _cfg.freezerAlarmC,
-                                  (v) => _cfg.freezerAlarmC = v,
-                                ),
-                                _numberField(
-                                  'Equipo aviso',
-                                  _cfg.equipmentWarnC,
-                                  (v) => _cfg.equipmentWarnC = v,
-                                ),
-                                _numberField(
-                                  'Equipo alarma',
-                                  _cfg.equipmentAlarmC,
-                                  (v) => _cfg.equipmentAlarmC = v,
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            const Text('TARJETAS OPCIONALES', style: lbl),
-                            const Text(
-                              'En automático solo se ven si el barco publica ese dato. Si un sensor está apagado ahora mismo, ponlo en Mostrar.',
-                              style: TextStyle(color: cMuted, fontSize: 12),
-                            ),
-                            const SizedBox(height: 6),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.bowthrusterPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Hélice de proa (voltaje)',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _bowthrusterOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'No tiene',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                                // Stacked, not side-by-side — two dropdowns
+                                // sharing a Row in this narrower right-hand
+                                // column overlapped/clipped each other.
+                                DropdownButtonFormField<String>(
+                                  initialValue: _cfg.batteryHouseId,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Servicio',
+                                    isDense: true,
                                   ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.bowthrusterPath = v),
-                            ),
-                            const SizedBox(height: 8),
-                            DropdownButtonFormField<String?>(
-                              initialValue: _cfg.dcLoadsPath,
-                              decoration: const InputDecoration(
-                                labelText: 'Consumos DC (potencia total)',
-                                isDense: true,
-                              ),
-                              items: [
-                                for (final p in _dcLoadsOptions)
-                                  DropdownMenuItem(
-                                    value: p,
-                                    child: Text(
-                                      p ?? 'No tiene',
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                              ],
-                              onChanged: (v) =>
-                                  setState(() => _cfg.dcLoadsPath = v),
-                            ),
-                            const SizedBox(height: 8),
-                            const SizedBox(height: 4),
-                            for (final card in kOptionalCardLabels.entries)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 3,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            card.value,
-                                            style: const TextStyle(
-                                              color: cText,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                          Text(
-                                            _cardStatusText(card.key),
-                                            style: TextStyle(
-                                              color: _cardDetected(card.key)
-                                                  ? cGreen
-                                                  : cMuted,
-                                              fontSize: 11,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    SegmentedButton<String>(
-                                      style: const ButtonStyle(
-                                        visualDensity: VisualDensity.compact,
-                                      ),
-                                      segments: const [
-                                        ButtonSegment(
-                                          value: 'auto',
-                                          label: Text(
-                                            'Auto',
-                                            style: TextStyle(fontSize: 11),
-                                          ),
+                                  items: [
+                                    for (final id in _batteryIdOptions)
+                                      DropdownMenuItem(
+                                        value: id,
+                                        child: Text(
+                                          id,
+                                          overflow: TextOverflow.ellipsis,
                                         ),
-                                        ButtonSegment(
-                                          value: 'on',
-                                          label: Text(
-                                            'Mostrar',
-                                            style: TextStyle(fontSize: 11),
-                                          ),
-                                        ),
-                                        ButtonSegment(
-                                          value: 'off',
-                                          label: Text(
-                                            'Ocultar',
-                                            style: TextStyle(fontSize: 11),
-                                          ),
-                                        ),
-                                      ],
-                                      selected: {
-                                        _cfg.cardVisibility[card.key] ?? 'auto',
-                                      },
-                                      onSelectionChanged: (v) => setState(
-                                        () => _cfg.cardVisibility[card.key] =
-                                            v.first,
                                       ),
-                                    ),
                                   ],
+                                  onChanged: (v) => setState(
+                                    () => _cfg.batteryHouseId =
+                                        v ?? _cfg.batteryHouseId,
+                                  ),
                                 ),
-                              ),
-                            const SizedBox(height: 12),
-                            const Text('TANQUES', style: lbl),
-                            const SizedBox(height: 4),
-                            if (_cfg.tanks.isEmpty)
-                              const Text(
-                                'Ninguno encontrado todavía — pulsa "Buscar sensores".',
-                                style: TextStyle(color: cMuted, fontSize: 12),
-                              ),
-                            for (final t in _cfg.tanks)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 2,
+                                const SizedBox(height: 8),
+                                DropdownButtonFormField<String>(
+                                  initialValue: _cfg.batteryStartId,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Arranque',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final id in _batteryIdOptions)
+                                      DropdownMenuItem(
+                                        value: id,
+                                        child: Text(
+                                          id,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) => setState(
+                                    () => _cfg.batteryStartId =
+                                        v ?? _cfg.batteryStartId,
+                                  ),
                                 ),
-                                child: Column(
-                                  children: [
-                                    Row(
+                                const SizedBox(height: 8),
+                                TextFormField(
+                                  initialValue: _cfg.batteryHouseCapacityAh == 0
+                                      ? ''
+                                      : _cfg.batteryHouseCapacityAh
+                                            .toStringAsFixed(0),
+                                  decoration: const InputDecoration(
+                                    labelText:
+                                        'Capacidad servicio (Ah, opcional)',
+                                    helperText: 'Permite estimar autonomía solo con corriente reciente.',
+                                    isDense: true,
+                                  ),
+                                  keyboardType:
+                                      const TextInputType.numberWithOptions(
+                                        decimal: true,
+                                      ),
+                                  onChanged: (raw) =>
+                                      _cfg.batteryHouseCapacityAh =
+                                          double.tryParse(
+                                            raw.replaceAll(',', '.'),
+                                          ) ??
+                                          0,
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'SOLAR',
+                              icon: Icons.solar_power_outlined,
+                              children: [
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.solarPath,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Path de potencia solar',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _solarOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguno',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.solarPath = v),
+                                ),
+                                const SizedBox(height: 8),
+                                // Optional — only for boats with two independent
+                                // solar controllers. With just the first path set,
+                                // nothing changes: that reading already is "the
+                                // total". With both, PWR shows the sum plus each
+                                // panel's own reading.
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.solarPath2,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Path del 2º controlador solar (opcional)',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _solarOptions2)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguno',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.solarPath2 = v),
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'PROFUNDIDAD',
+                              icon: Icons.waves,
+                              children: [
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.depthPath,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Path de profundidad',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _depthOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguno',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.depthPath = v),
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'HORAS DE MOTOR',
+                              icon: Icons.timer_outlined,
+                              children: [
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.enginePath,
+                                  decoration: const InputDecoration(
+                                    labelText:
+                                        'Path de horas de motor (runTime)',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _engineOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguno',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.enginePath = v),
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'NEVERAS (alarma y tarjeta NAV)',
+                              icon: Icons.kitchen_outlined,
+                              children: [
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.fridge1Path,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Nevera 1',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _fridgeOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguna',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.fridge1Path = v),
+                                ),
+                                const SizedBox(height: 8),
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.fridge2Path,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Nevera 2',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _fridgeOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'Ninguna',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.fridge2Path = v),
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'SENSORES DE TEMPERATURA',
+                              icon: Icons.thermostat,
+                              children: [
+                                const Text(
+                                  'Lo que se ve en la pantalla TMP. Aquí se ponen el nombre y la ubicación de cada sensor, neveras incluidas.',
+                                  style: TextStyle(color: cMuted, fontSize: 12),
+                                ),
+                                const SizedBox(height: 4),
+                                if (_cfg.tempSensors.isEmpty)
+                                  const Text(
+                                    'Ninguno todavía — pulsa "Buscar sensores".',
+                                    style: TextStyle(
+                                      color: cMuted,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                for (final s in _cfg.tempSensors)
+                                  Padding(
+                                    key: ValueKey(s.path),
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 2,
+                                    ),
+                                    child: Row(
                                       children: [
                                         Checkbox(
-                                          value: t.enabled,
+                                          value: s.enabled,
                                           onChanged: (v) => setState(
-                                            () => t.enabled = v ?? false,
+                                            () => s.enabled = v ?? false,
                                           ),
                                         ),
                                         Expanded(
-                                          flex: 2,
+                                          flex: 3,
                                           child: TextFormField(
-                                            initialValue: t.groupLabel,
+                                            initialValue: s.label,
                                             decoration: const InputDecoration(
                                               isDense: true,
                                               labelText: 'Nombre',
                                             ),
-                                            onChanged: (v) => t.groupLabel = v,
+                                            onChanged: (v) => s.label = v,
                                           ),
                                         ),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          '${t.type}.${t.id}',
-                                          style: const TextStyle(
-                                            color: cMuted,
-                                            fontSize: 11,
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          flex: 2,
+                                          child: TextFormField(
+                                            initialValue: s.note,
+                                            decoration: const InputDecoration(
+                                              isDense: true,
+                                              labelText: 'Ubicación',
+                                            ),
+                                            onChanged: (v) => s.note = v,
                                           ),
                                         ),
-                                        const SizedBox(width: 8),
-                                        // Tipo con el que se PINTA, que no
-                                        // siempre puede ser el de la ruta:
-                                        // signalk-venus-plugin solo traduce
-                                        // los fluidos 0-5 de Victron, así
-                                        // que una bombona de gas (tipo 8)
-                                        // llega como `unknown` aunque en el
-                                        // Venus esté puesta como LPG. Aquí
-                                        // se marca como tal sin tocar el
-                                        // path del que se lee el dato.
-                                        SizedBox(
-                                          width: 108,
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          flex: 2,
                                           child:
                                               DropdownButtonFormField<String>(
-                                                initialValue: t.kind,
-                                                isDense: true,
+                                                initialValue: s.role,
                                                 decoration:
                                                     const InputDecoration(
                                                       isDense: true,
-                                                      labelText: 'Mostrar como',
+                                                      labelText: 'Tipo',
                                                     ),
                                                 items: [
-                                                  for (final k in {
-                                                    t.type,
-                                                    'fuel',
-                                                    'lpg',
-                                                    'freshWater',
-                                                    'blackWater',
-                                                  })
+                                                  for (final e
+                                                      in kTempSensorRoles
+                                                          .entries)
                                                     DropdownMenuItem(
-                                                      value: k,
-                                                      child: Text(
-                                                        _tankKindLabels[k] ?? k,
-                                                        style: const TextStyle(
-                                                          fontSize: 12,
-                                                        ),
-                                                      ),
+                                                      value: e.key,
+                                                      child: Text(e.value),
                                                     ),
                                                 ],
-                                                onChanged: (v) => setState(() {
-                                                  // Guardamos null cuando
-                                                  // coincide con el tipo real,
-                                                  // para no fijar una
-                                                  // anulación innecesaria.
-                                                  t.displayType =
-                                                      (v == null || v == t.type)
-                                                      ? null
-                                                      : v;
-                                                }),
+                                                onChanged: (v) => setState(
+                                                  () => s.role = v ?? s.role,
+                                                ),
                                               ),
                                         ),
-                                        const SizedBox(width: 8),
-                                        SizedBox(
-                                          width: 80,
-                                          child: TextFormField(
-                                            initialValue: '${t.capacityL}',
-                                            decoration: const InputDecoration(
-                                              isDense: true,
-                                              labelText: 'Litros',
-                                            ),
-                                            keyboardType: TextInputType.number,
-                                            onChanged: (v) => t.capacityL =
-                                                int.tryParse(v) ?? t.capacityL,
+                                        if (_showsBatteryPicker(
+                                          s.batteryPath,
+                                        )) ...[
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            flex: 2,
+                                            child:
+                                                DropdownButtonFormField<
+                                                  String?
+                                                >(
+                                                  initialValue: s.batteryPath,
+                                                  isExpanded: true,
+                                                  decoration:
+                                                      const InputDecoration(
+                                                        isDense: true,
+                                                        labelText: 'Pila',
+                                                      ),
+                                                  items: [
+                                                    for (final p
+                                                        in _batteryPathOptions(
+                                                          s.batteryPath,
+                                                        ))
+                                                      DropdownMenuItem(
+                                                        value: p,
+                                                        child: Text(
+                                                          p == null
+                                                              ? 'Sin pila'
+                                                              : _pilaCorta(p),
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                          style:
+                                                              const TextStyle(
+                                                                fontSize: 12,
+                                                              ),
+                                                        ),
+                                                      ),
+                                                  ],
+                                                  onChanged: (v) => setState(
+                                                    () => s.batteryPath = v,
+                                                  ),
+                                                ),
+                                          ),
+                                        ],
+                                        IconButton(
+                                          tooltip: s.path,
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            size: 18,
+                                          ),
+                                          onPressed: () => setState(
+                                            () => _cfg.tempSensors.remove(s),
                                           ),
                                         ),
                                       ],
                                     ),
-                                    Padding(
-                                      padding: const EdgeInsets.only(
-                                        left: 48,
-                                        top: 4,
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Expanded(
-                                            child: Text(
-                                              t.capacityL > 0
-                                                  ? 'Capacidad configurada'
-                                                  : 'Sin calibrar capacidad',
-                                              style: TextStyle(
-                                                color: t.capacityL > 0
-                                                    ? cGreen
-                                                    : cOrange,
-                                                fontSize: 10,
-                                              ),
+                                  ),
+                                if (_tempPathOptions.isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  DropdownButtonFormField<String?>(
+                                    initialValue: null,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Añadir sensor de temperatura',
+                                      isDense: true,
+                                    ),
+                                    items: [
+                                      for (final p in _tempPathOptions)
+                                        DropdownMenuItem(
+                                          value: p,
+                                          child: Text(
+                                            p,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                    ],
+                                    onChanged: (v) {
+                                      if (v == null) return;
+                                      setState(
+                                        () => _cfg.tempSensors.add(
+                                          TempSensorSlot(
+                                            path: v,
+                                            label: TempSensorSlot.labelFromPath(
+                                              v,
+                                            ),
+                                            role: TempSensorSlot.roleFromPath(
+                                              v,
                                             ),
                                           ),
-                                          if (_showsBatteryPicker(
-                                            t.batteryPath,
-                                          ))
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'UMBRALES POR TIPO (°C)',
+                              icon: Icons.tune,
+                              children: [
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    _numberField(
+                                      'Nevera aviso',
+                                      _cfg.fridgeWarnC,
+                                      (v) => _cfg.fridgeWarnC = v,
+                                    ),
+                                    _numberField(
+                                      'Nevera alarma',
+                                      _cfg.fridgeAlarmC,
+                                      (v) => _cfg.fridgeAlarmC = v,
+                                    ),
+                                    _numberField(
+                                      'Congelador aviso',
+                                      _cfg.freezerWarnC,
+                                      (v) => _cfg.freezerWarnC = v,
+                                    ),
+                                    _numberField(
+                                      'Congelador alarma',
+                                      _cfg.freezerAlarmC,
+                                      (v) => _cfg.freezerAlarmC = v,
+                                    ),
+                                    _numberField(
+                                      'Equipo aviso',
+                                      _cfg.equipmentWarnC,
+                                      (v) => _cfg.equipmentWarnC = v,
+                                    ),
+                                    _numberField(
+                                      'Equipo alarma',
+                                      _cfg.equipmentAlarmC,
+                                      (v) => _cfg.equipmentAlarmC = v,
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'TARJETAS OPCIONALES',
+                              icon: Icons.dashboard_customize_outlined,
+                              children: [
+                                const Text(
+                                  'En automático solo se ven si el barco publica ese dato. Si un sensor está apagado ahora mismo, ponlo en Mostrar.',
+                                  style: TextStyle(color: cMuted, fontSize: 12),
+                                ),
+                                const SizedBox(height: 6),
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.bowthrusterPath,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Hélice de proa (voltaje)',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _bowthrusterOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'No tiene',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.bowthrusterPath = v),
+                                ),
+                                const SizedBox(height: 8),
+                                DropdownButtonFormField<String?>(
+                                  initialValue: _cfg.dcLoadsPath,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Consumos DC (potencia total)',
+                                    isDense: true,
+                                  ),
+                                  items: [
+                                    for (final p in _dcLoadsOptions)
+                                      DropdownMenuItem(
+                                        value: p,
+                                        child: Text(
+                                          p ?? 'No tiene',
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _cfg.dcLoadsPath = v),
+                                ),
+                                const SizedBox(height: 8),
+                                const SizedBox(height: 4),
+                                for (final card in kOptionalCardLabels.entries)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 3,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                card.value,
+                                                style: const TextStyle(
+                                                  color: cText,
+                                                  fontSize: 13,
+                                                ),
+                                              ),
+                                              Text(
+                                                _cardStatusText(card.key),
+                                                style: TextStyle(
+                                                  color: _cardDetected(card.key)
+                                                      ? cGreen
+                                                      : cMuted,
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        SegmentedButton<String>(
+                                          style: const ButtonStyle(
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                          ),
+                                          segments: const [
+                                            ButtonSegment(
+                                              value: 'auto',
+                                              label: Text(
+                                                'Auto',
+                                                style: TextStyle(fontSize: 11),
+                                              ),
+                                            ),
+                                            ButtonSegment(
+                                              value: 'on',
+                                              label: Text(
+                                                'Mostrar',
+                                                style: TextStyle(fontSize: 11),
+                                              ),
+                                            ),
+                                            ButtonSegment(
+                                              value: 'off',
+                                              label: Text(
+                                                'Ocultar',
+                                                style: TextStyle(fontSize: 11),
+                                              ),
+                                            ),
+                                          ],
+                                          selected: {
+                                            _cfg.cardVisibility[card.key] ??
+                                                'auto',
+                                          },
+                                          onSelectionChanged: (v) => setState(
+                                            () =>
+                                                _cfg.cardVisibility[card.key] =
+                                                    v.first,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            SettingsGroup(
+                              title: 'TANQUES',
+                              icon: Icons.water_drop_outlined,
+                              children: [
+                                if (_cfg.tanks.isEmpty)
+                                  const Text(
+                                    'Ninguno encontrado todavía — pulsa "Buscar sensores".',
+                                    style: TextStyle(
+                                      color: cMuted,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                for (final t in _cfg.tanks)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 2,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Checkbox(
+                                              value: t.enabled,
+                                              onChanged: (v) => setState(
+                                                () => t.enabled = v ?? false,
+                                              ),
+                                            ),
+                                            Expanded(
+                                              flex: 2,
+                                              child: TextFormField(
+                                                initialValue: t.groupLabel,
+                                                decoration:
+                                                    const InputDecoration(
+                                                      isDense: true,
+                                                      labelText: 'Nombre',
+                                                    ),
+                                                onChanged: (v) =>
+                                                    t.groupLabel = v,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              '${t.type}.${t.id}',
+                                              style: const TextStyle(
+                                                color: cMuted,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            // Tipo con el que se PINTA, que no
+                                            // siempre puede ser el de la ruta:
+                                            // signalk-venus-plugin solo traduce
+                                            // los fluidos 0-5 de Victron, así
+                                            // que una bombona de gas (tipo 8)
+                                            // llega como `unknown` aunque en el
+                                            // Venus esté puesta como LPG. Aquí
+                                            // se marca como tal sin tocar el
+                                            // path del que se lee el dato.
                                             SizedBox(
-                                              width: 150,
+                                              width: 108,
                                               child:
                                                   DropdownButtonFormField<
-                                                    String?
+                                                    String
                                                   >(
+                                                    initialValue: t.kind,
+                                                    isDense: true,
+                                                    decoration:
+                                                        const InputDecoration(
+                                                          isDense: true,
+                                                          labelText:
+                                                              'Mostrar como',
+                                                        ),
+                                                    items: [
+                                                      for (final k in {
+                                                        t.type,
+                                                        'fuel',
+                                                        'lpg',
+                                                        'freshWater',
+                                                        'blackWater',
+                                                      })
+                                                        DropdownMenuItem(
+                                                          value: k,
+                                                          child: Text(
+                                                            _tankKindLabels[k] ??
+                                                                k,
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 12,
+                                                                ),
+                                                          ),
+                                                        ),
+                                                    ],
+                                                    onChanged: (v) => setState(() {
+                                                      // Guardamos null cuando
+                                                      // coincide con el tipo real,
+                                                      // para no fijar una
+                                                      // anulación innecesaria.
+                                                      t.displayType =
+                                                          (v == null ||
+                                                              v == t.type)
+                                                          ? null
+                                                          : v;
+                                                    }),
+                                                  ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            SizedBox(
+                                              width: 80,
+                                              child: TextFormField(
+                                                initialValue: '${t.capacityL}',
+                                                decoration:
+                                                    const InputDecoration(
+                                                      isDense: true,
+                                                      labelText: 'Litros',
+                                                    ),
+                                                keyboardType:
+                                                    TextInputType.number,
+                                                onChanged: (v) => t.capacityL =
+                                                    int.tryParse(v) ??
+                                                    t.capacityL,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            left: 48,
+                                            top: 4,
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  t.capacityL > 0
+                                                      ? 'Capacidad configurada'
+                                                      : 'Sin calibrar capacidad',
+                                                  style: TextStyle(
+                                                    color: t.capacityL > 0
+                                                        ? cGreen
+                                                        : cOrange,
+                                                    fontSize: 10,
+                                                  ),
+                                                ),
+                                              ),
+                                              if (_showsBatteryPicker(
+                                                t.batteryPath,
+                                              ))
+                                                SizedBox(
+                                                  width: 150,
+                                                  child: DropdownButtonFormField<String?>(
                                                     initialValue: t.batteryPath,
                                                     isExpanded: true,
                                                     decoration:
@@ -1873,53 +1928,65 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                                       () => t.batteryPath = v,
                                                     ),
                                                   ),
-                                            ),
-                                          const SizedBox(width: 8),
-                                          SizedBox(
-                                            width: 94,
-                                            child: TextFormField(
-                                              initialValue:
-                                                  '${t.warningPct ?? (t.type == 'blackWater' ? 75 : 30)}',
-                                              decoration: const InputDecoration(
-                                                isDense: true,
-                                                labelText: 'Aviso %',
+                                                ),
+                                              const SizedBox(width: 8),
+                                              SizedBox(
+                                                width: 94,
+                                                child: TextFormField(
+                                                  initialValue:
+                                                      '${t.warningPct ?? (t.type == 'blackWater' ? 75 : 30)}',
+                                                  decoration:
+                                                      const InputDecoration(
+                                                        isDense: true,
+                                                        labelText: 'Aviso %',
+                                                      ),
+                                                  keyboardType:
+                                                      const TextInputType.numberWithOptions(
+                                                        decimal: true,
+                                                      ),
+                                                  onChanged: (raw) =>
+                                                      t.warningPct =
+                                                          double.tryParse(
+                                                            raw.replaceAll(
+                                                              ',',
+                                                              '.',
+                                                            ),
+                                                          ),
+                                                ),
                                               ),
-                                              keyboardType:
-                                                  const TextInputType.numberWithOptions(
-                                                    decimal: true,
-                                                  ),
-                                              onChanged: (raw) => t.warningPct =
-                                                  double.tryParse(
-                                                    raw.replaceAll(',', '.'),
-                                                  ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          SizedBox(
-                                            width: 94,
-                                            child: TextFormField(
-                                              initialValue:
-                                                  '${t.alarmPct ?? (t.type == 'blackWater' ? 90 : 15)}',
-                                              decoration: const InputDecoration(
-                                                isDense: true,
-                                                labelText: 'Alarma %',
+                                              const SizedBox(width: 8),
+                                              SizedBox(
+                                                width: 94,
+                                                child: TextFormField(
+                                                  initialValue:
+                                                      '${t.alarmPct ?? (t.type == 'blackWater' ? 90 : 15)}',
+                                                  decoration:
+                                                      const InputDecoration(
+                                                        isDense: true,
+                                                        labelText: 'Alarma %',
+                                                      ),
+                                                  keyboardType:
+                                                      const TextInputType.numberWithOptions(
+                                                        decimal: true,
+                                                      ),
+                                                  onChanged: (raw) =>
+                                                      t.alarmPct =
+                                                          double.tryParse(
+                                                            raw.replaceAll(
+                                                              ',',
+                                                              '.',
+                                                            ),
+                                                          ),
+                                                ),
                                               ),
-                                              keyboardType:
-                                                  const TextInputType.numberWithOptions(
-                                                    decimal: true,
-                                                  ),
-                                              onChanged: (raw) =>
-                                                  t.alarmPct = double.tryParse(
-                                                    raw.replaceAll(',', '.'),
-                                                  ),
-                                            ),
+                                            ],
                                           ),
-                                        ],
-                                      ),
+                                        ),
+                                      ],
                                     ),
-                                  ],
-                                ),
-                              ),
+                                  ),
+                              ],
+                            ),
                           ],
                         ),
                       ),

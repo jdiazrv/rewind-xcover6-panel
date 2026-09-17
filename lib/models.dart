@@ -2437,6 +2437,52 @@ class AnchorTrackPoint {
   final double lon;
 }
 
+/// Convierte las filas de /signalk/v2/api/history/values en puntos de traza.
+///
+/// Cada proveedor de histórico contesta la posición a su manera y los dos que
+/// usamos no coinciden:
+///
+///  - signalk-to-influxdb2 (REWIND en lysmarine) devuelve una lista en orden
+///    GeoJSON: `[lon, lat]`.
+///  - el grabador del propio plugin REWIND (QUINTO REAL y cualquier barco sin
+///    InfluxDB) devuelve el objeto `{latitude, longitude}`, que es la forma
+///    que usan las deltas en vivo.
+///
+/// La app solo entendía la lista, así que entrando a un barco servido por el
+/// grabador la traza de ANC salía vacía aunque el servidor contestara 200 con
+/// 660 filas buenas. Aceptamos las dos y así vale para cualquier proveedor.
+List<AnchorTrackPoint> anchorTrackFromHistoryRows(List<dynamic> rows) {
+  double? asDouble(dynamic v) =>
+      v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '');
+  final out = <AnchorTrackPoint>[];
+  for (final row in rows) {
+    if (row is! List || row.length < 2) continue;
+    final t = DateTime.tryParse(row[0]?.toString() ?? '');
+    if (t == null) continue;
+    // Una consulta con varios paths trae una columna por path: nos quedamos
+    // con la primera que tenga forma de posición.
+    for (final cell in row.skip(1)) {
+      double? lat;
+      double? lon;
+      if (cell is List && cell.length >= 2) {
+        lon = asDouble(cell[0]);
+        lat = asDouble(cell[1]);
+      } else if (cell is Map) {
+        lat = asDouble(cell['latitude']);
+        lon = asDouble(cell['longitude']);
+      }
+      if (lat == null || lon == null) continue;
+      // Descarta 0,0 y cualquier cosa fuera del mundo: una fila corrupta
+      // pintaría una raya desde el fondeadero hasta el golfo de Guinea.
+      if (lat.abs() > 90 || lon.abs() > 180) continue;
+      if (lat == 0 && lon == 0) continue;
+      out.add(AnchorTrackPoint(t, lat, lon));
+      break;
+    }
+  }
+  return out;
+}
+
 // ─── Estado de baterías sin shunt (arranque / propulsor de proa) ─────────
 //
 // Estas dos viven permanentemente en FLOTACIÓN: el cargador impone el
