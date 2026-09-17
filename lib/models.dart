@@ -1070,6 +1070,12 @@ class SignalKModel {
   // tener que declarar un campo por sensor: la pantalla TMP se construye
   // desde la lista configurada, que es distinta en cada barco.
   final Map<String, double> tempKByPath = {};
+
+  /// Último voltaje de cada ruta `*.voltage`, igual que tempKByPath y por la
+  /// misma razón: la pila de un sensor inalámbrico no tiene campo propio
+  /// porque cada barco nombra los suyos a su manera. Lo leen las tarjetas de
+  /// temperatura y de tanque (ver sensorBatteryPercent).
+  final Map<String, double> voltsByPath = {};
   // Wind
   double? awsKn;
   double? awaDeg;
@@ -1270,6 +1276,7 @@ class SignalKModel {
     fridge1TempK = null;
     fridge2TempK = null;
     tempKByPath.clear();
+    voltsByPath.clear();
     awsKn = null;
     awaDeg = null;
     twaDeg = null;
@@ -1353,7 +1360,12 @@ class TankSlot {
     this.alarmPct,
     this.calibrated = false,
     this.displayType,
+    this.batteryPath,
   });
+
+  /// Igual que en TempSensorSlot: los tanques con sensor inalámbrico (Mopeka)
+  /// publican la pila aparte, y conviene verla junto al nivel.
+  String? batteryPath;
   String type; // 'freshWater' | 'fuel' | 'blackWater' | ...
   // Tipo con el que se PINTA (icono, color, nombre de categoría, orden y
   // agrupación), cuando no coincide con el que trae la ruta de Signal K.
@@ -1388,6 +1400,7 @@ class TankSlot {
     'alarmPct': alarmPct,
     'calibrated': calibrated,
     'displayType': displayType,
+    'batteryPath': batteryPath,
   };
   factory TankSlot.fromJson(Map<String, dynamic> j) => TankSlot(
     type: j['type'] as String,
@@ -1399,6 +1412,7 @@ class TankSlot {
     alarmPct: (j['alarmPct'] as num?)?.toDouble(),
     calibrated: j['calibrated'] as bool? ?? false,
     displayType: j['displayType'] as String?,
+    batteryPath: j['batteryPath'] as String?,
   );
 }
 
@@ -1427,9 +1441,16 @@ class TempSensorSlot {
     this.note = '',
     this.role = 'equipo',
     this.enabled = true,
+    this.batteryPath,
   });
   String path;
+
+  /// Voltaje de la pila del sensor, cuando lo publica (los Mopeka y los
+  /// RuuviTag lo hacen bajo `sensors.<nombre>.battery.voltage`). Se enseña en
+  /// la propia tarjeta: una pila agotada explica una lectura congelada.
+  String? batteryPath;
   String label;
+
   /// Detalle corto bajo el número ("tapa", "puerta", "sala de máquinas").
   String note;
   String role;
@@ -1441,6 +1462,7 @@ class TempSensorSlot {
     'note': note,
     'role': role,
     'enabled': enabled,
+    'batteryPath': batteryPath,
   };
 
   factory TempSensorSlot.fromJson(Map<String, dynamic> j) => TempSensorSlot(
@@ -1451,6 +1473,7 @@ class TempSensorSlot {
         ? j['role'] as String
         : 'equipo',
     enabled: j['enabled'] as bool? ?? true,
+    batteryPath: j['batteryPath'] as String?,
   );
 
   /// Tipo probable a partir del nombre de la ruta, solo como punto de
@@ -1475,10 +1498,149 @@ class TempSensorSlot {
   static String labelFromPath(String path) {
     final parts = path.split('.');
     final name = parts.length >= 2 ? parts[parts.length - 2] : path;
+    // El Cerbo numera sus entradas: environment.venus.43.temperature daba de
+    // título "43", que no es un nombre sino un número suelto en la tarjeta
+    // (visto en REWIND, 2026-09-17).
+    if (path.startsWith('environment.venus.')) return 'Venus $name';
     final pretty = name.replaceAll('_', ' ').trim();
     if (pretty.isEmpty) return path;
     return pretty[0].toUpperCase() + pretty.substring(1);
   }
+}
+
+/// Apaga las temperaturas que el Cerbo republica duplicando a otra sonda.
+///
+/// `environment.venus.<id>.temperature` es la misma sonda que el barco ya
+/// publica con su nombre: en REWIND, venus.41 es fridge_1, venus.43 el cuadro
+/// eléctrico y venus.45 la del mar —comprobado valor a valor contra el barco
+/// (2026-09-17)—. Una versión anterior las guardó activas, así que TMP salía
+/// con las tarjetas repetidas y tituladas con un número suelto.
+///
+/// Se APAGAN, no se borran: en un barco cuyas únicas sondas sean las del
+/// Cerbo hacen falta, y por eso solo actúa cuando hay alguna con nombre
+/// activa. El título que es solo un número tampoco lo puso nadie a mano.
+List<TempSensorSlot> silenceDuplicateVenusTemps(List<TempSensorSlot> slots) {
+  bool esVenus(TempSensorSlot s) => s.path.startsWith('environment.venus.');
+  for (final s in slots.where(esVenus)) {
+    if (RegExp(r'^\d+$').hasMatch(s.label.trim())) {
+      s.label = TempSensorSlot.labelFromPath(s.path);
+    }
+  }
+  if (!slots.any((s) => !esVenus(s) && s.enabled)) return slots;
+  for (final s in slots.where(esVenus)) {
+    s.enabled = false;
+  }
+  return slots;
+}
+
+/// Carga aproximada de la pila de un sensor inalámbrico, en %.
+///
+/// Los Mopeka y la mayoría de sensores BLE llevan una CR2032: llena ronda los
+/// 3,0 V y por debajo de 2,2 V ya falla y deja de emitir (en AREA SECADA, el
+/// sensor de agua va a 2,56 V y emite muy espaciado). Es una estimación, no
+/// una medida: sirve para saber si hay que cambiarla, no para presumir.
+double? sensorBatteryPercent(
+  double? volts, {
+  double emptyV = 2.2,
+  double fullV = 3.0,
+}) {
+  if (volts == null || !volts.isFinite || fullV <= emptyV) return null;
+  final pct = (volts - emptyV) / (fullV - emptyV) * 100;
+  return pct.clamp(0, 100).toDouble();
+}
+
+/// Busca, entre las rutas de pila que publica el barco, la que corresponde a
+/// un sensor concreto.
+///
+/// No hay ninguna relación estructural entre `tanks.freshWater.0` y
+/// `sensors.mopeka_water_tank.battery.voltage`: lo único que las une es el
+/// nombre que puso quien lo instaló. Se comparan las palabras de una y otra, y
+/// si no hay una coincidencia clara se devuelve null antes que adivinar mal.
+String? guessSensorBatteryPath(
+  String sensorPath,
+  String label,
+  Iterable<String> candidates,
+) {
+  String normaliza(String s) => s
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .replaceAll(
+        RegExp(
+          r'\b(sensors?|battery|voltage|tanks?|environment|temperature|0|1)\b',
+        ),
+        ' ',
+      )
+      .trim();
+  final propias = normaliza('$sensorPath $label')
+      .split(RegExp(r'\s+'))
+      .where((w) => w.length >= 4)
+      .toSet();
+  if (propias.isEmpty) return null;
+  String? mejor;
+  var mejorPuntos = 0;
+  for (final c in candidates) {
+    final suyas = normaliza(c).split(RegExp(r'\s+')).toSet();
+    final puntos = propias
+        .where((w) => suyas.any((s) => s.contains(w) || w.contains(s)))
+        .length;
+    if (puntos > mejorPuntos) {
+      mejorPuntos = puntos;
+      mejor = c;
+    }
+  }
+  return mejorPuntos > 0 ? mejor : null;
+}
+
+/// Cuánto lleva el motor en marcha AHORA, para la pantalla de motor.
+///
+/// Con el motor encendido, lo que interesa no es cuándo fue el uso anterior
+/// sino cuánto lleva funcionando este (petición en vivo 2026-09-17).
+String engineCurrentRunLabel(DateTime startedAt, DateTime now) {
+  final local = startedAt.toLocal();
+  final hh = local.hour.toString().padLeft(2, '0');
+  final mm = local.minute.toString().padLeft(2, '0');
+  final elapsed = now.difference(startedAt);
+  final minutes = elapsed.inMinutes;
+  final texto = minutes < 60
+      ? '${minutes < 1 ? '<1' : '$minutes'} min'
+      : '${elapsed.inHours} h ${(minutes % 60).toString().padLeft(2, '0')} min';
+  return 'En marcha desde $hh:$mm · $texto';
+}
+
+/// Identificadores de pantalla que la app conoce. Sirve para validar lo que
+/// llega de fuera (por ejemplo, la URL con la que se abre la webapp).
+const kPageIdCatalogue = <String>[
+  'NAV',
+  'VNT',
+  'RES',
+  'PWR',
+  'TMP',
+  'TNK',
+  'MET',
+  'PRON',
+  'MAR',
+  'ANC',
+  'MAP',
+  'AIS',
+  'CFG',
+];
+
+/// Pantalla con la que debe abrirse la webapp, tomada de la URL.
+///
+/// Pensado para los arranques en modo quiosco: un Raspberry que enciende
+/// mostrando directamente la pantalla que interesa a bordo, por ejemplo
+/// `…/rewind-xcover6-panel/?page=PWR`. Acepta también `#page=PWR` porque los
+/// lanzadores suelen conservar mejor el fragmento.
+String? initialPageIdFromUrl(Uri uri) {
+  String? raw = uri.queryParameters['page'];
+  if (raw == null || raw.isEmpty) {
+    final fragment = uri.fragment;
+    final match = RegExp(r'(?:^|[?&/])page=([A-Za-z]+)').firstMatch(fragment);
+    raw = match?.group(1);
+  }
+  if (raw == null || raw.isEmpty) return null;
+  final id = raw.toUpperCase();
+  return kPageIdCatalogue.contains(id) ? id : null;
 }
 
 /// Tarjetas que solo tienen sentido en algunos barcos, con la ruta que
@@ -1505,17 +1667,22 @@ List<String> skDetectablePaths(List<String> allPaths) =>
               p.startsWith('electrical.') ||
               p.startsWith('tanks.') ||
               p.startsWith('propulsion.') ||
-              p.startsWith('environment.'),
+              p.startsWith('environment.') ||
+              // Los sensores inalámbricos publican aquí su pila
+              // (`sensors.<nombre>.battery.voltage`): son cuatro rutas y sin
+              // ellas no se puede ofrecer en CFG qué pila va con qué sensor.
+              p.startsWith('sensors.'),
         )
         .toSet()
         .toList()
       ..sort();
 
-bool optionalCardVisible(String mode, {required bool detected}) => switch (mode) {
-  'on' => true,
-  'off' => false,
-  _ => detected,
-};
+bool optionalCardVisible(String mode, {required bool detected}) =>
+    switch (mode) {
+      'on' => true,
+      'off' => false,
+      _ => detected,
+    };
 
 /// Rutas de temperatura que tiene sentido ofrecer en TMP. Se dejan fuera las
 /// que ya tienen su sitio propio: las baterías se ven en PWR, el motor en su
@@ -1779,6 +1946,9 @@ class SensorConfig {
           ),
       ];
     }
+    // Las tarjetas repetidas del Cerbo se apagan al releer, así que la
+    // limpieza llega también a la configuración ya guardada en el barco.
+    c.tempSensors = silenceDuplicateVenusTemps(c.tempSensors);
     // Una configuración anterior a estos campos conserva las rutas de
     // REWIND: no se puede distinguir "no lo tengo" de "aún no se ha
     // guardado", y quitarlas escondería tarjetas que hoy se ven.
@@ -2082,6 +2252,11 @@ class SkDiscovery {
   final List<String> enginePaths = [];
   final List<TankCandidate> tanks = [];
   final List<String> allPaths = [];
+
+  /// Rutas que el histórico conoce pero que el árbol no tiene ahora mismo:
+  /// sensores instalados que llevan tiempo sin emitir. Van incluidas en
+  /// [allPaths]; esta lista solo sirve para poder decirlo en pantalla.
+  final List<String> silentPaths = [];
   bool hasOutsideTemp = false;
   bool hasOutsidePressure = false;
 }
@@ -3651,6 +3826,10 @@ class SettingsModel {
   // swipe cycle entirely instead of it always sitting there as an empty
   // simulation preview (see _kMotorPanelAlwaysVisible in main.dart).
   bool motorPanelEnabled = true;
+  // Pantalla RESUMEN: un compendio de todo lo que el barco publica, pensada
+  // para barcos con pocos sensores. Apagada por defecto para no añadir una
+  // pantalla a quien ya tiene las suyas llenas.
+  bool summaryPageEnabled = false;
   // Whether NAV's header auto-hides after a few seconds like ANC/MAP
   // always do (those two are non-negotiable — a WebView needs the full
   // screen). NAV doesn't have that constraint, so it's the user's call;

@@ -129,6 +129,8 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.onMuteAllAlarms,
     this.allowSimulation = false,
     this.lastRunLabel,
+    this.currentRunLabel,
+    this.onShowRuns,
   });
 
   final NavCardData engineHours;
@@ -136,6 +138,13 @@ class PremiumMotorEnginePanel extends StatefulWidget {
   /// Inicio, parada y duración del último uso, deducidos del histórico de
   /// RPM o, como alternativa, de los incrementos del cuentahoras.
   final String? lastRunLabel;
+
+  /// Cuánto lleva en marcha el arranque EN CURSO. Cuando existe, sustituye al
+  /// último uso: con el motor girando es lo que uno mira.
+  final String? currentRunLabel;
+
+  /// Abre la lista/gráfico de los últimos usos.
+  final VoidCallback? onShowRuns;
   // Real signal derived from fresh propulsion.<id>.revolutions by
   // _DashboardState._engineRunning.
   final bool engineRunning;
@@ -1122,21 +1131,43 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   /// trabajado en total; esto dice si fue ayer o hace tres meses, que es
   /// lo que uno se pregunta de verdad al mirar el panel.
   Widget? _lastRunStrip() {
+    // Con el motor girando, el uso anterior no aporta nada: lo que se mira es
+    // cuánto lleva funcionando este (petición en vivo 2026-09-17).
+    final current = widget.currentRunLabel;
     final last = widget.lastRunLabel;
-    if (last == null) return null;
+    final texto = current ?? (last == null ? null : 'Último uso: $last');
+    if (texto == null) return null;
+    final strip = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            texto,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: current != null ? cGreen : cMuted,
+              fontSize: 10.5,
+              fontWeight: current != null ? FontWeight.w800 : FontWeight.w600,
+              height: 1.15,
+            ),
+          ),
+        ),
+        if (widget.onShowRuns != null) ...[
+          const SizedBox(width: 4),
+          Icon(Icons.history, size: 12, color: cMuted.withValues(alpha: 0.8)),
+        ],
+      ],
+    );
     return Padding(
       padding: const EdgeInsets.only(left: 4, bottom: 2),
-      child: Text(
-        'Último uso: $last',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
-          color: cMuted,
-          fontSize: 10.5,
-          fontWeight: FontWeight.w600,
-          height: 1.15,
-        ),
-      ),
+      child: widget.onShowRuns == null
+          ? strip
+          : InkWell(
+              onTap: widget.onShowRuns,
+              borderRadius: BorderRadius.circular(6),
+              child: strip,
+            ),
     );
   }
 

@@ -405,7 +405,8 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       // Un barco que no publica la hélice de proa no debe heredar la ruta
       // de REWIND como si fuera suya.
       final found = _cfg.detectedPaths.firstWhere(
-        (p) => p.toLowerCase().contains('bowthruster') && p.endsWith('.voltage'),
+        (p) =>
+            p.toLowerCase().contains('bowthruster') && p.endsWith('.voltage'),
         orElse: () => '',
       );
       _cfg.bowthrusterPath = found.isEmpty ? null : found;
@@ -434,13 +435,26 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
       _cfg.tempSensors.add(
         TempSensorSlot(
           path: path,
-          label: esVenus
-              ? 'Venus ${TempSensorSlot.labelFromPath(path)}'
-              : TempSensorSlot.labelFromPath(path),
+          // labelFromPath ya antepone "Venus" a las entradas del Cerbo.
+          label: TempSensorSlot.labelFromPath(path),
           role: TempSensorSlot.roleFromPath(path),
           enabled: !esVenus,
         ),
       );
+    }
+    // Pilas de los sensores inalámbricos: qué pila va con qué tarjeta solo lo
+    // dice el nombre que puso quien los instaló, así que se propone lo que
+    // más se parece y queda corregible en la lista de arriba.
+    final pilas = _cfg.detectedPaths
+        .where((p) => p.startsWith('sensors.') && p.endsWith('.voltage'))
+        .toList();
+    if (pilas.isNotEmpty) {
+      for (final s in _cfg.tempSensors) {
+        s.batteryPath ??= guessSensorBatteryPath(s.path, s.label, pilas);
+      }
+      for (final t in _cfg.tanks) {
+        t.batteryPath ??= guessSensorBatteryPath(t.skPath, t.groupLabel, pilas);
+      }
     }
     if (_cfg.depthPath == null && d.depthPaths.isNotEmpty) {
       _cfg.depthPath = d.depthPaths[0];
@@ -448,6 +462,39 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     if (_cfg.enginePath == null && d.enginePaths.isNotEmpty) {
       _cfg.enginePath = d.enginePaths[0];
     }
+  }
+
+  // Candidatas para la pila de un sensor inalámbrico: lo que el barco publica
+  // bajo `sensors.<nombre>.battery.voltage` (Mopeka, RuuviTag). Se ofrecen
+  // todas porque el nombre lo puso quien instaló el sensor y no hay forma
+  // fiable de deducir a qué tanque o nevera pertenece cada una.
+  List<String> get _batteryPathsFound =>
+      _cfg.detectedPaths
+          .where((p) => p.startsWith('sensors.') && p.endsWith('.voltage'))
+          .toList()
+        ..sort();
+
+  /// La ruta ya configurada entra SIEMPRE en la lista aunque no esté entre las
+  /// detectadas: puede venir de otro dispositivo por la configuración
+  /// compartida, o de un barrido anterior, y un desplegable cuyo valor no está
+  /// entre sus opciones no se pinta, revienta.
+  List<String?> _batteryPathOptions(String? current) => [
+    null,
+    ..._batteryPathsFound,
+    if (current != null &&
+        current.isNotEmpty &&
+        !_batteryPathsFound.contains(current))
+      current,
+  ];
+
+  bool _showsBatteryPicker(String? current) =>
+      _batteryPathsFound.isNotEmpty || (current != null && current.isNotEmpty);
+
+  /// `sensors.mopeka_water_tank.battery.voltage` → `mopeka_water_tank`: en un
+  /// desplegable estrecho la ruta entera no dice nada, el nombre sí.
+  String _pilaCorta(String path) {
+    final parts = path.split('.');
+    return parts.length >= 2 ? parts[1] : path;
   }
 
   // Candidatas para la hélice de proa: cualquier voltaje de batería que
@@ -495,9 +542,10 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   // optionalCardVisible.
   String? _cardPath(String id) => switch (id) {
     'bowthruster' => _cfg.bowthrusterPath,
-    'starterBattery' => _cfg.batteryStartId.isEmpty
-        ? null
-        : 'electrical.batteries.${_cfg.batteryStartId}.voltage',
+    'starterBattery' =>
+      _cfg.batteryStartId.isEmpty
+          ? null
+          : 'electrical.batteries.${_cfg.batteryStartId}.voltage',
     'dcLoads' => _cfg.dcLoadsPath,
     'solar' => _cfg.solarPath,
     _ => null,
@@ -524,12 +572,13 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   // fuera porque ya se ven en su propia pantalla.
   List<String> get _tempPathOptions {
     final used = {for (final s in _cfg.tempSensors) s.path};
-    final found = (_discovery?.allPaths ?? const <String>[])
-        .where(isConfigurableTempPath)
-        .where((p) => !used.contains(p))
-        .toSet()
-        .toList()
-      ..sort();
+    final found =
+        (_discovery?.allPaths ?? const <String>[])
+            .where(isConfigurableTempPath)
+            .where((p) => !used.contains(p))
+            .toSet()
+            .toList()
+          ..sort();
     return found;
   }
 
@@ -925,7 +974,8 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
           children: [
             Expanded(
               child: Text(
-                '${displayEntries.length} de ${_discovery!.allPaths.length} paths',
+                '${displayEntries.length} de ${_discovery!.allPaths.length} paths'
+                '${_discovery!.silentPaths.isEmpty ? '' : ' · ${_discovery!.silentPaths.length} del histórico, sin emitir ahora'}',
                 style: const TextStyle(
                   color: cMuted,
                   fontSize: 12,
@@ -1302,7 +1352,10 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                   setState(() => _cfg.enginePath = v),
                             ),
                             const SizedBox(height: 12),
-                            const Text('NEVERAS (alarma y tarjeta NAV)', style: lbl),
+                            const Text(
+                              'NEVERAS (alarma y tarjeta NAV)',
+                              style: lbl,
+                            ),
                             const SizedBox(height: 4),
                             DropdownButtonFormField<String?>(
                               initialValue: _cfg.fridge1Path,
@@ -1414,6 +1467,40 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                         ),
                                       ),
                                     ),
+                                    if (_showsBatteryPicker(s.batteryPath)) ...[
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        flex: 2,
+                                        child: DropdownButtonFormField<String?>(
+                                          initialValue: s.batteryPath,
+                                          isExpanded: true,
+                                          decoration: const InputDecoration(
+                                            isDense: true,
+                                            labelText: 'Pila',
+                                          ),
+                                          items: [
+                                            for (final p in _batteryPathOptions(
+                                              s.batteryPath,
+                                            ))
+                                              DropdownMenuItem(
+                                                value: p,
+                                                child: Text(
+                                                  p == null
+                                                      ? 'Sin pila'
+                                                      : _pilaCorta(p),
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                          onChanged: (v) =>
+                                              setState(() => s.batteryPath = v),
+                                        ),
+                                      ),
+                                    ],
                                     IconButton(
                                       tooltip: s.path,
                                       icon: const Icon(
@@ -1460,10 +1547,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                               ),
                             ],
                             const SizedBox(height: 12),
-                            const Text(
-                              'UMBRALES POR TIPO (°C)',
-                              style: lbl,
-                            ),
+                            const Text('UMBRALES POR TIPO (°C)', style: lbl),
                             const SizedBox(height: 4),
                             Wrap(
                               spacing: 8,
@@ -1748,6 +1832,49 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
                                               ),
                                             ),
                                           ),
+                                          if (_showsBatteryPicker(
+                                            t.batteryPath,
+                                          ))
+                                            SizedBox(
+                                              width: 150,
+                                              child:
+                                                  DropdownButtonFormField<
+                                                    String?
+                                                  >(
+                                                    initialValue: t.batteryPath,
+                                                    isExpanded: true,
+                                                    decoration:
+                                                        const InputDecoration(
+                                                          isDense: true,
+                                                          labelText: 'Pila',
+                                                        ),
+                                                    items: [
+                                                      for (final p
+                                                          in _batteryPathOptions(
+                                                            t.batteryPath,
+                                                          ))
+                                                        DropdownMenuItem(
+                                                          value: p,
+                                                          child: Text(
+                                                            p == null
+                                                                ? 'Sin pila'
+                                                                : _pilaCorta(p),
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                            style:
+                                                                const TextStyle(
+                                                                  fontSize: 12,
+                                                                ),
+                                                          ),
+                                                        ),
+                                                    ],
+                                                    onChanged: (v) => setState(
+                                                      () => t.batteryPath = v,
+                                                    ),
+                                                  ),
+                                            ),
+                                          const SizedBox(width: 8),
                                           SizedBox(
                                             width: 94,
                                             child: TextFormField(

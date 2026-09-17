@@ -247,7 +247,10 @@ Future<PanelConfigDoc?> fetchPanelConfig({
   String authBase64 = '',
   String? token,
 }) async {
-  final uri = Uri.http('$host:$port', '/plugins/rewind-xcover6-panel/panel-config');
+  final uri = Uri.http(
+    '$host:$port',
+    '/plugins/rewind-xcover6-panel/panel-config',
+  );
   final response = await http
       .get(
         uri,
@@ -282,7 +285,10 @@ Future<PanelConfigPush> pushPanelConfig({
   required String updatedBy,
   required Map<String, dynamic> config,
 }) async {
-  final uri = Uri.http('$host:$port', '/plugins/rewind-xcover6-panel/panel-config');
+  final uri = Uri.http(
+    '$host:$port',
+    '/plugins/rewind-xcover6-panel/panel-config',
+  );
   final response = await http
       .post(
         uri,
@@ -382,6 +388,50 @@ Future<List<GraphPoint>> skHistoryQuery({
     points.add(GraphPoint(time: dt, value: normalized));
   }
   return _sortAndDedupe(points);
+}
+
+/// Rutas que el histórico del servidor conoce en un periodo.
+///
+/// El árbol REST (`vessels/self`) solo contiene lo que ha emitido desde el
+/// último arranque del servidor, así que un sensor lento desaparece de él sin
+/// haberse ido del barco: en AREA SECADA, el Mopeka del tanque de agua no
+/// estaba en el árbol —51 hojas, ningún `tanks.*`— y el histórico sí tenía
+/// `tanks.freshWater.0.currentLevel` (comprobado en vivo 2026-09-17). Sin
+/// esto, "Buscar sensores" no encuentra un tanque perfectamente instalado.
+///
+/// Devuelve lista vacía si el servidor no tiene History API o falla: es una
+/// fuente de apoyo, nunca puede tumbar un barrido de sensores.
+Future<List<String>> skHistoryPaths({
+  required String host,
+  required int port,
+  required String authBase64,
+  Duration range = const Duration(days: 3),
+}) async {
+  final to = DateTime.now().toUtc();
+  final url = Uri.http('$host:$port', '/signalk/v2/api/history/paths', {
+    'from': to.subtract(range).toIso8601String(),
+    'to': to.toIso8601String(),
+    'provider': ?skHistoryProvider,
+  });
+  try {
+    final response = await http
+        .get(
+          url,
+          headers: authBase64.isEmpty
+              ? {}
+              : {'Authorization': 'Basic $authBase64'},
+        )
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) return const [];
+    final doc = jsonDecode(response.body);
+    if (doc is! List) return const [];
+    return [
+      for (final p in doc)
+        if (p is String && p.isNotEmpty) p,
+    ];
+  } catch (_) {
+    return const [];
+  }
 }
 
 /// Como [skHistoryQuery], pero para caminos cuyo valor es texto, como
@@ -556,6 +606,120 @@ EngineRunSummary? latestEngineRunFromRpmHistory(
     finish(lastRunning!.add(samplePeriod));
   }
   return latest;
+}
+
+/// Todos los usos del motor que hay en un histórico de RPM, del más reciente
+/// al más antiguo.
+///
+/// Mismo criterio que [latestEngineRunFromRpmHistory] —el cigüeñal girando por
+/// encima de [runningThresholdRpm]— pero devolviendo la lista entera, que es
+/// lo que necesita la pantalla de motor para enseñar los últimos arranques.
+List<EngineRunSummary> engineRunsFromRpmHistory(
+  List<GraphPoint> input, {
+  double runningThresholdRpm = 200,
+  Duration samplePeriod = const Duration(minutes: 1),
+  // Un único punto por encima del umbral no distingue un arranque real de un
+  // acelerón al dar contacto: se exigen al menos dos muestras seguidas.
+  Duration? minimumRun,
+  DateTime? now,
+}) {
+  if (input.isEmpty) return const [];
+  final points = _sortAndDedupe([...input]);
+  final maxGap = samplePeriod * 3;
+  final minimum = minimumRun ?? samplePeriod * 2;
+  final runs = <EngineRunSummary>[];
+  DateTime? start;
+  DateTime? lastRunning;
+  final upperBound = now ?? DateTime.now().toUtc();
+
+  void finish(DateTime end) {
+    var closeAt = end.isAfter(upperBound) ? upperBound : end;
+    if (start != null && closeAt.isAfter(start!)) {
+      final length = closeAt.difference(start!);
+      // Un pico suelto de RPM al dar contacto no es un uso del motor.
+      if (length >= minimum) {
+        runs.add(
+          EngineRunSummary(
+            startedAt: start!,
+            endedAt: closeAt,
+            durationHours: length.inSeconds / 3600.0,
+          ),
+        );
+      }
+    }
+    start = null;
+    lastRunning = null;
+  }
+
+  for (final point in points) {
+    final running = point.value.isFinite && point.value > runningThresholdRpm;
+    if (running) {
+      if (lastRunning != null && point.time.difference(lastRunning!) > maxGap) {
+        finish(lastRunning!.add(samplePeriod));
+      }
+      start ??= point.time;
+      lastRunning = point.time;
+    } else if (start != null) {
+      finish(point.time);
+    }
+  }
+  if (start != null && lastRunning != null) {
+    finish(lastRunning!.add(samplePeriod));
+  }
+  return runs.reversed.toList();
+}
+
+/// Como [engineRunsFromRpmHistory] pero a partir del cuentahoras, para motores
+/// que publican horas acumuladas y no revoluciones. Los límites son menos
+/// precisos porque el contador se publica a saltos.
+List<EngineRunSummary> engineRunsFromHistory(
+  List<GraphPoint> input, {
+  Duration sessionGap = const Duration(minutes: 15),
+}) {
+  if (input.length < 2) return const [];
+  final points = _sortAndDedupe([...input]);
+  final runs = <EngineRunSummary>[];
+  DateTime? sessionStart;
+  DateTime? sessionEnd;
+  DateTime? lastIncrementAt;
+  var sessionHours = 0.0;
+
+  void finishSession() {
+    if (sessionStart != null && sessionEnd != null && sessionHours >= 0.005) {
+      runs.add(
+        EngineRunSummary(
+          startedAt: sessionStart!,
+          endedAt: sessionEnd!,
+          durationHours: sessionHours,
+        ),
+      );
+    }
+    sessionStart = null;
+    sessionEnd = null;
+    lastIncrementAt = null;
+    sessionHours = 0;
+  }
+
+  for (var i = 1; i < points.length; i++) {
+    final previous = points[i - 1];
+    final current = points[i];
+    final elapsed = current.time.difference(previous.time);
+    if (elapsed <= Duration.zero) continue;
+    final increment = current.value - previous.value;
+    if (!increment.isFinite || increment <= 0.0001) continue;
+    final elapsedHours = elapsed.inMilliseconds / 3600000.0;
+    if (increment > math.max(0.25, elapsedHours * 1.5)) continue;
+    if (lastIncrementAt != null &&
+        current.time.difference(lastIncrementAt!) > sessionGap) {
+      finishSession();
+    }
+    sessionStart ??= previous.time;
+    sessionEnd = current.time;
+    lastIncrementAt = current.time;
+    sessionHours += increment;
+  }
+  finishSession();
+  return runs.reversed.toList();
 }
 
 // ─── DEMO mode: synthetic graph data (no InfluxDB call) ───────────────────────

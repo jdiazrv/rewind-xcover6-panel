@@ -71,6 +71,7 @@ part 'ais/closest_approach.dart';
 part 'widgets/saved_server_row.dart';
 part 'widgets/yaw_analysis_dialog.dart';
 part 'widgets/battery_curve_dialog.dart';
+part 'widgets/engine_runs_dialog.dart';
 
 // Last uncaught error, if any — shown in CFG > Diagnóstico rather than only
 // living in logcat, since the tablet running this has no attached console
@@ -389,8 +390,13 @@ class _DashboardState extends State<Dashboard> {
   // for weather queries only — null means "use signalK's position" (default).
   double? _manualWeatherLat;
   double? _manualWeatherLon;
-  double? get _weatherLat => _manualWeatherLat ?? signalK.latitude;
-  double? get _weatherLon => _manualWeatherLon ?? signalK.longitude;
+  // Con el GPS del teléfono como fuente (barco sin GPS, o el suyo sin
+  // fijación) el pronóstico y el estado del mar deben seguir funcionando: se
+  // usa la misma posición efectiva que ya calcula la pantalla de fondeo.
+  double? get _weatherLat =>
+      _manualWeatherLat ?? signalK.latitude ?? _anchorEffectiveLat;
+  double? get _weatherLon =>
+      _manualWeatherLon ?? signalK.longitude ?? _anchorEffectiveLon;
   bool _headerHidden = false;
   Timer? _navHideTimer;
 
@@ -2595,11 +2601,16 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
+    // Arranque en quiosco: la webapp puede abrirse directamente en una
+    // pantalla concreta (…/?page=PWR). Ver initialPageIdFromUrl.
+    final pageFromUrl = kIsWeb ? initialPageIdFromUrl(Uri.base) : null;
+    if (pageFromUrl != null) _selectedPageId = pageFromUrl;
     _reloadShipIcon();
     unawaited(_boot());
     // Re-render periodically so nav/wind cards flip to "--" once stale, even
     // without a new Signal K message arriving to trigger a rebuild.
     _staleWatchdog = Timer.periodic(const Duration(seconds: 2), (_) {
+      _trackEngineRun();
       _checkCorredera();
       _pruneStaleAisTargets();
       unawaited(_syncAlarmSound());
@@ -3099,6 +3110,8 @@ class _DashboardState extends State<Dashboard> {
         prefs.getBool('motorPanelDetailed') ?? settings.motorPanelDetailed;
     settings.motorPanelEnabled =
         prefs.getBool('motorPanelEnabled') ?? settings.motorPanelEnabled;
+    settings.summaryPageEnabled =
+        prefs.getBool('summaryPageEnabled') ?? settings.summaryPageEnabled;
     settings.autoHideHeaderOnNav =
         prefs.getBool('autoHideHeaderOnNav') ?? settings.autoHideHeaderOnNav;
     settings.alarmsUseSkZones =
@@ -3395,10 +3408,7 @@ class _DashboardState extends State<Dashboard> {
       settings.signalKDisconnectGraceSeconds,
     );
     await prefs.setBool('keepAwake', settings.keepAwake);
-    await prefs.setBool(
-      'syncConfigWithServer',
-      settings.syncConfigWithServer,
-    );
+    await prefs.setBool('syncConfigWithServer', settings.syncConfigWithServer);
     await prefs.setString('brightnessMode', settings.brightnessMode);
     await prefs.setString('historySource', settings.historySource);
     await prefs.setString('influxHost', settings.influxHost);
@@ -3602,6 +3612,7 @@ class _DashboardState extends State<Dashboard> {
     );
     await prefs.setBool('motorPanelDetailed', settings.motorPanelDetailed);
     await prefs.setBool('motorPanelEnabled', settings.motorPanelEnabled);
+    await prefs.setBool('summaryPageEnabled', settings.summaryPageEnabled);
     await prefs.setBool('autoHideHeaderOnNav', settings.autoHideHeaderOnNav);
     await prefs.setBool('alarmsUseSkZones', settings.alarmsUseSkZones);
     await prefs.setString(
@@ -4342,6 +4353,12 @@ class _DashboardState extends State<Dashboard> {
       // las suyas a su manera y ninguna lista fija las cubre.
       for (final s in settings.sensorConfig.tempSensors)
         if (s.enabled && s.path.isNotEmpty) s.path,
+      // La pila de los sensores inalámbricos (Mopeka, RuuviTag): se enseña en
+      // la propia tarjeta, así que hay que pedirla igual que el dato.
+      for (final s in settings.sensorConfig.tempSensors)
+        if (s.enabled && (s.batteryPath ?? '').isNotEmpty) s.batteryPath!,
+      for (final t in settings.sensorConfig.tanks)
+        if (t.enabled && (t.batteryPath ?? '').isNotEmpty) t.batteryPath!,
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
         if (rule.type == 'tempAbove' && rule.target != null) rule.target!,
@@ -4352,8 +4369,7 @@ class _DashboardState extends State<Dashboard> {
         'subscribe': [
           // toSet: una ruta configurada puede coincidir con una de la lista
           // fija (agua, cuadro eléctrico…) y no hay que pedirla dos veces.
-          for (final path in paths.toSet())
-            {'path': path, 'policy': 'instant'},
+          for (final path in paths.toSet()) {'path': path, 'policy': 'instant'},
         ],
       }),
     );
@@ -4523,6 +4539,12 @@ class _DashboardState extends State<Dashboard> {
                 signalK.tempKByPath[path] = celsius + 273.15;
               }
             }
+            // Pila de un sensor inalámbrico, sin campo propio y por el mismo
+            // motivo que las temperaturas: la ruta la elige cada instalación.
+            if (path.endsWith('.voltage')) {
+              final volts = _num(item['value']);
+              if (volts != null) signalK.voltsByPath[path] = volts;
+            }
             if (path ==
                 'electrical.batteries.${settings.sensorConfig.batteryHouseId}.current') {
               final amps = _num(item['value']);
@@ -4662,7 +4684,10 @@ class _DashboardState extends State<Dashboard> {
     // ANC also wants live AIS targets now, for the native anchor watch's
     // "AIS cercanos" layer — same condition style as _navWantsAis above.
     final onAncPage = currentId == 'ANC';
-    if (onAisPage || onAncPage || _navWantsAis) {
+    // RESUMEN dice si el AIS está activo y cuántos blancos hay: sin la
+    // suscripción diría siempre "sin blancos" en el barco con más tráfico.
+    final onSummaryPage = currentId == 'RES';
+    if (onAisPage || onAncPage || onSummaryPage || _navWantsAis) {
       _subscribeAis();
     } else {
       _unsubscribeAis();
@@ -5834,10 +5859,33 @@ class _DashboardState extends State<Dashboard> {
 
     walk(root, '');
 
+    // El árbol REST solo contiene lo que ha emitido desde que arrancó el
+    // servidor, así que un sensor lento desaparece de él sin haberse ido del
+    // barco: en AREA SECADA el Mopeka del tanque de agua no estaba en el
+    // árbol y el histórico sí lo tenía (comprobado en vivo 2026-09-17). El
+    // barrido es la unión de los dos. Ver skHistoryPaths.
+    final silentPaths = [
+      for (final p in await skHistoryPaths(
+        host: settings.host,
+        port: settings.port,
+        authBase64: settings.authBase64,
+      ))
+        // design.* son ajustes que guardamos nosotros y notifications.*
+        // son alarmas: ni una cosa ni otra es un sensor.
+        if (!leaves.containsKey(p) &&
+            !p.startsWith('design.') &&
+            !p.startsWith('notifications.'))
+          p,
+    ]..sort();
+
     final result = SkDiscovery();
+    result.silentPaths.addAll(silentPaths);
     final batteryIds = <String>{};
     final tankMap = <String, TankCandidate>{};
-    for (final path in leaves.keys) {
+    // Las rutas del histórico no tienen nodo en `leaves`, así que todo lo que
+    // hay debajo lee null y se comporta como "sin dato": el tanque se
+    // encuentra igual y la capacidad se pide en CFG.
+    for (final path in [...leaves.keys, ...silentPaths]) {
       final battMatch = RegExp(r'^electrical\.batteries\.([^.]+)\.')
           .firstMatch(path);
       if (battMatch != null) batteryIds.add(battMatch.group(1)!);
@@ -5919,7 +5967,7 @@ class _DashboardState extends State<Dashboard> {
     }
     result.batteryIds.addAll(batteryIds);
     result.tanks.addAll(tankMap.values);
-    result.allPaths.addAll(leaves.keys.toList()..sort());
+    result.allPaths.addAll({...leaves.keys, ...silentPaths}.toList()..sort());
     return result;
   }
 
@@ -6667,12 +6715,59 @@ class _DashboardState extends State<Dashboard> {
     super.dispose();
   }
 
+  // Una pantalla sin datos no debe ocupar sitio, y tiene que volver sola en
+  // cuanto los datos vuelvan: si se apagan los instrumentos, VNT desaparece;
+  // al encenderlos, reaparece (petición en vivo 2026-09-17). Por eso se mira
+  // la frescura de lo que llega, no lo que se detectó una vez.
+  //
+  // Sin conexión con Signal K se respeta lo configurado: ahí la ausencia de
+  // datos es la desconexión, no un barco sin sensores.
+  // Misma regla de frescura que usan las tarjetas (_pathIsStale), para no
+  // tener dos criterios distintos de "esto está llegando".
+  bool _anyPathFresh(Iterable<String> paths, Duration within) =>
+      paths.any((p) => !_pathIsStale(p, within));
+
+  static const _windPageIdleAfter = Duration(minutes: 5);
+  // Los tanques se publican despacio y las temperaturas aún más, así que su
+  // ventana es mucho más ancha. Un Mopeka puede pasar un cuarto de hora sin
+  // hablar (medido en AREA SECADA), y perder la pantalla TNK por eso sería
+  // justo el error que ya cometimos ocultando tanques configurados.
+  static const _tankPageIdleAfter = Duration(minutes: 60);
+  static const _tempPageIdleAfter = Duration(minutes: 45);
+
+  bool get _hasWindData =>
+      settings.demoMode ||
+      !signalK.connected ||
+      _anyPathFresh(const [
+        'environment.wind.speedApparent',
+        'environment.wind.angleApparent',
+        'environment.wind.speedTrue',
+        'environment.wind.directionTrue',
+      ], _windPageIdleAfter);
+
+  bool get _hasTankData {
+    final enabled = settings.sensorConfig.tanks.where((t) => t.enabled);
+    if (enabled.isEmpty) return false;
+    if (settings.demoMode || !signalK.connected) return true;
+    return _anyPathFresh(enabled.map((t) => t.skPath), _tankPageIdleAfter);
+  }
+
+  bool get _hasTempData {
+    final enabled = settings.sensorConfig.tempSensors.where((s) => s.enabled);
+    if (enabled.isEmpty) return false;
+    if (settings.demoMode || !signalK.connected) return true;
+    return _anyPathFresh(enabled.map((s) => s.path), _tempPageIdleAfter);
+  }
+
   List<String> get _pageIds => [
     'NAV',
-    'VNT',
+    if (_hasWindData) 'VNT',
+    // Resumen de todo lo que el barco publica, pensado para barcos con pocos
+    // sensores — ver _summaryPage. Se activa en CFG.
+    if (settings.summaryPageEnabled) 'RES',
     'PWR',
-    if (settings.sensorConfig.tempSensors.any((s) => s.enabled)) 'TMP',
-    if (settings.sensorConfig.tanks.any((t) => t.enabled)) 'TNK',
+    if (_hasTempData) 'TMP',
+    if (_hasTankData) 'TNK',
     if (settings.sensorConfig.hasOutsideTemp ||
         settings.sensorConfig.hasOutsidePressure)
       'MET',
@@ -6922,12 +7017,12 @@ class _DashboardState extends State<Dashboard> {
   Widget build(BuildContext context) {
     final pages = [
       ('NAV', Icons.explore, _navPage()),
-      ('VNT', Icons.air, _windPage()),
+      if (_hasWindData) ('VNT', Icons.air, _windPage()),
+      if (settings.summaryPageEnabled)
+        ('RES', Icons.dashboard_outlined, _summaryPage()),
       ('PWR', Icons.bolt, _powerPage()),
-      if (settings.sensorConfig.tempSensors.any((s) => s.enabled))
-        ('TMP', Icons.thermostat, _tempPage()),
-      if (settings.sensorConfig.tanks.any((t) => t.enabled))
-        ('TNK', Icons.water_drop, _tankPage()),
+      if (_hasTempData) ('TMP', Icons.thermostat, _tempPage()),
+      if (_hasTankData) ('TNK', Icons.water_drop, _tankPage()),
       if (settings.sensorConfig.hasOutsideTemp ||
           settings.sensorConfig.hasOutsidePressure)
         ('MET', Icons.cloud, _metPage()),
@@ -8622,6 +8717,73 @@ class _DashboardState extends State<Dashboard> {
   // fresh propulsion.<id>.revolutions, never from the lifetime runTime
   // counter.
   /// Inicio, parada y duración del último uso recuperado del histórico.
+  // Desde cuándo lleva girando el motor en ESTE arranque. Se sigue en la app
+  // porque el servidor solo publica el cuentahoras acumulado: mientras el
+  // motor está en marcha, lo que interesa es este dato y no el uso anterior.
+  DateTime? _engineRunSince;
+
+  // Un hueco en las RPM no es una parada: sin esta gracia, cualquier corte
+  // del WebSocket reiniciaba a cero el contador de este arranque.
+  DateTime? _engineStoppedSince;
+  static const _engineStopGrace = Duration(seconds: 60);
+
+  void _trackEngineRun() {
+    final now = DateTime.now();
+    if (_engineRunning) {
+      _engineStoppedSince = null;
+      _engineRunSince ??= now;
+      return;
+    }
+    if (_engineRunSince == null) return;
+    _engineStoppedSince ??= now;
+    if (now.difference(_engineStoppedSince!) >= _engineStopGrace) {
+      _engineRunSince = null;
+      _engineStoppedSince = null;
+    }
+  }
+
+  /// Últimos usos del motor, leídos del histórico de RPM del servidor y, si
+  /// ese motor no publica revoluciones, del cuentahoras.
+  Future<List<EngineRunSummary>> _loadEngineRuns(Duration range) async {
+    final path = settings.sensorConfig.enginePath;
+    if (path == null || path.isEmpty) return const [];
+    final base = path.replaceFirst(RegExp(r'\.runTime$'), '');
+    final resolution = range.inDays > 7
+        ? const Duration(minutes: 10)
+        : const Duration(minutes: 1);
+    final rpm = await skHistoryQuery(
+      host: settings.host,
+      port: settings.port,
+      authBase64: settings.authBase64,
+      def: MetricDef('$base.revolutions', 'RPM motor', 'rpm', scale: 60),
+      range: range,
+      resolution: resolution,
+      aggFn: 'max',
+    );
+    final runs = engineRunsFromRpmHistory(rpm, samplePeriod: resolution);
+    if (runs.isNotEmpty) return runs;
+    final hours = await skHistoryQuery(
+      host: settings.host,
+      port: settings.port,
+      authBase64: settings.authBase64,
+      def: MetricDef(path, 'Horas motor', 'h', scale: 1 / 3600.0),
+      range: range,
+      resolution: resolution,
+      aggFn: 'max',
+    );
+    return engineRunsFromHistory(hours);
+  }
+
+  void _openEngineRunsDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => EngineRunsDialog(
+        load: _loadEngineRuns,
+        runningSince: _engineRunSince,
+      ),
+    );
+  }
+
   String? get _engineLastRunLabel {
     final start = signalK.lastEngineRunStartedAt;
     final end = signalK.lastEngineRunAt;
@@ -8657,6 +8819,12 @@ class _DashboardState extends State<Dashboard> {
   Widget _navPremiumMotorPage() => PremiumMotorEnginePanel(
     engineHours: _navCardData('engineHours'),
     lastRunLabel: _engineLastRunLabel,
+    // Con el motor en marcha manda el arranque en curso; al tocarlo se abren
+    // los últimos usos.
+    currentRunLabel: _engineRunSince == null
+        ? null
+        : engineCurrentRunLabel(_engineRunSince!, DateTime.now()),
+    onShowRuns: _openEngineRunsDialog,
     engineRunning: _engineRunning,
     engineContactOn: _engineContactOn,
     engineRpm: _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate),
@@ -10346,6 +10514,425 @@ class _DashboardState extends State<Dashboard> {
     ].where((part) => part.isNotEmpty).join(' · ');
   }
 
+  /// "pila 2,56 V (45%)" para un sensor inalámbrico, o cadena vacía si no se
+  /// le ha configurado pila o todavía no ha llegado su voltaje.
+  ///
+  /// Una pila agotada explica una lectura congelada mejor que cualquier aviso
+  /// de dato antiguo: en AREA SECADA el sensor de agua va a 2,56 V y pasa
+  /// cuartos de hora callado.
+  String _sensorBatteryLabel(String? batteryPath) {
+    if (batteryPath == null || batteryPath.isEmpty) return '';
+    final volts = signalK.voltsByPath[batteryPath];
+    if (volts == null) return '';
+    final pct = sensorBatteryPercent(volts);
+    final v = volts.toStringAsFixed(2).replaceAll('.', ',');
+    return pct == null ? 'pila $v V' : 'pila $v V (${pct.round()}%)';
+  }
+
+  // ─── RESUMEN page ───────────────────────────────────────────────────────
+  // Hay barcos con muy pocos sensores: AREA SECADA tiene un shunt y los
+  // tanques, y poco más. En ellos las pantallas especializadas salen medio
+  // vacías, así que esta reúne de un vistazo TODO lo que el barco sí publica:
+  // energía, tanques, posición con hora y satélites, y estado del AIS.
+  Widget _summaryPanel({
+    required String title,
+    required IconData icon,
+    required Color accent,
+    required Widget child,
+    String? trailing,
+  }) => Container(
+    padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(18),
+      gradient: const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0xff16222a), Color(0xff0b1216)],
+      ),
+      border: Border.all(color: accent.withValues(alpha: 0.32), width: 1.2),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 15, color: accent),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: cMuted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.1,
+                ),
+              ),
+            ),
+            if (trailing != null)
+              Text(
+                trailing,
+                style: TextStyle(
+                  color: accent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Expanded(child: child),
+      ],
+    ),
+  );
+
+  // Cifra grande con su unidad y un pie pequeño, para que el panel se lea de
+  // un vistazo desde el otro lado de la bañera.
+  Widget _summaryValue(
+    String value,
+    String unit,
+    Color color, {
+    String? footer,
+  }) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: Alignment.centerLeft,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              value,
+              style: TextStyle(
+                color: color,
+                fontSize: 54,
+                height: 1,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            if (unit.isNotEmpty) ...[
+              const SizedBox(width: 4),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  unit,
+                  style: TextStyle(
+                    color: color.withValues(alpha: 0.85),
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      if (footer != null) ...[
+        const SizedBox(height: 4),
+        Text(
+          footer,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: cMuted, fontSize: 11),
+        ),
+      ],
+    ],
+  );
+
+  Widget _summaryChip(String label, String value, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(9),
+      border: Border.all(color: color.withValues(alpha: 0.35)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: cMuted,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          value,
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _summaryTankRow(TankViewData tank) {
+    final pct = tank.percent(signalK.tanks);
+    // Los mismos umbrales que la tarjeta de TNK, incluidos los que se hayan
+    // configurado por tanque: dos criterios distintos para el mismo depósito
+    // serían un error esperando a pasar.
+    final slot = tank.slots.first;
+    final dangerWhenHigh = slot.type == 'blackWater';
+    final warn = slot.warningPct ?? (dangerWhenHigh ? 75 : 30);
+    final alarm = slot.alarmPct ?? (dangerWhenHigh ? 90 : 15);
+    final color = pct == null
+        ? cMuted
+        : (dangerWhenHigh
+              ? (pct >= alarm
+                    ? cRed
+                    : pct >= warn
+                    ? cOrange
+                    : tank.color)
+              : (pct <= alarm
+                    ? cRed
+                    : pct <= warn
+                    ? cOrange
+                    : tank.color));
+    final liters = tank.capacityL <= 0 || pct == null
+        ? null
+        : (tank.capacityL * pct / 100).round();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Icon(tank.icon, size: 15, color: color),
+          const SizedBox(width: 7),
+          SizedBox(
+            width: 74,
+            child: Text(
+              tank.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: cText, fontSize: 12),
+            ),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: (pct ?? 0) / 100,
+                minHeight: 9,
+                backgroundColor: cPanel2,
+                valueColor: AlwaysStoppedAnimation(
+                  pct == null ? cMuted.withValues(alpha: 0.25) : color,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 78,
+            child: Text(
+              pct == null
+                  ? '--'
+                  : liters == null
+                  ? '${pct.round()}%'
+                  : '${pct.round()}% · $liters L',
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              style: TextStyle(
+                color: pct == null ? cMuted : cText,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                fontFeatures: const [ui.FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryPage() {
+    final tanks = tankOverview;
+    final houseColor = socColor(signalK.houseSoc);
+    final amps = signalK.houseA;
+    final ampsColor = currentColor(amps);
+    final solarTotal = (signalK.solarW ?? 0) + (signalK.solarW2 ?? 0);
+    final hasSolar =
+        _cardVisible('solar', path: settings.sensorConfig.solarPath) &&
+        (signalK.solarW != null || signalK.solarW2 != null);
+    final hasDc =
+        _cardVisible('dcLoads', path: settings.sensorConfig.dcLoadsPath) &&
+        signalK.dcW != null;
+    final posFresh = _timestampFresh(
+      signalK.positionUpdate,
+      const Duration(minutes: 2),
+    );
+    final lat = posFresh ? signalK.latitude : null;
+    final lon = posFresh ? signalK.longitude : null;
+    final sats = signalK.gnssSatellites;
+    final aisCount = _visibleAisTargets.length;
+    final aisOn = _aisSubscribed;
+    final now = DateTime.now();
+
+    final energia = _summaryPanel(
+      title: 'ENERGÍA',
+      icon: Icons.bolt,
+      accent: houseColor,
+      trailing: signalK.houseV == null ? null : fmt(signalK.houseV, 2, ' V'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: _summaryValue(
+              fmt(signalK.houseSoc, 0, ''),
+              '%',
+              houseColor,
+              footer: amps == null
+                  ? 'batería de servicio'
+                  : '${amps >= 0 ? 'cargando' : 'consumiendo'} ${fmt(amps.abs(), 1, ' A')}',
+            ),
+          ),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (hasSolar)
+                _summaryChip('SOLAR', fmt(solarTotal, 0, ' W'), cYellow),
+              if (hasDc)
+                _summaryChip('CONSUMO', fmt(signalK.dcW, 0, ' W'), cOrange),
+              if (signalK.startV != null)
+                _summaryChip(
+                  'ARRANQUE',
+                  fmt(signalK.startV, 2, ' V'),
+                  voltageColor12V(signalK.startV),
+                ),
+              if (amps != null)
+                _summaryChip('CORRIENTE', fmt(amps, 1, ' A'), ampsColor),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    final tanquesPanel = _summaryPanel(
+      title: 'TANQUES',
+      icon: Icons.water_drop_outlined,
+      accent: cCyan,
+      trailing: tanks.isEmpty ? null : '${tanks.length}',
+      child: tanks.isEmpty
+          ? const Center(
+              child: Text(
+                'Sin tanques configurados',
+                style: TextStyle(color: cMuted, fontSize: 12),
+              ),
+            )
+          : ListView(
+              padding: EdgeInsets.zero,
+              children: [for (final t in tanks) _summaryTankRow(t)],
+            ),
+    );
+
+    final posicion = _summaryPanel(
+      title: 'POSICIÓN Y HORA',
+      icon: Icons.my_location,
+      accent: lat == null ? cMuted : cGreen,
+      trailing: hhmm(now),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              posLines(lat, lon),
+              style: TextStyle(
+                color: lat == null ? cMuted : cText,
+                fontSize: 21,
+                height: 1.25,
+                fontWeight: FontWeight.w800,
+                fontFeatures: const [ui.FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _summaryChip(
+                'SATÉLITES',
+                sats == null ? '--' : '$sats',
+                sats == null || sats < 4 ? cOrange : cGreen,
+              ),
+              if (signalK.gnssFixType != null)
+                _summaryChip('FIJACIÓN', signalK.gnssFixType!, cCyan),
+              _summaryChip('FECHA', ddmmyyyy(now), cMuted),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    // "ON" no es que estemos suscritos —en esta pantalla lo estamos siempre—
+    // sino que entran blancos: un receptor apagado y un mar vacío se
+    // distinguen mirando si hay algún barco visible (expiran a los 18 min).
+    final recibiendo = aisOn && aisCount > 0;
+    final ais = _summaryPanel(
+      title: 'AIS',
+      icon: Icons.radar,
+      accent: recibiendo ? cGreen : cMuted,
+      trailing: !aisOn
+          ? 'OFF'
+          : recibiendo
+          ? 'RECIBIENDO'
+          : 'A LA ESCUCHA',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          _summaryValue(
+            aisOn ? '$aisCount' : '--',
+            aisOn ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
+            recibiendo ? cGreen : cMuted,
+            footer: !aisOn
+                ? 'sin suscripción al AIS'
+                : recibiendo
+                ? 'barcos vistos en los últimos 18 min'
+                : 'receptor a la escucha, sin blancos ahora',
+          ),
+        ],
+      ),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(flex: 5, child: energia),
+                const SizedBox(width: 8),
+                Expanded(flex: 7, child: tanquesPanel),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(flex: 7, child: posicion),
+                const SizedBox(width: 8),
+                Expanded(flex: 4, child: ais),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _powerPage() {
     final houseBase =
         'electrical.batteries.${settings.sensorConfig.batteryHouseId}';
@@ -10759,13 +11346,16 @@ class _DashboardState extends State<Dashboard> {
         offset: -273.15,
         color: color,
       );
-      final subtitle = _slowSensorSubtitle(
-        s.path,
-        prefix: s.note,
-        staleAfter: s.role == 'mar'
-            ? const Duration(minutes: 10)
-            : const Duration(minutes: 5),
-      );
+      final subtitle = [
+        _slowSensorSubtitle(
+          s.path,
+          prefix: s.note,
+          staleAfter: s.role == 'mar'
+              ? const Duration(minutes: 10)
+              : const Duration(minutes: 5),
+        ),
+        _sensorBatteryLabel(s.batteryPath),
+      ].where((part) => part.isNotEmpty).join(' · ');
       final isFridge = s.role == 'nevera' || s.role == 'congelador';
       cards.add(
         isFridge
@@ -10916,6 +11506,19 @@ class _DashboardState extends State<Dashboard> {
         alarmPct: slot.alarmPct,
       ),
   ];
+
+  /// Voltaje de la pila del primer sensor del grupo que la publique: una
+  /// tarjeta de tanque puede juntar varios depósitos, pero la pila que
+  /// interesa es la del que está hablando.
+  double? _tankBatteryVolts(TankViewData tank) {
+    for (final slot in tank.slots) {
+      final path = slot.batteryPath;
+      if (path == null || path.isEmpty) continue;
+      final volts = signalK.voltsByPath[path];
+      if (volts != null) return volts;
+    }
+    return null;
+  }
 
   bool _pathIsStale(String path, Duration staleAfter) {
     if (settings.demoMode) return false;
@@ -11114,6 +11717,9 @@ class _DashboardState extends State<Dashboard> {
                                             ),
                                             calibrated: tank.slots.every(
                                               (slot) => slot.capacityL > 0,
+                                            ),
+                                            batteryVolts: _tankBatteryVolts(
+                                              tank,
                                             ),
                                             onTap: () => _showTankGroup(tank),
                                           ),
@@ -12632,6 +13238,12 @@ class _DashboardState extends State<Dashboard> {
               tab: 3,
             ),
             (
+              title: 'Pantalla RESUMEN',
+              section: 'PANTALLA · Apariencia y paneles',
+              keywords: 'resumen compendio general dashboard energia tanques posicion satelites ais barcos con pocos sensores',
+              tab: 3,
+            ),
+            (
               title: 'Rejilla NAV clásica',
               section: 'PANTALLA · Apariencia y paneles',
               keywords: 'rejilla grid nav clasica 3x2 4x2 cartas tarjetas',
@@ -13522,32 +14134,48 @@ class _DashboardState extends State<Dashboard> {
                               ],
                             ),
                             const SizedBox(height: 8),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              value: settings.syncConfigWithServer,
-                              onChanged: (v) {
-                                setState(
-                                  () => settings.syncConfigWithServer = v,
-                                );
-                                unawaited(_saveSettings());
-                                if (v) unawaited(_pullSharedConfig());
-                              },
-                              title: const Text(
-                                'Compartir la configuración con el barco',
-                                style: TextStyle(color: cText, fontSize: 13),
-                              ),
-                              subtitle: Text(
-                                _sharedConfigStatus ??
-                                    'Sensores, umbrales y alarmas se guardan en '
-                                        'el servidor y llegan a todos los '
-                                        'dispositivos. Nunca se comparten '
-                                        'contraseñas.',
-                                style: const TextStyle(
-                                  color: cMuted,
-                                  fontSize: 11,
+                            // Ver el comentario del interruptor de RESUMEN:
+                            // aquí tampoco vale un ListTile.
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Text(
+                                        'Compartir la configuración con el barco',
+                                        style: TextStyle(
+                                          color: cText,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                      Text(
+                                        _sharedConfigStatus ??
+                                            'Sensores, umbrales y alarmas se '
+                                                'guardan en el servidor y llegan '
+                                                'a todos los dispositivos. Nunca '
+                                                'se comparten contraseñas.',
+                                        style: const TextStyle(
+                                          color: cMuted,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ),
+                                Switch(
+                                  value: settings.syncConfigWithServer,
+                                  onChanged: (v) {
+                                    setState(
+                                      () => settings.syncConfigWithServer = v,
+                                    );
+                                    unawaited(_saveSettings());
+                                    if (v) unawaited(_pullSharedConfig());
+                                  },
+                                ),
+                              ],
                             ),
                             const SizedBox(height: 4),
                             OutlinedButton.icon(
@@ -14153,6 +14781,47 @@ class _DashboardState extends State<Dashboard> {
                                 ),
                                 tapTargetSize: MaterialTapTargetSize.padded,
                               ),
+                            ),
+                            const SizedBox(height: 10),
+                            // Fila con interruptor, no SwitchListTile: dentro
+                            // de estos recuadros con fondo propio, un
+                            // ListTile pierde su color y su efecto al pulsar
+                            // (Flutter lo avisa y lo caza el test de CFG).
+                            Row(
+                              children: [
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        'Pantalla RESUMEN',
+                                        style: TextStyle(
+                                          color: cText,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                      Text(
+                                        'Energía, tanques, posición con hora y satélites, y estado del AIS en una sola pantalla. Pensada para barcos con pocos sensores.',
+                                        style: TextStyle(
+                                          color: cMuted,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Switch(
+                                  value: settings.summaryPageEnabled,
+                                  onChanged: (v) {
+                                    setState(
+                                      () => settings.summaryPageEnabled = v,
+                                    );
+                                    unawaited(_saveSettings());
+                                  },
+                                ),
+                              ],
                             ),
                             const SizedBox(height: 10),
                             const Text(

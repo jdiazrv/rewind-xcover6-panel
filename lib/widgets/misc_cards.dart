@@ -2066,6 +2066,7 @@ class TankCard extends StatelessWidget {
     this.alarmPct,
     this.stale = false,
     this.calibrated = true,
+    this.batteryVolts,
     this.onTap,
   });
   final String name;
@@ -2083,6 +2084,9 @@ class TankCard extends StatelessWidget {
   final double? alarmPct;
   final bool stale;
   final bool calibrated;
+
+  /// Voltaje de la pila del sensor inalámbrico (Mopeka), cuando lo publica.
+  final double? batteryVolts;
   final VoidCallback? onTap;
 
   Color _levelColor(
@@ -2178,6 +2182,37 @@ class TankCard extends StatelessWidget {
     );
   }
 
+  // Un Mopeka se queda mudo cuando se le acaba la pila, y el nivel congelado
+  // parece un nivel real. El voltaje, en la propia tarjeta, lo explica.
+  Widget _batteryChip(double volts) {
+    final pct = sensorBatteryPercent(volts);
+    final low = pct != null && pct <= 20;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            low ? Icons.battery_alert : Icons.battery_std,
+            size: large ? 15 : 13,
+            color: low ? cOrange : cMuted,
+          ),
+          const SizedBox(width: 2),
+          Text(
+            pct == null
+                ? '${volts.toStringAsFixed(2).replaceAll('.', ',')} V'
+                : '${pct.round()}%',
+            style: TextStyle(
+              color: low ? cOrange : cMuted,
+              fontSize: large ? 11 : 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasData = value != null;
@@ -2251,6 +2286,7 @@ class TankCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (batteryVolts != null) _batteryChip(batteryVolts!),
                       if (onTap != null)
                         Icon(
                           Icons.chevron_right,
