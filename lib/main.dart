@@ -10640,7 +10640,7 @@ class _DashboardState extends State<Dashboard> {
               value,
               style: TextStyle(
                 color: color,
-                fontSize: 54,
+                fontSize: 42,
                 height: 1,
                 fontWeight: FontWeight.w900,
               ),
@@ -10653,7 +10653,7 @@ class _DashboardState extends State<Dashboard> {
                   unit,
                   style: TextStyle(
                     color: color.withValues(alpha: 0.85),
-                    fontSize: 18,
+                    fontSize: 15,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -10675,7 +10675,7 @@ class _DashboardState extends State<Dashboard> {
   );
 
   Widget _summaryChip(String label, String value, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
     decoration: BoxDecoration(
       color: color.withValues(alpha: 0.12),
       borderRadius: BorderRadius.circular(9),
@@ -10688,16 +10688,16 @@ class _DashboardState extends State<Dashboard> {
           label,
           style: const TextStyle(
             color: cMuted,
-            fontSize: 10,
+            fontSize: 9,
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(width: 5),
+        const SizedBox(width: 4),
         Text(
           value,
           style: TextStyle(
             color: color,
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: FontWeight.w800,
           ),
         ),
@@ -10831,12 +10831,12 @@ class _DashboardState extends State<Dashboard> {
           const SizedBox(width: 10),
           Expanded(
             flex: 6,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final chip in [
+            child: Center(
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                alignment: WrapAlignment.start,
+                children: [
                   if (hasSolar)
                     _summaryChip('SOLAR', fmt(solarTotal, 0, ' W'), cYellow),
                   if (hasDc)
@@ -10849,12 +10849,8 @@ class _DashboardState extends State<Dashboard> {
                     ),
                   if (amps != null)
                     _summaryChip('CORRIENTE', fmt(amps, 1, ' A'), ampsColor),
-                ])
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: chip,
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
         ],
@@ -10895,8 +10891,8 @@ class _DashboardState extends State<Dashboard> {
               posLines(lat, lon),
               style: TextStyle(
                 color: lat == null ? cMuted : cText,
-                fontSize: 21,
-                height: 1.25,
+                fontSize: 18,
+                height: 1.2,
                 fontWeight: FontWeight.w800,
                 fontFeatures: const [ui.FontFeature.tabularFigures()],
               ),
