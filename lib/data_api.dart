@@ -268,6 +268,50 @@ Future<PanelConfigDoc?> fetchPanelConfig({
   return _panelConfigFromJson(doc);
 }
 
+/// Diagnóstico completo del servidor, que sirve nuestro propio plugin (ver
+/// server/diagnostics.js). Lanza una excepción con un texto que se puede
+/// enseñar tal cual: un 404 significa que el plugin del barco es anterior a
+/// la 1.4.234 y hay que desplegar.
+Future<Map<String, dynamic>> fetchSkDiagnostics({
+  required String host,
+  required int port,
+  String authBase64 = '',
+  String? token,
+}) async {
+  final uri = Uri.http(
+    '$host:$port',
+    '/plugins/rewind-xcover6-panel/diagnostics',
+  );
+  final response = await http
+      .get(
+        uri,
+        headers: {
+          if (token != null && token.isNotEmpty)
+            'Authorization': 'Bearer $token'
+          else if (authBase64.isNotEmpty)
+            'Authorization': 'Basic $authBase64',
+        },
+      )
+      .timeout(const Duration(seconds: 10));
+  if (response.statusCode == 404) {
+    throw Exception(
+      'El plugin REWIND de este servidor es anterior al diagnóstico: '
+      'hay que desplegar la versión nueva.',
+    );
+  }
+  if (response.statusCode == 401 || response.statusCode == 403) {
+    throw Exception('Sin permiso de lectura: revisa usuario y contraseña.');
+  }
+  if (response.statusCode != 200) {
+    throw Exception('El servidor respondió HTTP ${response.statusCode}.');
+  }
+  final doc = jsonDecode(response.body);
+  if (doc is! Map<String, dynamic>) {
+    throw Exception('Respuesta del servidor no válida.');
+  }
+  return doc;
+}
+
 /// Resultado de subir la configuración: `conflict` llega cuando otro
 /// dispositivo la cambió mientras tanto, con lo que hay ahora en el servidor.
 typedef PanelConfigPush = ({

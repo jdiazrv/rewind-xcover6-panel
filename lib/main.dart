@@ -67,6 +67,7 @@ part 'widgets/marine_help.dart';
 part 'widgets/alarm_and_shell.dart';
 part 'widgets/alarm_lamp_panel.dart';
 part 'widgets/vertical_pager.dart';
+part 'widgets/sk_diagnostics_view.dart';
 part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
@@ -2704,6 +2705,69 @@ class _DashboardState extends State<Dashboard> {
   // — per explicit request, it must hide itself again every time the app
   // restarts, not just once opted into forever.
   bool _adminRevealed = false;
+  // CFG > Diagnóstico > Signal K. Se pide al abrir la vista y se refresca
+  // sola cada 10 s mientras se mira (ver _skDiagnosticsView).
+  SkDiagnostics? _skDiag;
+  String? _skDiagError;
+  DateTime? _skDiagAt;
+  bool _skDiagLoading = false;
+  bool _skDiagOnlyErrors = false;
+
+  Future<void> _fetchSkDiagnostics() async {
+    if (_skDiagLoading || settings.demoMode) return;
+    _skDiagLoading = true;
+    try {
+      final doc = await fetchSkDiagnostics(
+        host: settings.host,
+        port: settings.port,
+        authBase64: settings.authBase64,
+        token: await _ensureSkConfigToken(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _skDiag = SkDiagnostics.fromJson(doc);
+        _skDiagError = null;
+        _skDiagAt = DateTime.now();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _skDiagError = e.toString().replaceFirst('Exception: ', '');
+        _skDiagAt = DateTime.now();
+      });
+    } finally {
+      _skDiagLoading = false;
+    }
+  }
+
+  /// La vista de CFG > Diagnóstico > Signal K. Se refresca sola cada 10 s
+  /// mientras se mira: la pantalla se redibuja cada 2 s (el vigilante de
+  /// datos caducados) y aquí se pide de nuevo si lo que hay es más viejo.
+  Widget _skDiagnosticsView(StateSetter setSt) {
+    final at = _skDiagAt;
+    if (!_skDiagLoading &&
+        (at == null ||
+            DateTime.now().difference(at) > const Duration(seconds: 10))) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(_fetchSkDiagnostics()),
+      );
+    }
+    return SkDiagnosticsPanel(
+      diag: _skDiag,
+      error: settings.demoMode
+          ? 'En modo DEMO no hay servidor que diagnosticar.'
+          : _skDiagError,
+      updatedAt: _skDiagAt,
+      loading: _skDiagLoading,
+      onlyErrors: _skDiagOnlyErrors,
+      onRefresh: () => unawaited(_fetchSkDiagnostics()),
+      onToggleOnlyErrors: (v) {
+        setSt(() => _skDiagOnlyErrors = v);
+        setState(() {});
+      },
+    );
+  }
+
   // Qué mitad de CFG > Diagnóstico se está mirando: 'estado' o 'datos'.
   String _diagView = 'estado';
   // Per-host sensor/anchor config used to be keyed by literal "host:port" —
@@ -4413,6 +4477,9 @@ class _DashboardState extends State<Dashboard> {
       _skZoneDefs = const {};
       _aisLastPositionAt = null;
       _aisLastBaseStationAt = null;
+      _skDiag = null;
+      _skDiagError = null;
+      _skDiagAt = null;
       unawaited(_fetchSkZones());
       unawaited(_seedOwnTrackFromHistory());
       unawaited(_autoConfigureBlankSensorPaths());
@@ -7256,20 +7323,39 @@ class _DashboardState extends State<Dashboard> {
     _selectPage(i);
   }
 
+  // Mientras la app salta a una pantalla que ha pedido ella, los avisos del
+  // PageView no mandan. Al saltar de NAV a CFG avisaba de que se había
+  // quedado en la 10 (AIS) en el mismo instante en que se pedía la 11: se
+  // veía CFG pero la barra resaltaba AIS y, como en AIS la barra se esconde
+  // sola, desaparecía a los 5 s. Medido en el XCover (2026-09-18).
+  bool _programmaticPageChange = false;
+
   void _selectPage(int i) {
     final previous = page;
     _onPageChange(i);
+    _programmaticPageChange = true;
+    void settle() {
+      _programmaticPageChange = false;
+      // Y si aun así el PageView no está donde se pidió, se le lleva.
+      if (!mounted || !_pageController.hasClients) return;
+      final at = _pageController.page?.round();
+      if (at != null && at != page) _pageController.jumpToPage(page);
+    }
+
     if ((i - previous).abs() <= 1) {
-      _pageController.animateToPage(
-        i,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
+      _pageController
+          .animateToPage(
+            i,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+          )
+          .whenComplete(settle);
     } else {
       // A long animation constructs every intermediate page, including
       // maps/WebViews the user never selected. Jumping distant tabs is both
       // faster and avoids unnecessary native resources.
       _pageController.jumpToPage(i);
+      WidgetsBinding.instance.addPostFrameCallback((_) => settle());
     }
   }
 
@@ -7399,7 +7485,11 @@ class _DashboardState extends State<Dashboard> {
                     Expanded(
                       child: PageView(
                         controller: _pageController,
-                        onPageChanged: _onPageChange,
+                        onPageChanged: (i) {
+                          // Ver _programmaticPageChange.
+                          if (_programmaticPageChange) return;
+                          _onPageChange(i);
+                        },
                         // En AIS el deslizamiento horizontal entre pantallas
                         // competía con el pellizco para hacer zoom: al posar
                         // el primer dedo con un poco de desvío lateral, el
@@ -9471,14 +9561,26 @@ class _DashboardState extends State<Dashboard> {
                   icon: Icon(Icons.data_object),
                   label: Text('Datos en vivo'),
                 ),
+                // El servidor por dentro: versión, reinicios, máquina,
+                // plugins, velocidad de datos y log (2026-09-18).
+                ButtonSegment(
+                  value: 'signalk',
+                  icon: Icon(Icons.dns_outlined),
+                  label: Text('Signal K'),
+                ),
               ],
               selected: {_diagView},
               showSelectedIcon: false,
               onSelectionChanged: (v) {
                 setSt(() => _diagView = v.first);
                 setState(() {});
+                if (v.first == 'signalk') unawaited(_fetchSkDiagnostics());
               },
             ),
+            if (_diagView == 'signalk') ...[
+              const SizedBox(height: 12),
+              _skDiagnosticsView(setSt),
+            ],
             if (_diagView == 'estado') ...[
               const SizedBox(height: 12),
               SettingsGroup(

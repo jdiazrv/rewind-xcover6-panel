@@ -4498,3 +4498,211 @@ String? aisSilenceText(Duration? silence) {
       ? 'último mensaje hace $h h'
       : 'último mensaje hace $h h $rest min';
 }
+
+// ─── Diagnóstico del servidor Signal K ──────────────────────────────────────
+//
+// Lo sirve nuestro propio plugin en /plugins/rewind-xcover6-panel/diagnostics
+// (ver server/diagnostics.js): versión, último reinicio, máquina, plugins,
+// velocidad de datos y log. Todo es opcional: un servidor distinto o un
+// plugin antiguo pueden no traer alguna parte, y eso no debe romper la
+// pantalla.
+
+class SkDiagPlugin {
+  const SkDiagPlugin({
+    required this.id,
+    required this.name,
+    this.enabled,
+    this.statusType,
+    this.message,
+    this.lastError,
+    this.lastErrorAt,
+  });
+  final String id;
+  final String name;
+  final bool? enabled;
+  final String? statusType; // status | warning | error
+  final String? message;
+  final String? lastError;
+  final DateTime? lastErrorAt;
+}
+
+class SkDiagLogLine {
+  const SkDiagLogLine({
+    this.ts,
+    required this.error,
+    required this.text,
+    this.warning = false,
+  });
+  final String? ts;
+  final bool error;
+
+  /// Aviso de Node (DeprecationWarning…): sale por stderr y Signal K lo marca
+  /// como error, pero no es un fallo.
+  final bool warning;
+  final String text;
+}
+
+class SkDiagnostics {
+  const SkDiagnostics({
+    this.version,
+    this.nodeVersion,
+    this.serverStartedAt,
+    this.serverUptimeSec,
+    this.rssMb,
+    this.hostname,
+    this.hostBootedAt,
+    this.kernel,
+    this.cpuCount,
+    this.cpuModel,
+    this.loadPct,
+    this.load1,
+    this.load5,
+    this.load15,
+    this.memUsedPct,
+    this.memTotalMb,
+    this.cpuTempC,
+    this.diskUsedPct,
+    this.diskFreeGb,
+    this.diskTotalGb,
+    this.dataDiskUsedPct,
+    this.deltaRate,
+    this.paths,
+    this.wsClients,
+    this.providers = const [],
+    this.pluginsTotal = 0,
+    this.pluginsEnabled = 0,
+    this.pluginsWithErrors = 0,
+    this.plugins = const [],
+    this.connections = const [],
+    this.logErrors = 0,
+    this.logWarnings = 0,
+    this.logLines = const [],
+  });
+
+  final String? version;
+  final String? nodeVersion;
+  final DateTime? serverStartedAt;
+  final double? serverUptimeSec;
+  final double? rssMb;
+  final String? hostname;
+  final DateTime? hostBootedAt;
+  final String? kernel;
+  final int? cpuCount;
+  final String? cpuModel;
+  final double? loadPct;
+  final double? load1, load5, load15;
+  final double? memUsedPct;
+  final double? memTotalMb;
+  final double? cpuTempC;
+  final double? diskUsedPct;
+  final double? diskFreeGb;
+  final double? diskTotalGb;
+  final double? dataDiskUsedPct;
+  final double? deltaRate;
+  final int? paths;
+  final int? wsClients;
+  final List<({String id, double? deltaRate})> providers;
+  final int pluginsTotal;
+  final int pluginsEnabled;
+  final int pluginsWithErrors;
+  final List<SkDiagPlugin> plugins;
+  final List<SkDiagPlugin> connections;
+  final int logErrors;
+  final int logWarnings;
+  final List<SkDiagLogLine> logLines;
+
+  static SkDiagnostics fromJson(Map<String, dynamic> j) {
+    Map<String, dynamic> m(dynamic v) =>
+        v is Map ? Map<String, dynamic>.from(v) : const {};
+    double? d(dynamic v) => v is num ? v.toDouble() : null;
+    int? i(dynamic v) => v is num ? v.toInt() : null;
+    String? s(dynamic v) => v is String && v.isNotEmpty ? v : null;
+    DateTime? t(dynamic v) => v is String ? DateTime.tryParse(v) : null;
+    SkDiagPlugin plugin(dynamic raw) {
+      final p = m(raw);
+      return SkDiagPlugin(
+        id: s(p['id']) ?? '?',
+        name: s(p['name']) ?? s(p['id']) ?? '?',
+        enabled: p['enabled'] is bool ? p['enabled'] as bool : null,
+        statusType: s(p['statusType']),
+        message: s(p['message']),
+        lastError: s(p['lastError']),
+        lastErrorAt: t(p['lastErrorAt']),
+      );
+    }
+
+    final server = m(j['server']);
+    final host = m(j['host']);
+    final disk = m(host['disk']);
+    final dataDisk = m(host['dataDisk']);
+    final traffic = m(j['traffic']);
+    final plugins = m(j['plugins']);
+    final log = m(j['log']);
+    return SkDiagnostics(
+      version: s(server['version']),
+      nodeVersion: s(server['nodeVersion']),
+      serverStartedAt: t(server['startedAt']),
+      serverUptimeSec: d(server['uptimeSec']),
+      rssMb: d(server['rssMb']),
+      hostname: s(host['hostname']),
+      hostBootedAt: t(host['bootedAt']),
+      kernel: s(host['kernel']),
+      cpuCount: i(host['cpuCount']),
+      cpuModel: s(host['cpuModel']),
+      loadPct: d(host['loadPct']),
+      load1: d(host['load1']),
+      load5: d(host['load5']),
+      load15: d(host['load15']),
+      memUsedPct: d(host['memUsedPct']),
+      memTotalMb: d(host['memTotalMb']),
+      cpuTempC: d(host['cpuTempC']),
+      diskUsedPct: d(disk['usedPct']),
+      diskFreeGb: d(disk['freeGb']),
+      diskTotalGb: d(disk['totalGb']),
+      dataDiskUsedPct: d(dataDisk['usedPct']),
+      deltaRate: d(traffic['deltaRate']),
+      paths: i(traffic['paths']),
+      wsClients: i(traffic['wsClients']),
+      providers: [
+        for (final p in (traffic['providers'] as List? ?? const []))
+          if (p is Map && p['id'] is String)
+            (id: p['id'] as String, deltaRate: d(p['deltaRate'])),
+      ],
+      pluginsTotal: i(plugins['total']) ?? 0,
+      pluginsEnabled: i(plugins['enabled']) ?? 0,
+      pluginsWithErrors: i(plugins['withErrors']) ?? 0,
+      plugins: [
+        for (final p in (plugins['list'] as List? ?? const [])) plugin(p),
+      ],
+      connections: [
+        for (final c in (j['connections'] as List? ?? const [])) plugin(c),
+      ],
+      logErrors: i(log['errors']) ?? 0,
+      logWarnings: i(log['warnings']) ?? 0,
+      logLines: [
+        for (final l in (log['lines'] as List? ?? const []))
+          if (l is Map)
+            SkDiagLogLine(
+              ts: s(l['ts']),
+              error: l['error'] == true,
+              warning: l['warning'] == true,
+              text: l['text']?.toString() ?? '',
+            ),
+      ],
+    );
+  }
+}
+
+/// "3 d 4 h", "5 h 12 min", "8 min": cuánto hace de un reinicio.
+String humanDuration(Duration d) {
+  if (d.isNegative) return '0 min';
+  if (d.inDays >= 1) {
+    final h = d.inHours % 24;
+    return h == 0 ? '${d.inDays} d' : '${d.inDays} d $h h';
+  }
+  if (d.inHours >= 1) {
+    final m = d.inMinutes % 60;
+    return m == 0 ? '${d.inHours} h' : '${d.inHours} h $m min';
+  }
+  return '${d.inMinutes} min';
+}

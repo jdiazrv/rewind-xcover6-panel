@@ -28,6 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const { createRecorder, DEFAULTS: HISTORY_DEFAULTS } = require('./history_recorder');
 const { createConfigStore } = require('./config_store');
+const { collectDiagnostics } = require('./diagnostics');
 
 const EARTH_RADIUS_M = 6371000;
 const OWN_SOURCE_PREFIX = 'rewind-panel-anchor';
@@ -311,6 +312,17 @@ module.exports = function (app) {
     });
     open.get('/panel-config/history', (req, res) => {
       res.json(ensureConfigStore().history());
+    });
+    // Diagnóstico completo del servidor para CFG > Diagnóstico: versión,
+    // último reinicio, CPU, memoria, disco, temperatura, plugins y sus
+    // errores, velocidad de datos y las últimas líneas del log, con las
+    // claves tapadas. Ver diagnostics.js.
+    open.get('/diagnostics', (req, res) => {
+      try {
+        res.json(collectDiagnostics(app));
+      } catch (e) {
+        res.status(500).json({ error: String((e && e.message) || e) });
+      }
     });
     guarded.post('/panel-config', (req, res) => {
       const result = ensureConfigStore().save(req.body);
