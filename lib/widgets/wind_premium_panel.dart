@@ -51,54 +51,87 @@ Widget _eInkBox({
   bool unlit = false,
 }) {
   final br = radius ?? BorderRadius.circular(4);
-  return ClipRRect(
-    borderRadius: br,
-    child: Stack(
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: unlit ? const Color(0xff23241f) : _kEInkBg,
-            borderRadius: br,
-          ),
-          child: child,
-        ),
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: const Alignment(0, -0.1),
-                colors: [
-                  Colors.black.withValues(alpha: 0.32),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-          ),
-        ),
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: const Alignment(0, 0.4),
-                colors: [
-                  Colors.white.withValues(alpha: 0.08),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-          ),
-        ),
-        IgnorePointer(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: br,
-              border: Border.all(color: Colors.black.withValues(alpha: 0.25)),
-            ),
-          ),
+  // Mismo arreglo que en el panel del motor: las capas del hundido iban
+  // sueltas en el Stack, sin tamaño, y se pintaban a 0×0 ("las e-ink de la
+  // pantalla de viento no tienen sombra y no parecen e-ink", 2026-09-18).
+  // Van en Positioned.fill, con un bisel oscuro alrededor.
+  Widget layer(Gradient g) => Positioned.fill(
+    child: IgnorePointer(
+      child: DecoratedBox(decoration: BoxDecoration(gradient: g)),
+    ),
+  );
+  return Container(
+    padding: const EdgeInsets.all(2),
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(br.topLeft.x + 2),
+      gradient: const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [Color(0xff0a0d0f), Color(0xff2a3136)],
+      ),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x66000000),
+          blurRadius: 3,
+          offset: Offset(0, 1),
         ),
       ],
+    ),
+    child: ClipRRect(
+      borderRadius: br,
+      child: Stack(
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: unlit ? const Color(0xff23241f) : _kEInkBg,
+              borderRadius: br,
+            ),
+            child: child,
+          ),
+          layer(
+            LinearGradient(
+              begin: Alignment.topCenter,
+              end: const Alignment(0, -0.35),
+              colors: [
+                Colors.black.withValues(alpha: 0.32),
+                Colors.transparent,
+              ],
+            ),
+          ),
+          layer(
+            LinearGradient(
+              begin: Alignment.centerLeft,
+              end: const Alignment(-0.8, 0),
+              colors: [
+                Colors.black.withValues(alpha: 0.14),
+                Colors.transparent,
+              ],
+            ),
+          ),
+          layer(
+            LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: const Alignment(0, 0.4),
+              colors: [
+                Colors.white.withValues(alpha: 0.10),
+                Colors.transparent,
+              ],
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: br,
+                  border: Border.all(
+                    color: Colors.black.withValues(alpha: 0.35),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }
@@ -129,37 +162,43 @@ Widget _eInkValue({
   final unlit = value == '--';
   return _eInkBox(
     unlit: unlit,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      child: Center(
-        // Unlit still lays out the same glyphs (just invisible) rather than
-        // an empty SizedBox, so the box keeps the exact height/width it
-        // would have with real data instead of collapsing to the padding
-        // alone ("las pantallas colapsan cuando no hay instrumentos").
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: RichText(
-            text: TextSpan(
-              children: [
-                TextSpan(
-                  text: value,
-                  style: TextStyle(
-                    color: unlit ? Colors.transparent : _kEInkText,
-                    fontSize: valueFontSize,
-                    fontWeight: FontWeight.w800,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-                if (unit != null)
+    // Alto fijo según la letra: el ancho es fijo y, cuando la cifra no cabe,
+    // el FittedBox la encoge… y con ella encogía la caja. Un "8" y un "12.5"
+    // daban cajas de alto distinto en la fila de arriba (2026-09-18).
+    child: SizedBox(
+      height: valueFontSize * 1.2 + 8,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Center(
+          // Unlit still lays out the same glyphs (just invisible) rather than
+          // an empty SizedBox, so the box keeps the exact height/width it
+          // would have with real data instead of collapsing to the padding
+          // alone ("las pantallas colapsan cuando no hay instrumentos").
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: RichText(
+              text: TextSpan(
+                children: [
                   TextSpan(
-                    text: unit,
+                    text: value,
                     style: TextStyle(
                       color: unlit ? Colors.transparent : _kEInkText,
-                      fontSize: unitFontSize ?? valueFontSize * 0.5,
-                      fontWeight: FontWeight.w700,
+                      fontSize: valueFontSize,
+                      fontWeight: FontWeight.w800,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
                   ),
-              ],
+                  if (unit != null)
+                    TextSpan(
+                      text: unit,
+                      style: TextStyle(
+                        color: unlit ? Colors.transparent : _kEInkText,
+                        fontSize: unitFontSize ?? valueFontSize * 0.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
