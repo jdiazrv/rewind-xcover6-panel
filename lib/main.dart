@@ -12146,6 +12146,9 @@ class _DashboardState extends State<Dashboard> {
 
   Widget _navPremiumMotorPage() => PremiumMotorEnginePanel(
     engineHours: _navCardData('engineHours'),
+    houseVoltage: signalK.houseV,
+    houseCurrentA: signalK.houseA,
+    startVoltage: signalK.startV,
     lastRunLabel: _engineLastRunLabel,
     // Con el motor en marcha manda el arranque en curso; al tocarlo se abren
     // los últimos usos.

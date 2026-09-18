@@ -131,9 +131,19 @@ class PremiumMotorEnginePanel extends StatefulWidget {
     this.lastRunLabel,
     this.currentRunLabel,
     this.onShowRuns,
+    this.houseVoltage,
+    this.houseCurrentA,
+    this.startVoltage,
   });
 
   final NavCardData engineHours;
+
+  /// Baterías, abajo a la derecha: con el motor en marcha lo que se mira es
+  /// si el alternador está cargando la de servicio y cómo va la de arranque
+  /// (petición 2026-09-18). Corriente positiva = cargando.
+  final double? houseVoltage;
+  final double? houseCurrentA;
+  final double? startVoltage;
 
   /// Inicio, parada y duración del último uso, deducidos del histórico de
   /// RPM o, como alternativa, de los incrementos del cuentahoras.
@@ -298,7 +308,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
           _gaugeSweepEndTimer = Timer(
             _gaugeSweepLeg + const Duration(milliseconds: 100),
             () {
-            if (mounted) setState(() => _gaugeSelfTestFraction = null);
+              if (mounted) setState(() => _gaugeSelfTestFraction = null);
             },
           );
         });
@@ -847,51 +857,99 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
   // Canvas since these are plain Containers, not part of a CustomPainter.
   Widget _eInkBox({required Widget child}) {
     final radius = BorderRadius.circular(4);
-    return ClipRRect(
-      borderRadius: radius,
-      child: Stack(
-        children: [
-          DecoratedBox(
-            decoration: BoxDecoration(color: _kEInkBg, borderRadius: radius),
-            child: child,
-          ),
-          IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: const Alignment(0, -0.1),
-                  colors: [
-                    Colors.black.withValues(alpha: 0.28),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.bottomCenter,
-                  end: const Alignment(0, 0.4),
-                  colors: [
-                    Colors.white.withValues(alpha: 0.08),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: radius,
-                border: Border.all(color: Colors.black.withValues(alpha: 0.25)),
-              ),
-            ),
+    // Las tres capas del efecto (sombra arriba, brillo abajo, filo) van en
+    // Positioned.fill: antes eran hijos sueltos del Stack sin tamaño propio y
+    // se pintaban a 0×0, así que ninguna caja e-ink tuvo nunca el hundido que
+    // describe el comentario de arriba ("la e-ink no tiene sombra y no parece
+    // e-ink", 2026-09-18). Y un marco oscuro alrededor, como el bisel de una
+    // pantalla encastrada en el panel.
+    return Container(
+      padding: const EdgeInsets.all(2.5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(6),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xff0a0d0f), Color(0xff2a3136)],
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 3,
+            offset: Offset(0, 1),
           ),
         ],
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Stack(
+          children: [
+            DecoratedBox(
+              decoration: BoxDecoration(color: _kEInkBg, borderRadius: radius),
+              child: child,
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: const Alignment(0, -0.35),
+                      colors: [
+                        Colors.black.withValues(alpha: 0.30),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: const Alignment(-0.8, 0),
+                      colors: [
+                        Colors.black.withValues(alpha: 0.14),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: const Alignment(0, 0.4),
+                      colors: [
+                        Colors.white.withValues(alpha: 0.10),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: radius,
+                    border: Border.all(
+                      color: Colors.black.withValues(alpha: 0.35),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1095,7 +1153,7 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
         ? null
         : 4 * _gaugeSelfTestFraction!,
     motionDuration: _gaugeMotionDuration,
-        motionCurve: _gaugeMotionCurve,
+    motionCurve: _gaugeMotionCurve,
     valueText: _displayRpm == null ? '' : _displayRpm!.round().toString(),
     min: 0,
     max: 4,
@@ -1382,6 +1440,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             Expanded(child: _simulArea())
           else
             const Spacer(),
+          if (_batteryBox() case final box?) ...[
+            const SizedBox(height: 6),
+            box,
+          ],
         ],
       );
     }
@@ -1423,8 +1485,12 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
             const SizedBox(height: 6),
             Expanded(
               flex: 3,
+              // Arriba, no centrados: el FittedBox los dejaba en medio con
+              // un hueco encima que hacía falta abajo para las baterías
+              // (petición 2026-09-18).
               child: FittedBox(
                 fit: BoxFit.scaleDown,
+                alignment: Alignment.topCenter,
                 child: SizedBox(width: constraints.maxWidth, child: lamps),
               ),
             ),
@@ -1439,6 +1505,10 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
                   ),
                 ),
               ),
+            if (_batteryBox() case final box?) ...[
+              const SizedBox(height: 4),
+              box,
+            ],
           ],
         );
       },
@@ -1488,6 +1558,81 @@ class _PremiumMotorEnginePanelState extends State<PremiumMotorEnginePanel> {
       ),
     ),
   );
+
+  /// SERVICIO / CARGA o DESCARGA / ARRANQUE en una sola caja e-ink, como las
+  /// de consumo y par. Null si no hay ninguno de los tres datos.
+  Widget? _batteryBox() {
+    final hv = widget.houseVoltage;
+    final ha = widget.houseCurrentA;
+    final sv = widget.startVoltage;
+    if (hv == null && ha == null && sv == null) return null;
+    String n(double v, int d) => v.toStringAsFixed(d).replaceAll('.', ',');
+    Widget row(String label, String value) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: _kEInkText,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              color: _kEInkText,
+              fontSize: _isCompact ? 14 : 17,
+              fontWeight: FontWeight.w800,
+              height: 1.1,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+    // Un 30 % más estrecha que la columna y pegada a la derecha
+    // (petición 2026-09-18).
+    return Align(
+      alignment: Alignment.centerRight,
+      child: FractionallySizedBox(
+        widthFactor: 0.7,
+        child: _batteryScreen(hv, ha, sv, row, n),
+      ),
+    );
+  }
+
+  Widget _batteryScreen(
+    double? hv,
+    double? ha,
+    double? sv,
+    Widget Function(String, String) row,
+    String Function(double, int) n,
+  ) {
+    return _eInkBox(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (hv != null) row('SERVICIO', '${n(hv, 2)} V'),
+            if (ha != null)
+              row(
+                ha >= 0 ? 'CARGA' : 'DESCARGA',
+                '${ha >= 0 ? '+' : '−'}${n(ha.abs(), 1)} A',
+              ),
+            if (sv != null) row('ARRANQUE', '${n(sv, 2)} V'),
+          ],
+        ),
+      ),
+    );
+  }
 
   // Same PGN 61444 frame as RPM (SPN 512) — its own recessed screen, not a
   // second row inside HORAS MOTOR's, matching how every other readout on
