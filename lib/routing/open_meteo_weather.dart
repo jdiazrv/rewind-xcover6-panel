@@ -109,7 +109,7 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
       final results = await Future.wait([
         _get(Uri.https('api.open-meteo.com', '/v1/forecast', {
           ..._positionParams(la, lo),
-          'hourly': 'wind_speed_10m,wind_direction_10m',
+          'hourly': 'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
           'wind_speed_unit': 'kn',
           'models': models.map((m) => m.apiName).join(','),
           'timezone': 'GMT',
@@ -222,6 +222,8 @@ WeatherGrid buildOpenMeteoGrid({
   Float32List nan() => Float32List(nt * n)..fillRange(0, nt * n, double.nan);
   final u = nan(), v = nan();
   final h = nan(), du = nan(), dv = nan(), per = nan();
+  final gu = nan();
+  var anyGust = false;
 
   List? series(Map<String, dynamic>? hourly, String name, WeatherModel m) =>
       hourly == null
@@ -233,7 +235,8 @@ WeatherGrid buildOpenMeteoGrid({
     final perModel = [
       for (final m in models)
         (spd: series(hourly, 'wind_speed_10m', m),
-         dir: series(hourly, 'wind_direction_10m', m)),
+         dir: series(hourly, 'wind_direction_10m', m),
+         gust: series(hourly, 'wind_gusts_10m', m)),
     ];
     final mh = marinePoints.length > p
         ? marinePoints[p]['hourly'] as Map<String, dynamic>?
@@ -246,10 +249,16 @@ WeatherGrid buildOpenMeteoGrid({
     for (var t = 0; t < nt; t++) {
       final k = t * n + p;
       var su = 0.0, sv = 0.0, cnt = 0;
+      var sg = 0.0, gcnt = 0;
       for (final s in perModel) {
         final spd = _num(s.spd, t);
         final dir = _num(s.dir, t);
         if (spd == null || dir == null) continue;
+        final gg = _num(s.gust, t);
+        if (gg != null) {
+          sg += gg;
+          gcnt++;
+        }
         final c = windComponents(spd, dir);
         su += c.u;
         sv += c.v;
@@ -258,6 +267,10 @@ WeatherGrid buildOpenMeteoGrid({
       if (cnt > 0) {
         u[k] = su / cnt;
         v[k] = sv / cnt;
+      }
+      if (gcnt > 0) {
+        gu[k] = sg / gcnt;
+        anyGust = true;
       }
       // Oleaje: su propia lista de horas; normalmente la misma.
       final mt = mTimes == null
@@ -293,6 +306,7 @@ WeatherGrid buildOpenMeteoGrid({
     waveDirU: du,
     waveDirV: dv,
     waveT: per,
+    gust: anyGust ? gu : null,
     model: model,
     source: model == WeatherModel.mean
         ? 'Open-Meteo · media GFS/ECMWF/ICON-EU'

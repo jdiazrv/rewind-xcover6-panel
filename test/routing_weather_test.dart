@@ -148,6 +148,34 @@ void main() {
     });
   });
 
+  group('rachas', () {
+    test('se leen de Open-Meteo y se promedian entre modelos', () {
+      final wind = List.generate(
+        4,
+        (_) => {
+          'hourly': {
+            'time': t2,
+            'wind_speed_10m_gfs_seamless': [10, 10],
+            'wind_direction_10m_gfs_seamless': [0, 0],
+            'wind_gusts_10m_gfs_seamless': [16, 18],
+            'wind_speed_10m_ecmwf_ifs025': [12, 12],
+            'wind_direction_10m_ecmwf_ifs025': [0, 0],
+            'wind_gusts_10m_ecmwf_ifs025': [20, 22],
+          },
+        },
+      );
+      final g = grid2x2(model: WeatherModel.mean, wind: wind);
+      final s = g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!;
+      expect(s.gustKn, closeTo(18, 1e-4));
+    });
+
+    test('sin rachas en la respuesta, la rejilla no las tiene', () {
+      final g = grid2x2();
+      expect(g.gust, isNull);
+      expect(g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!.gustKn, isNull);
+    });
+  });
+
   group('rejilla', () {
     test('paso de 0,1° en zonas pequeñas y más grueso hasta 200 M', () {
       const small = GeoBox(south: 37.3, west: 23.9, north: 38.3, east: 25.0);

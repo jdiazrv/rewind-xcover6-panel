@@ -118,6 +118,11 @@ class _RoutingPageState extends State<RoutingPage> {
   DateTime? _viewTime;
   Timer? _debounce;
 
+  /// Isócronas del último cálculo (en vivo mientras calcula).
+  final List<RouteIsochrone> _isochrones = [];
+  bool _showIsochrones = false;
+  bool _showSummary = false;
+
   bool _showWind = true;
   bool _showWaves = true;
 
@@ -168,6 +173,10 @@ class _RoutingPageState extends State<RoutingPage> {
   static const _kPrefAbsWave = 'routing.absWave';
   static const _kPrefObjective = 'routing.objective';
   static const _kPrefMinAwa = 'routing.minAwa';
+  static const _kPrefCoastNm = 'routing.coastNm';
+  static const _kPrefMaxAboveMin = 'routing.maxAboveMin';
+  static const _kPrefComfortWeight = 'routing.comfortWeight';
+  static const _kPrefIsochrones = 'routing.isochrones';
 
   Future<void> _restore() async {
     try {
@@ -211,7 +220,14 @@ class _RoutingPageState extends State<RoutingPage> {
                   ? polarTypicalBeatAwaDeg(widget.polar!)
                   : null) ??
               30,
+          minimumCoastDistanceNm: p.getDouble(_kPrefCoastNm) ?? 0.5,
+          maxTimeAbovePreferred: Duration(
+            minutes: p.getInt(_kPrefMaxAboveMin) ?? 60,
+          ),
+          comfortWeight:
+              p.getDouble(_kPrefComfortWeight) ?? kComfortWeightDefault,
         );
+        _showIsochrones = p.getBool(_kPrefIsochrones) ?? false;
         _objective = RoutingObjective.values.firstWhere(
           (o) => o.name == p.getString(_kPrefObjective),
           orElse: () => RoutingObjective.fast,
@@ -247,6 +263,13 @@ class _RoutingPageState extends State<RoutingPage> {
       await p.setDouble(_kPrefPrefWave, _constraints.preferredMaxWaveM);
       await p.setDouble(_kPrefAbsWave, _constraints.absoluteMaxWaveM);
       await p.setDouble(_kPrefMinAwa, _constraints.minimumAwaDeg);
+      await p.setDouble(_kPrefCoastNm, _constraints.minimumCoastDistanceNm);
+      await p.setInt(
+        _kPrefMaxAboveMin,
+        _constraints.maxTimeAbovePreferred.inMinutes,
+      );
+      await p.setDouble(_kPrefComfortWeight, _constraints.comfortWeight);
+      await p.setBool(_kPrefIsochrones, _showIsochrones);
       await p.setString(_kPrefObjective, _objective.name);
     } catch (_) {}
   }
@@ -255,18 +278,24 @@ class _RoutingPageState extends State<RoutingPage> {
     final o = _origin;
     if (o == null) return;
     _originName = null;
-    reverseGeocode(o.latitude, o.longitude).then((n) {
-      if (mounted && _origin == o) setState(() => _originName = n);
-    }).catchError((_) {});
+    reverseGeocode(o.latitude, o.longitude)
+        .then((n) {
+          if (mounted && _origin == o) setState(() => _originName = n);
+        })
+        .catchError((_) {});
   }
 
   void _nameDestination() {
     final d = _destination;
     if (d == null) return;
     _destinationName = null;
-    reverseGeocode(d.latitude, d.longitude).then((n) {
-      if (mounted && _destination == d) setState(() => _destinationName = n);
-    }).catchError((_) {});
+    reverseGeocode(d.latitude, d.longitude)
+        .then((n) {
+          if (mounted && _destination == d) {
+            setState(() => _destinationName = n);
+          }
+        })
+        .catchError((_) {});
   }
 
   static DateTime _nextQuarter(DateTime t) {
@@ -361,6 +390,8 @@ class _RoutingPageState extends State<RoutingPage> {
       _routeProgress = 0;
       _routeError = null;
       _routeStale = false;
+      _isochrones.clear();
+      _showSummary = false;
     });
     try {
       final waypoints = [
@@ -380,13 +411,22 @@ class _RoutingPageState extends State<RoutingPage> {
           land: _land,
         ),
         (f) {
-          if (mounted && serial == _routeSerial) setState(() => _routeProgress = f);
+          if (mounted && serial == _routeSerial) {
+            setState(() => _routeProgress = f);
+          }
+        },
+        // Se piden siempre: así, activar "Isócronas" después de calcular
+        // las enseña sin volver a calcular.
+        onIsochrone: (iso) {
+          if (!mounted || serial != _routeSerial) return;
+          setState(() => _isochrones.add(iso));
         },
       );
       if (!mounted || serial != _routeSerial) return;
       setState(() {
         _route = result;
-        _routeError = result.warning;
+        _routeError = result.warning ?? _noForecastWarning(result);
+        _showSummary = result.segments.isNotEmpty;
         final dep = result.departure, eta = result.eta;
         if (dep != null && eta != null) {
           final vt = _viewTime;
@@ -428,6 +468,13 @@ class _RoutingPageState extends State<RoutingPage> {
     }
   }
 
+  String? _noForecastWarning(RouteResult r) {
+    final t = r.noForecastFrom;
+    if (t == null) return null;
+    return 'Sin previsión desde ${_formatLocal(t)}: ese tramo se ha supuesto '
+        'a motor en línea recta.';
+  }
+
   Future<void> _recalculate() async {
     setState(() => _routeStale = false);
     await _computeRoute();
@@ -439,10 +486,12 @@ class _RoutingPageState extends State<RoutingPage> {
   /// discontinua S→vías→L hasta que se pulse Recalcular. Reportado en
   /// vivo 2026-09-18.
   void _scheduleRecompute() {
-    if (_route != null || _routeStale) {
+    if (_route != null || _routeStale || _isochrones.isNotEmpty) {
       setState(() {
         _route = null;
         _routeStale = false;
+        _isochrones.clear();
+        _showSummary = false;
       });
     }
     _debounce?.cancel();
@@ -459,6 +508,8 @@ class _RoutingPageState extends State<RoutingPage> {
       _route = null;
       _routeStale = false;
       _routeError = null;
+      _isochrones.clear();
+      _showSummary = false;
     });
   }
 
@@ -479,6 +530,8 @@ class _RoutingPageState extends State<RoutingPage> {
       _routeStale = false;
       _routeError = null;
       _etaTarget = null;
+      _isochrones.clear();
+      _showSummary = false;
     });
     unawaited(_persist());
   }
@@ -505,8 +558,7 @@ class _RoutingPageState extends State<RoutingPage> {
 
   void _togglePlacing(_Target t) {
     setState(() {
-      _placing =
-          (_placing?.slot == t.slot && _placing?.viaIndex == t.viaIndex)
+      _placing = (_placing?.slot == t.slot && _placing?.viaIndex == t.viaIndex)
           ? null
           : t;
     });
@@ -610,13 +662,13 @@ class _RoutingPageState extends State<RoutingPage> {
   Future<void> _openSettings() async {
     final result =
         await showDialog<(RoutingConstraints, RoutingObjective, WeatherModel)>(
-      context: context,
-      builder: (_) => _RoutingSettingsDialog(
-        constraints: _constraints,
-        objective: _objective,
-        model: _model,
-      ),
-    );
+          context: context,
+          builder: (_) => _RoutingSettingsDialog(
+            constraints: _constraints,
+            objective: _objective,
+            model: _model,
+          ),
+        );
     if (result == null) return;
     final modelChanged = result.$3 != _model;
     setState(() {
@@ -634,6 +686,57 @@ class _RoutingPageState extends State<RoutingPage> {
     unawaited(_persist());
   }
 
+  /// Planificador de salidas: la misma ruta con varias horas de salida,
+  /// para elegir la ventana. Baja UNA sola rejilla que cubra todas (no una
+  /// por salida: la cuota de Open-Meteo va por descarga).
+  Future<void> _openPlanner() async {
+    final o = _origin,
+        d = _destination,
+        polar = widget.polar,
+        box = _weatherBox;
+    if (o == null || d == null || polar == null || box == null) return;
+    final waypoints = [
+      (lat: o.latitude, lon: o.longitude),
+      for (final v in _vias) (lat: v.latitude, lon: v.longitude),
+      (lat: d.latitude, lon: d.longitude),
+    ];
+    final picked = await showDialog<DateTime>(
+      context: context,
+      builder: (_) => _DeparturePlannerDialog(
+        base: _departure,
+        constraints: _constraints,
+        fetch: (from, to) => widget.weather.fetchGrid(
+          box: box,
+          from: from.toUtc(),
+          to: to.toUtc(),
+          model: _model,
+        ),
+        compute: (dep, grid) => computeRouteInIsolate(
+          RouteRequest(
+            waypoints: waypoints,
+            departure: dep.toUtc(),
+            grid: grid,
+            polar: polar,
+            polarFactorPercent: widget.polarFactorPercent,
+            constraints: _constraints,
+            objective: _objective,
+            land: _land,
+          ),
+          (_) {},
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _departure = picked;
+      _viewTime = null;
+      _route = null;
+      _isochrones.clear();
+    });
+    await _recompute();
+    if (mounted) await _recalculate();
+  }
+
   // ── Cronología activa: la de la ruta si hay una calculada, si no la de
   // la rejilla de tiempo (para poder seguir viendo viento/olas sin ruta).
   DateTime? get _timelineStart => _route?.departure ?? _grid?.start;
@@ -648,8 +751,12 @@ class _RoutingPageState extends State<RoutingPage> {
             ? ll.LatLng(widget.boatLat!, widget.boatLon!)
             : const ll.LatLng(37.9, 24.0));
     final vt = _viewTime;
-    final boatPos = (_route != null && vt != null) ? _route!.positionAt(vt) : null;
-    final boatSeg = (_route != null && vt != null) ? _route!.segmentAt(vt) : null;
+    final boatPos = (_route != null && vt != null)
+        ? _route!.positionAt(vt)
+        : null;
+    final boatSeg = (_route != null && vt != null)
+        ? _route!.segmentAt(vt)
+        : null;
     return Scaffold(
       backgroundColor: cBg,
       body: SafeArea(
@@ -682,6 +789,8 @@ class _RoutingPageState extends State<RoutingPage> {
                     _waveLayer(_grid!, vt),
                   if (_grid != null && vt != null && _showWind)
                     _windLayer(_grid!, vt),
+                  if (_showIsochrones && _isochrones.isNotEmpty)
+                    fm.PolylineLayer(polylines: _isochronePolylines()),
                   if (_route != null)
                     fm.PolylineLayer(polylines: _routePolylines(_route!))
                   else if (_orderedPoints.length >= 2)
@@ -691,7 +800,9 @@ class _RoutingPageState extends State<RoutingPage> {
                           points: _orderedPoints,
                           color: _tooFar ? cRed : Colors.white70,
                           strokeWidth: 2,
-                          pattern: fm.StrokePattern.dashed(segments: const [10, 8]),
+                          pattern: fm.StrokePattern.dashed(
+                            segments: const [10, 8],
+                          ),
                         ),
                       ],
                     ),
@@ -701,7 +812,9 @@ class _RoutingPageState extends State<RoutingPage> {
                         behavior: HitTestBehavior.translucent,
                         onLongPressStart: (d) => _tryGrabLine(d.globalPosition),
                         onLongPressMoveUpdate: (d) {
-                          if (_dragging != null) _dragPoint(_dragging!, d.globalPosition);
+                          if (_dragging != null) {
+                            _dragPoint(_dragging!, d.globalPosition);
+                          }
                         },
                         onLongPressEnd: (_) => _endDrag(),
                         onLongPressCancel: _endDrag,
@@ -773,10 +886,26 @@ class _RoutingPageState extends State<RoutingPage> {
             ),
             Positioned(left: 6, right: 6, top: 6, child: _topPanel()),
             if (boatSeg != null)
-              Positioned(right: 6, top: 92, bottom: 76, child: _instrumentColumn(boatSeg)),
-            if (_inspectAt != null && _grid != null && vt != null && boatSeg == null)
+              Positioned(
+                right: 6,
+                top: 92,
+                bottom: 76,
+                child: _instrumentColumn(boatSeg),
+              ),
+            if (_inspectAt != null &&
+                _grid != null &&
+                vt != null &&
+                boatSeg == null)
               Positioned(right: 6, top: 92, child: _inspectCard()),
-            if (_etaTarget != null) Positioned(left: 6, top: 92, child: _etaPopup()),
+            if (_etaTarget != null)
+              Positioned(left: 6, top: 92, child: _etaPopup())
+            else if (_showSummary && _route != null)
+              Positioned(
+                left: 6,
+                top: 92,
+                bottom: 76,
+                child: _summaryCard(_route!),
+              ),
             Positioned(left: 6, right: 6, bottom: 6, child: _bottomPanel()),
           ],
         ),
@@ -813,8 +942,10 @@ class _RoutingPageState extends State<RoutingPage> {
     final size = small ? 22.0 : 28.0;
     final dragSize = size + 26; // área de agarre más generosa que el dibujo
     final dep = _route?.departure;
-    final frac = (eta != null && dep != null && _route!.totalDuration.inSeconds > 0)
-        ? (eta.difference(dep).inSeconds / _route!.totalDuration.inSeconds).clamp(0.0, 1.0)
+    final frac =
+        (eta != null && dep != null && _route!.totalDuration.inSeconds > 0)
+        ? (eta.difference(dep).inSeconds / _route!.totalDuration.inSeconds)
+              .clamp(0.0, 1.0)
         : null;
     return fm.Marker(
       point: p,
@@ -1020,6 +1151,192 @@ class _RoutingPageState extends State<RoutingPage> {
     return lines;
   }
 
+  /// Una línea por hora de navegación (cada 4 pasos de 15 min), y la
+  /// última calculada más marcada mientras el cálculo avanza: así se ve
+  /// crecer el abanico hacia el destino.
+  List<fm.Polyline> _isochronePolylines() {
+    final lines = <fm.Polyline>[];
+    for (var i = 0; i < _isochrones.length; i++) {
+      final iso = _isochrones[i];
+      final last = _routing && i == _isochrones.length - 1;
+      if (!last && iso.step % 4 != 3) continue;
+      final pts = <ll.LatLng>[
+        for (var k = 0; k + 1 < iso.latLon.length; k += 2)
+          ll.LatLng(iso.latLon[k], iso.latLon[k + 1]),
+      ];
+      if (pts.length < 2) continue;
+      lines.add(
+        fm.Polyline(
+          points: pts,
+          color: last ? cYellow : Colors.white.withValues(alpha: 0.45),
+          strokeWidth: last ? 2 : 1,
+        ),
+      );
+    }
+    return lines;
+  }
+
+  /// Lo que se enseña al terminar un cálculo: lo esencial para decidir si
+  /// la ruta vale, sin tener que recorrerla con el deslizador.
+  Widget _summaryCard(RouteResult r) {
+    final s = RouteSummary.of(r, _constraints);
+    String pct(double f) => '${(f * 100).round()} %';
+    Widget row(String k, String v, {Color? color}) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 64,
+            child: Text(
+              k,
+              style: const TextStyle(
+                color: cMuted,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              v,
+              style: TextStyle(
+                color: color ?? cText,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    final eta = s.eta;
+    final gust = s.maxGustKn;
+    final wave = s.maxWaveM;
+    final maneuvers = [
+      if (s.tacks > 0) '${s.tacks} virada${s.tacks == 1 ? '' : 's'}',
+      if (s.gybes > 0) '${s.gybes} trasluchada${s.gybes == 1 ? '' : 's'}',
+      if (s.modeChanges > 0) '${s.modeChanges} vela↔motor',
+    ];
+    // Al lado de la columna de instrumentos (168 px): en un teléfono
+    // vertical se estrecha para no taparla.
+    final width = (MediaQuery.sizeOf(context).width - 168 - 18).clamp(
+      180.0,
+      224.0,
+    );
+    return Container(
+      width: width,
+      decoration: _panelDeco,
+      padding: const EdgeInsets.fromLTRB(10, 4, 4, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Text(
+                s.complete ? 'RESUMEN' : 'RESUMEN (incompleta)',
+                style: TextStyle(
+                  color: s.complete ? cCyan : cOrange,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1.1,
+                ),
+              ),
+              const Spacer(),
+              SizedBox(
+                width: 28,
+                height: 28,
+                child: IconButton(
+                  tooltip: 'Cerrar resumen',
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.close, size: 16, color: cMuted),
+                  onPressed: () => setState(() => _showSummary = false),
+                ),
+              ),
+            ],
+          ),
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (eta != null) row('Llegada', _formatLocal(eta)),
+                  row(
+                    'Duración',
+                    '${_durationText(s.duration)} · ${s.totalNm.toStringAsFixed(s.totalNm < 10 ? 1 : 0)} M · '
+                        '${s.avgSpeedKn.toStringAsFixed(1)} kn',
+                  ),
+                  row(
+                    'Motor',
+                    s.motorDuration == Duration.zero
+                        ? 'nada, todo a vela'
+                        : '${pct(s.motorFraction)} · ${_durationText(s.motorDuration)}',
+                    color: s.motorFraction > 0.5 ? _cMotor : null,
+                  ),
+                  if (s.sailDuration > Duration.zero)
+                    row(
+                      'A vela',
+                      'ceñida ${pct(s.upwindFraction)} · través '
+                          '${pct(s.reachDuration.inSeconds / s.sailDuration.inSeconds)} · popa '
+                          '${pct(s.downwindDuration.inSeconds / s.sailDuration.inSeconds)}',
+                    ),
+                  row(
+                    'Viento',
+                    'máx ${s.maxTwsKn.round()} kn'
+                        '${gust == null ? '' : ' · racha ${gust.round()} kn'}',
+                    color: (gust ?? s.maxTwsKn) > _constraints.maxAwsKn
+                        ? cRed
+                        : null,
+                  ),
+                  row(
+                    'Ola',
+                    wave == null
+                        ? 'sin dato'
+                        : 'máx ${wave.toStringAsFixed(1)} m'
+                              '${s.aboveComfortDuration > Duration.zero ? ' · ${_durationText(s.aboveComfortDuration)} > ${_constraints.preferredMaxWaveM.toStringAsFixed(1)} m' : ''}',
+                    color: (wave ?? 0) > _constraints.preferredMaxWaveM
+                        ? cYellow
+                        : null,
+                  ),
+                  row(
+                    'Maniobras',
+                    maneuvers.isEmpty ? 'ninguna' : maneuvers.join(' · '),
+                  ),
+                  if (gust != null && gust > _constraints.maxAwsKn)
+                    _summaryNote(
+                      'Rachas de ${gust.round()} kn: por encima de tu viento '
+                      'máximo (${_constraints.maxAwsKn.round()} kn).',
+                      cRed,
+                    ),
+                  if (s.noForecastFrom != null)
+                    _summaryNote(
+                      'Sin previsión desde ${_formatLocal(s.noForecastFrom!)}.',
+                      cOrange,
+                    ),
+                  if (s.warning != null) _summaryNote(s.warning!, cOrange),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryNote(String text, Color color) => Padding(
+    padding: const EdgeInsets.only(top: 4, right: 6),
+    child: Text(
+      text,
+      style: TextStyle(
+        color: color,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w600,
+        height: 1.25,
+      ),
+    ),
+  );
+
   BoxDecoration get _panelDeco => BoxDecoration(
     color: cPanel.withValues(alpha: 0.93),
     borderRadius: BorderRadius.circular(11),
@@ -1048,7 +1365,10 @@ class _RoutingPageState extends State<RoutingPage> {
                 IconButton(
                   tooltip: 'Volver',
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 30),
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 30,
+                  ),
                   icon: const Icon(Icons.arrow_back, color: cText, size: 18),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
@@ -1094,13 +1414,26 @@ class _RoutingPageState extends State<RoutingPage> {
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
                         color: cCyan,
-                        value: _routing ? _routeProgress.clamp(0.02, 1.0) : null,
+                        value: _routing
+                            ? _routeProgress.clamp(0.02, 1.0)
+                            : null,
                       ),
                     ),
                   ),
-                if (_origin != null && _destination != null && widget.polar != null)
+                if (_origin != null &&
+                    _destination != null &&
+                    widget.polar != null)
                   _recalculateButton(),
-                _modeAndObjectiveBadge(),
+                if (_route != null && !_showSummary)
+                  _smallAction(Icons.summarize_outlined, 'Resumen', () {
+                    setState(() {
+                      _showSummary = true;
+                      _etaTarget = null;
+                    });
+                  }),
+                // En un teléfono vertical no cabe: el modelo y el modo se
+                // ven igualmente al abrir Ajustes.
+                if (!_narrow) _modeAndObjectiveBadge(),
                 _smallAction(Icons.tune, 'Ajustes de la ruta', _openSettings),
               ],
             ),
@@ -1125,13 +1458,31 @@ class _RoutingPageState extends State<RoutingPage> {
                     _smallAction(Icons.swap_horiz, 'Invertir', _swapEnds),
                   _departureChip(),
                   const SizedBox(width: 8),
+                  if (_origin != null &&
+                      _destination != null &&
+                      widget.polar != null &&
+                      !_tooFar)
+                    _labeledAction(
+                      Icons.event_note,
+                      'Planificar salida',
+                      _openPlanner,
+                    ),
+
                   // Dos borrados distintos: el cálculo (la ruta coloreada;
                   // los puntos se quedan) y los puntos (S, L y vías, para
                   // empezar otra ruta).
                   if (_route != null)
-                    _labeledAction(Icons.layers_clear, 'Borrar cálculo', _clearRoute),
+                    _labeledAction(
+                      Icons.layers_clear,
+                      'Borrar cálculo',
+                      _clearRoute,
+                    ),
                   if (_orderedPoints.isNotEmpty)
-                    _labeledAction(Icons.delete_outline, 'Borrar puntos', _clearPoints),
+                    _labeledAction(
+                      Icons.delete_outline,
+                      'Borrar puntos',
+                      _clearPoints,
+                    ),
                 ],
               ),
             ),
@@ -1146,38 +1497,44 @@ class _RoutingPageState extends State<RoutingPage> {
   /// pulsar aquí. Resaltado en cian mientras la ruta está desactualizada
   /// (algo cambió desde el último cálculo); en gris si ya está al día,
   /// pero sigue sirviendo para forzar un recálculo.
+  bool get _narrow => MediaQuery.sizeOf(context).width < 560;
+
   Widget _recalculateButton() => Padding(
     padding: const EdgeInsets.only(right: 4),
-    child: InkWell(
-      borderRadius: BorderRadius.circular(7),
-      onTap: _routing ? null : _recalculate,
-      child: Container(
-        height: 26,
-        padding: const EdgeInsets.symmetric(horizontal: 9),
-        decoration: BoxDecoration(
-          color: _routeStale ? cCyan : cPanel2,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: _routeStale ? cCyan : Colors.white24),
-        ),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.refresh,
-              size: 13,
-              color: _routeStale ? Colors.black : cMuted,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              'Recalcular',
-              style: TextStyle(
+    child: Tooltip(
+      message: 'Recalcular',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(7),
+        onTap: _routing ? null : _recalculate,
+        child: Container(
+          height: 26,
+          padding: EdgeInsets.symmetric(horizontal: _narrow ? 7 : 9),
+          decoration: BoxDecoration(
+            color: _routeStale ? cCyan : cPanel2,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: _routeStale ? cCyan : Colors.white24),
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.refresh,
+                size: 13,
                 color: _routeStale ? Colors.black : cMuted,
-                fontSize: 11,
-                fontWeight: FontWeight.w800,
               ),
-            ),
-          ],
+              if (!_narrow) const SizedBox(width: 4),
+              if (!_narrow)
+                Text(
+                  'Recalcular',
+                  style: TextStyle(
+                    color: _routeStale ? Colors.black : cMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     ),
@@ -1223,7 +1580,11 @@ class _RoutingPageState extends State<RoutingPage> {
     padding: const EdgeInsets.only(right: 4),
     child: Text(
       '${_model.label} · ${_objective.label}',
-      style: const TextStyle(color: cMuted, fontSize: 10.5, fontWeight: FontWeight.w600),
+      style: const TextStyle(
+        color: cMuted,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w600,
+      ),
     ),
   );
 
@@ -1253,7 +1614,11 @@ class _RoutingPageState extends State<RoutingPage> {
           items.first,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+          style: TextStyle(
+            color: color,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
     ];
@@ -1280,7 +1645,8 @@ class _RoutingPageState extends State<RoutingPage> {
         color: cGreen,
         text: _origin == null
             ? null
-            : (_originName ?? formatLatLon(_origin!.latitude, _origin!.longitude)),
+            : (_originName ??
+                  formatLatLon(_origin!.latitude, _origin!.longitude)),
         placing: _placing?.slot == _Slot.origin,
         onTap: () => _togglePlacing(const _Target(_Slot.origin)),
       ),
@@ -1306,7 +1672,10 @@ class _RoutingPageState extends State<RoutingPage> {
     }
     if (_vias.length < kMaxVias) {
       chips.add(
-        _addViaChip(placing: _placing?.slot == _Slot.via && (_placing?.viaIndex ?? -1) < 0),
+        _addViaChip(
+          placing:
+              _placing?.slot == _Slot.via && (_placing?.viaIndex ?? -1) < 0,
+        ),
       );
     }
     chips.add(
@@ -1317,7 +1686,10 @@ class _RoutingPageState extends State<RoutingPage> {
         text: _destination == null
             ? null
             : (_destinationName ??
-                  formatLatLon(_destination!.latitude, _destination!.longitude)),
+                  formatLatLon(
+                    _destination!.latitude,
+                    _destination!.longitude,
+                  )),
         placing: _placing?.slot == _Slot.destination,
         onTap: () => _togglePlacing(const _Target(_Slot.destination)),
       ),
@@ -1398,7 +1770,11 @@ class _RoutingPageState extends State<RoutingPage> {
           SizedBox(width: 2),
           Text(
             'vía',
-            style: TextStyle(color: cMuted, fontSize: 11, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: cMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ],
       ),
@@ -1480,7 +1856,9 @@ class _RoutingPageState extends State<RoutingPage> {
                 Expanded(
                   child: Text.rich(
                     TextSpan(
-                      text: vt == null ? 'Sin datos de tiempo' : _formatLocal(vt),
+                      text: vt == null
+                          ? 'Sin datos de tiempo'
+                          : _formatLocal(vt),
                       style: const TextStyle(
                         color: cText,
                         fontSize: 13.5,
@@ -1503,11 +1881,17 @@ class _RoutingPageState extends State<RoutingPage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                if (seg != null) _modeBadge(seg.mode),
+                // En estrecho ya lo dice la columna de instrumentos.
+                if (seg != null && !_narrow) _modeBadge(seg.mode),
                 const SizedBox(width: 6),
                 _layerToggle('Viento', _showWind, (v) => _showWind = v),
                 const SizedBox(width: 4),
                 _layerToggle('Olas', _showWaves, (v) => _showWaves = v),
+                const SizedBox(width: 4),
+                _layerToggle('Isócronas', _showIsochrones, (v) {
+                  _showIsochrones = v;
+                  unawaited(_persist());
+                }),
               ],
             ),
           ),
@@ -1517,14 +1901,22 @@ class _RoutingPageState extends State<RoutingPage> {
               child: SliderTheme(
                 data: SliderTheme.of(context).copyWith(
                   trackHeight: 3,
-                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 7,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 14,
+                  ),
                 ),
                 child: Slider(
-                  value: vt.difference(start).inSeconds.toDouble().clamp(
-                    0,
-                    math.max(1, end.difference(start).inSeconds.toDouble()),
-                  ),
+                  value: vt
+                      .difference(start)
+                      .inSeconds
+                      .toDouble()
+                      .clamp(
+                        0,
+                        math.max(1, end.difference(start).inSeconds.toDouble()),
+                      ),
                   min: 0,
                   max: math.max(1, end.difference(start).inSeconds.toDouble()),
                   activeColor: cCyan,
@@ -1573,7 +1965,11 @@ class _RoutingPageState extends State<RoutingPage> {
           const SizedBox(width: 3),
           Text(
             motor ? 'A MOTOR' : 'A VELA',
-            style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w800),
+            style: TextStyle(
+              color: color,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ],
       ),
@@ -1594,7 +1990,11 @@ class _RoutingPageState extends State<RoutingPage> {
             width: 74,
             child: Text(
               label,
-              style: const TextStyle(color: cMuted, fontSize: 10.5, fontWeight: FontWeight.w600),
+              style: const TextStyle(
+                color: cMuted,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
           Expanded(
@@ -1625,9 +2025,23 @@ class _RoutingPageState extends State<RoutingPage> {
           children: [
             _modeBadge(s.mode),
             const SizedBox(height: 2),
-            stat('STW', kn(s.stwKn), color: s.mode == PropulsionMode.motor ? _cMotor : _cSailing),
-            stat('TWS', kn(s.twsKn)),
-            stat('TWD', deg(s.twdDeg)),
+            stat(
+              'STW',
+              kn(s.stwKn),
+              color: s.mode == PropulsionMode.motor ? _cMotor : _cSailing,
+            ),
+            if (s.noForecast)
+              stat('Tiempo', 'sin previsión', color: cOrange)
+            else ...[
+              stat('TWS', kn(s.twsKn)),
+              if (s.gustKn != null)
+                stat(
+                  'Racha',
+                  kn(s.gustKn!),
+                  color: s.gustKn! > _constraints.maxAwsKn ? cRed : null,
+                ),
+              stat('TWD', deg(s.twdDeg)),
+            ],
             stat('AWS', kn(s.awsKn)),
             stat('AWA', '${s.awaDeg >= 0 ? '+' : ''}${s.awaDeg.round()}°'),
             const Divider(height: 12, color: Colors.white12),
@@ -1658,7 +2072,9 @@ class _RoutingPageState extends State<RoutingPage> {
     final d = t.difference(base);
     if (d.inMinutes.abs() < 1) return 'salida';
     final h = d.inMinutes.abs() ~/ 60, m = d.inMinutes.abs() % 60;
-    final s = m == 0 ? '$h h' : (h == 0 ? '$m min' : '$h h ${m.toString().padLeft(2, '0')}');
+    final s = m == 0
+        ? '$h h'
+        : (h == 0 ? '$m min' : '$h h ${m.toString().padLeft(2, '0')}');
     return d.isNegative ? '$s antes de salir' : 'salida + $s';
   }
 
@@ -1708,12 +2124,16 @@ class _RoutingPageState extends State<RoutingPage> {
       ),
     );
     return [
-      if (_showWind) ...[
-        for (final (c, t) in _windScale) dot(c, t),
-      ],
+      if (_showWind) ...[for (final (c, t) in _windScale) dot(c, t)],
       if (_showWaves) ...[
-        dot(_kWaveWarn.withValues(alpha: 1), 'ola ≥${_kWavePreferredM.toStringAsFixed(1)} m'),
-        dot(_kWaveBad.withValues(alpha: 1), '≥${_kWaveMaxM.toStringAsFixed(1)} m'),
+        dot(
+          _kWaveWarn.withValues(alpha: 1),
+          'ola ≥${_kWavePreferredM.toStringAsFixed(1)} m',
+        ),
+        dot(
+          _kWaveBad.withValues(alpha: 1),
+          '≥${_kWaveMaxM.toStringAsFixed(1)} m',
+        ),
       ],
     ];
   }
@@ -1913,7 +2333,12 @@ class _RoutingPageState extends State<RoutingPage> {
               style: TextStyle(color: cOrange, fontSize: 12),
             )
           else ...[
-            row('Viento', '${s.twsKn.toStringAsFixed(1)} kn · ${s.twdDeg.round()}°'),
+            row(
+              'Viento',
+              '${s.twsKn.toStringAsFixed(1)} kn · ${s.twdDeg.round()}°',
+            ),
+            if (s.gustKn != null)
+              row('Racha', '${s.gustKn!.toStringAsFixed(1)} kn'),
             row(
               'Ola',
               s.waveHeightM == null
@@ -1947,7 +2372,10 @@ class _WindArrow extends StatelessWidget {
     children: [
       Transform.rotate(
         angle: (twdDeg + 180) * math.pi / 180,
-        child: CustomPaint(size: const Size(26, 26), painter: _ArrowPainter(color)),
+        child: CustomPaint(
+          size: const Size(26, 26),
+          painter: _ArrowPainter(color),
+        ),
       ),
       Positioned(
         right: 0,
@@ -2070,8 +2498,16 @@ class _BoatMarker extends StatelessWidget {
       Transform.rotate(
         angle: headingDeg * math.pi / 180,
         child: shipIconAsset == null
-            ? CustomPaint(size: const Size(26, 26), painter: _BoatPainter(color))
-            : Image.asset(shipIconAsset!, width: 34, height: 34, fit: BoxFit.contain),
+            ? CustomPaint(
+                size: const Size(26, 26),
+                painter: _BoatPainter(color),
+              )
+            : Image.asset(
+                shipIconAsset!,
+                width: 34,
+                height: 34,
+                fit: BoxFit.contain,
+              ),
       ),
       Positioned(
         right: shipIconAsset == null ? 2 : -2,
@@ -2115,8 +2551,7 @@ class _BoatPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_BoatPainter old) =>
-      old.color != color;
+  bool shouldRepaint(_BoatPainter old) => old.color != color;
 }
 
 /// Ajustes que de verdad cambian el cálculo: cambiarlos vuelve a correr
@@ -2143,238 +2578,732 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
   late double prefWave = widget.constraints.preferredMaxWaveM;
   late double absWave = widget.constraints.absoluteMaxWaveM;
   late double minAwa = widget.constraints.minimumAwaDeg;
+  late double coastNm = widget.constraints.minimumCoastDistanceNm;
+  late double maxAboveMin = widget.constraints.maxTimeAbovePreferred.inMinutes
+      .toDouble();
+  late double comfortWeight = widget.constraints.comfortWeight;
   late RoutingObjective objective = widget.objective;
   late WeatherModel model = widget.model;
 
+  RoutingConstraints get _result => RoutingConstraints(
+    minimumSailingSTW: minStw,
+    allowMotor: allowMotor,
+    motorSpeedKn: motorKn,
+    maxAwsKn: maxAws,
+    preferredMaxWaveM: prefWave,
+    absoluteMaxWaveM: absWave,
+    minimumAwaDeg: minAwa,
+    minimumCoastDistanceNm: coastNm,
+    maxTimeAbovePreferred: Duration(minutes: maxAboveMin.round()),
+    comfortWeight: comfortWeight,
+  );
+
+  static const _modeHelp = {
+    RoutingObjective.fast:
+        'Llegar cuanto antes. Solo mandan la ola máxima y el viento máximo.',
+    RoutingObjective.comfort:
+        'Rodea la ola por encima de la cómoda (sobre todo de proa) y no pasa '
+        'en ella más del tiempo máximo.',
+    RoutingObjective.custom:
+        'Como Confort, pero tú eliges cuánto pesa la ola frente a llegar '
+        'antes (peso 0 = Rápido con tope de tiempo).',
+  };
+
+  static String _minutesLabel(double m) {
+    final h = m ~/ 60, mm = (m % 60).round();
+    if (h == 0) return '$mm min';
+    return mm == 0 ? '$h h' : '$h h $mm';
+  }
+
+  // Pensado para una pantalla apaisada baja (XCover: ~410 px de alto):
+  // cabecera de una línea con los botones dentro, a la izquierda modelo y
+  // modo, a la derecha cada parámetro en UNA fila (nombre · deslizador ·
+  // valor). El diálogo anterior (título, tres columnas de deslizadores de
+  // dos líneas y botones abajo) no cabía y se desbordaba. Reportado en
+  // vivo 2026-09-18 ("la pantalla de ajustes es un asco").
   @override
   Widget build(BuildContext context) {
-    final dialogWidth = MediaQuery.sizeOf(context).width.clamp(460, 760).toDouble();
-    Widget header(String t) => Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Text(
-        t,
-        style: const TextStyle(color: cMuted, fontSize: 11, fontWeight: FontWeight.w800),
-      ),
+    final size = MediaQuery.sizeOf(context);
+    final wide = size.width >= 640;
+    final left = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _groupTitle('MODELO'),
+        _choice<WeatherModel>(
+          values: WeatherModel.values,
+          selected: model,
+          label: (m) => m.label,
+          onPick: (m) => setState(() => model = m),
+        ),
+        const SizedBox(height: 12),
+        _groupTitle('MODO'),
+        _choice<RoutingObjective>(
+          values: RoutingObjective.values,
+          selected: objective,
+          label: (o) => o.label,
+          onPick: (o) => setState(() => objective = o),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          _modeHelp[objective] ?? '',
+          style: const TextStyle(color: cMuted, fontSize: 11, height: 1.3),
+        ),
+      ],
     );
-    return AlertDialog(
+    final right = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _groupTitle('VELA'),
+        _row(
+          'Vela desde',
+          minStw,
+          2,
+          8,
+          0.5,
+          (v) => minStw = v,
+          '${minStw.toStringAsFixed(1)} kn',
+        ),
+        _row(
+          'AWA mínimo',
+          minAwa,
+          15,
+          45,
+          1,
+          (v) => minAwa = v,
+          '${minAwa.round()}°',
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: Text(
+            allowMotor
+                ? 'Más cerrado que este aparente no se ciñe: ese rumbo va a '
+                      'motor, o se abre el bordo si sale más rápido.'
+                : 'Más cerrado que este aparente no se ciñe: sin motor, la '
+                      'ruta abre el bordo hasta este ángulo.',
+            style: const TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
+          ),
+        ),
+        const SizedBox(height: 6),
+        _groupTitle('MOTOR'),
+        _switchRow('Permitir motor', allowMotor, (v) => allowMotor = v),
+        _row(
+          'Velocidad',
+          motorKn,
+          3,
+          10,
+          0.5,
+          (v) => motorKn = v,
+          '${motorKn.toStringAsFixed(1)} kn',
+          enabled: allowMotor,
+        ),
+        const SizedBox(height: 6),
+        _groupTitle('LÍMITES'),
+        _row(
+          'Viento máx.',
+          maxAws,
+          15,
+          40,
+          1,
+          (v) => maxAws = v,
+          '${maxAws.round()} kn',
+        ),
+        _row(
+          'Ola cómoda',
+          prefWave,
+          0.2,
+          2.0,
+          0.1,
+          (v) => prefWave = math.min(v, absWave),
+          '${prefWave.toStringAsFixed(1)} m',
+        ),
+        _row('Ola máxima', absWave, 0.2, 3.0, 0.1, (v) {
+          absWave = v;
+          if (prefWave > absWave) prefWave = absWave;
+        }, '${absWave.toStringAsFixed(1)} m'),
+        _row(
+          'Margen costa',
+          coastNm,
+          0.2,
+          2.0,
+          0.1,
+          (v) => coastNm = v,
+          '${coastNm.toStringAsFixed(1)} M',
+        ),
+        const SizedBox(height: 6),
+        _groupTitle('CONFORT'),
+        _row(
+          'Tiempo > cómoda',
+          maxAboveMin,
+          0,
+          360,
+          15,
+          (v) => maxAboveMin = v,
+          _minutesLabel(maxAboveMin),
+          enabled: objective != RoutingObjective.fast,
+        ),
+        _row(
+          'Peso confort',
+          comfortWeight,
+          0,
+          10,
+          0.5,
+          (v) => comfortWeight = v,
+          comfortWeight.toStringAsFixed(1),
+          enabled: objective == RoutingObjective.custom,
+        ),
+        Text(
+          objective == RoutingObjective.fast
+              ? 'En Rápido no cuentan: elige Confort o Personalizado.'
+              : 'Tiempo máximo con ola por encima de la cómoda en toda la ruta.',
+          style: const TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
+        ),
+      ],
+    );
+    return Dialog(
       backgroundColor: cPanel,
-      title: const Text('Ajustes de la ruta', style: TextStyle(color: cText)),
-      content: SizedBox(
-        width: dialogWidth,
-        // Todo cabe sin scroll: tres columnas en vez de una lista larga.
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 820),
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      header('MODELO METEOROLÓGICO'),
-                      SegmentedButton<WeatherModel>(
-                        segments: [
-                          for (final m in WeatherModel.values)
-                            ButtonSegment(value: m, label: Text(m.label)),
-                        ],
-                        selected: {model},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (s) => setState(() => model = s.first),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 8, 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.tune, size: 18, color: cCyan),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Ajustes de la ruta',
+                      style: TextStyle(
+                        color: cText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
                       ),
-                    ],
+                    ),
                   ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      header('MODO'),
-                      SegmentedButton<RoutingObjective>(
-                        segments: [
-                          for (final o in RoutingObjective.values)
-                            ButtonSegment(value: o, label: Text(o.label)),
-                        ],
-                        selected: {objective},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (s) => setState(() => objective = s.first),
-                      ),
-                    ],
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancelar'),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 4),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: cCyan,
+                      foregroundColor: Colors.black,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: () =>
+                        Navigator.of(context).pop((_result, objective, model)),
+                    child: const Text(
+                      'Aplicar',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // VELA
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      header('VELA'),
-                      _slider(
-                        'Velocidad mínima',
-                        minStw,
-                        2,
-                        8,
-                        (v) => setState(() => minStw = v),
-                        '${minStw.toStringAsFixed(1)} kn',
+            const Divider(height: 1, color: Colors.white12),
+            Flexible(
+              // Cabe entero en el XCover; el scroll solo existe para
+              // pantallas aún más bajas, antes que desbordar.
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                child: wide
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(flex: 4, child: left),
+                          const SizedBox(width: 20),
+                          Expanded(flex: 6, child: right),
+                        ],
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [left, const SizedBox(height: 14), right],
                       ),
-                      _slider(
-                        'AWA mínimo al ceñir',
-                        minAwa,
-                        15,
-                        45,
-                        (v) => setState(() => minAwa = v),
-                        '${minAwa.round()}°',
-                      ),
-                      const Text(
-                        'Por debajo, ese rumbo no se ofrece a vela aunque la '
-                        'polar tenga dato: las velas no trimarían tan '
-                        'cerradas. Propuesto de tu propia polar.',
-                        style: TextStyle(color: cMuted, fontSize: 10),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-                // MOTOR
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      header('MOTOR'),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        dense: true,
-                        title: const Text(
-                          'Permitido',
-                          style: TextStyle(color: cText, fontSize: 13),
-                        ),
-                        value: allowMotor,
-                        activeThumbColor: cCyan,
-                        onChanged: (v) => setState(() => allowMotor = v),
-                      ),
-                      if (allowMotor)
-                        _slider(
-                          'Velocidad de motor',
-                          motorKn,
-                          3,
-                          10,
-                          (v) => setState(() => motorKn = v),
-                          '${motorKn.toStringAsFixed(1)} kn',
-                        ),
-                      _slider(
-                        'AWS máximo',
-                        maxAws,
-                        15,
-                        40,
-                        (v) => setState(() => maxAws = v),
-                        '${maxAws.round()} kn',
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-                // OLA
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      header('OLA'),
-                      _slider(
-                        'Preferida (aviso)',
-                        prefWave,
-                        0.2,
-                        2.0,
-                        (v) => setState(() => prefWave = math.min(v, absWave)),
-                        '${prefWave.toStringAsFixed(2)} m',
-                      ),
-                      _slider(
-                        'Máxima absoluta',
-                        absWave,
-                        0.2,
-                        3.0,
-                        (v) => setState(() {
-                          absWave = v;
-                          if (prefWave > absWave) prefWave = absWave;
-                        }),
-                        '${absWave.toStringAsFixed(2)} m',
-                      ),
-                      const Text(
-                        'La máxima nunca se cruza; la preferida solo avisa.',
-                        style: TextStyle(color: cMuted, fontSize: 10),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancelar'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop((
-            RoutingConstraints(
-              minimumSailingSTW: minStw,
-              allowMotor: allowMotor,
-              motorSpeedKn: motorKn,
-              maxAwsKn: maxAws,
-              preferredMaxWaveM: prefWave,
-              absoluteMaxWaveM: absWave,
-              minimumAwaDeg: minAwa,
-            ),
-            objective,
-            model,
-          )),
-          child: const Text('Aplicar y recalcular'),
-        ),
-      ],
     );
   }
 
-  Widget _slider(
+  Widget _groupTitle(String t) => Padding(
+    padding: const EdgeInsets.only(bottom: 4),
+    child: Text(
+      t,
+      style: const TextStyle(
+        color: cCyan,
+        fontSize: 10.5,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 1.2,
+      ),
+    ),
+  );
+
+  /// Selector de opciones en una fila de pastillas del mismo ancho: el
+  /// SegmentedButton de Material partía "Personalizado" en dos líneas.
+  Widget _choice<T>({
+    required List<T> values,
+    required T selected,
+    required String Function(T) label,
+    required void Function(T) onPick,
+  }) => Container(
+    height: 34,
+    decoration: BoxDecoration(
+      color: cPanel2,
+      borderRadius: BorderRadius.circular(9),
+      border: Border.all(color: Colors.white12),
+    ),
+    child: Row(
+      children: [
+        for (final v in values)
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => onPick(v),
+              child: Container(
+                margin: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: v == selected ? cCyan : Colors.transparent,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                alignment: Alignment.center,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text(
+                      label(v),
+                      style: TextStyle(
+                        color: v == selected ? Colors.black : cText,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+
+  Widget _row(
     String label,
     double value,
     double min,
     double max,
-    void Function(double) onChanged,
-    String valueText,
-  ) => Padding(
-    padding: const EdgeInsets.only(top: 8),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    double step,
+    void Function(double) set,
+    String valueText, {
+    bool enabled = true,
+  }) => SizedBox(
+    height: 32,
+    child: Row(
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(label, style: const TextStyle(color: cMuted, fontSize: 12)),
+        SizedBox(
+          width: 96,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: enabled ? cText : cMuted,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
-            Text(
-              valueText,
-              style: const TextStyle(color: cText, fontSize: 12, fontWeight: FontWeight.w700),
-            ),
-          ],
+          ),
         ),
-        SliderTheme(
-          data: SliderTheme.of(context).copyWith(trackHeight: 3),
-          child: Slider(
-            value: value,
-            min: min,
-            max: max,
-            activeColor: cCyan,
-            onChanged: onChanged,
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              divisions: ((max - min) / step).round(),
+              activeColor: cCyan,
+              inactiveColor: Colors.white12,
+              onChanged: enabled ? (v) => setState(() => set(v)) : null,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 52,
+          child: Text(
+            valueText,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: enabled ? cText : cMuted,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ),
       ],
     ),
   );
+
+  Widget _switchRow(String label, bool value, void Function(bool) set) =>
+      SizedBox(
+        height: 32,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: cText,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Transform.scale(
+              scale: 0.8,
+              child: Switch(
+                value: value,
+                activeThumbColor: Colors.black,
+                activeTrackColor: cCyan,
+                onChanged: (v) => setState(() => set(v)),
+              ),
+            ),
+          ],
+        ),
+      );
+}
+
+/// Compara salidas cada [_everyH] horas durante [_spanH] horas desde la
+/// salida elegida. Tocar una fila la toma como salida y calcula la ruta.
+class _DeparturePlannerDialog extends StatefulWidget {
+  const _DeparturePlannerDialog({
+    required this.base,
+    required this.constraints,
+    required this.fetch,
+    required this.compute,
+  });
+  final DateTime base;
+  final RoutingConstraints constraints;
+  final Future<WeatherGrid> Function(DateTime from, DateTime to) fetch;
+  final Future<RouteResult> Function(DateTime departure, WeatherGrid grid)
+  compute;
+
+  @override
+  State<_DeparturePlannerDialog> createState() =>
+      _DeparturePlannerDialogState();
+}
+
+class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
+  int _everyH = 3;
+  int _spanH = 24;
+  bool _running = false;
+  String? _error;
+  int _total = 0;
+  final List<(DateTime, RouteSummary)> _rows = [];
+
+  /// Horas de previsión por encima de la última salida, para que la ruta
+  /// quepa: las mismas que usa la pantalla.
+  static const _routeHours = _kForecastHours;
+
+  Future<void> _run() async {
+    final deps = [
+      for (var h = 0; h <= _spanH; h += _everyH)
+        widget.base.add(Duration(hours: h)),
+    ];
+    setState(() {
+      _running = true;
+      _error = null;
+      _rows.clear();
+      _total = deps.length;
+    });
+    try {
+      final grid = await widget.fetch(
+        widget.base,
+        deps.last.add(const Duration(hours: _routeHours)),
+      );
+      for (final dep in deps) {
+        if (!mounted) return;
+        final r = await widget.compute(dep, grid);
+        if (!mounted) return;
+        setState(
+          () => _rows.add((dep, RouteSummary.of(r, widget.constraints))),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  /// La más rápida entre las completas, y la más cómoda (menos tiempo con
+  /// ola incómoda, luego menos ola máxima, luego menos racha).
+  (int?, int?) _bests() {
+    int? fast, comfy;
+    for (var i = 0; i < _rows.length; i++) {
+      final s = _rows[i].$2;
+      if (!s.complete || s.noForecastFrom != null) continue;
+      if (fast == null || s.duration < _rows[fast].$2.duration) fast = i;
+      if (comfy == null) {
+        comfy = i;
+        continue;
+      }
+      final c = _rows[comfy].$2;
+      final a = (
+        s.aboveComfortDuration.inMinutes,
+        s.maxWaveM ?? 0,
+        s.maxGustKn ?? s.maxTwsKn,
+      );
+      final b = (
+        c.aboveComfortDuration.inMinutes,
+        c.maxWaveM ?? 0,
+        c.maxGustKn ?? c.maxTwsKn,
+      );
+      if (a.$1 < b.$1 ||
+          (a.$1 == b.$1 &&
+              (a.$2 < b.$2 - 0.05 ||
+                  ((a.$2 - b.$2).abs() <= 0.05 && a.$3 < b.$3)))) {
+        comfy = i;
+      }
+    }
+    return (fast, comfy);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (fast, comfy) = _bests();
+    return Dialog(
+      backgroundColor: cPanel,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 6, 2),
+              child: Row(
+                children: [
+                  const Icon(Icons.event_note, size: 18, color: cCyan),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Planificar salida',
+                      style: TextStyle(
+                        color: cText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Cerrar',
+                    icon: const Icon(Icons.close, color: cMuted, size: 20),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Colors.white12),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text(
+                    'Cada',
+                    style: TextStyle(color: cMuted, fontSize: 12),
+                  ),
+                  for (final h in const [1, 2, 3, 6])
+                    _pill(
+                      '$h h',
+                      _everyH == h,
+                      () => setState(() => _everyH = h),
+                    ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'durante',
+                    style: TextStyle(color: cMuted, fontSize: 12),
+                  ),
+                  for (final h in const [12, 24, 48])
+                    _pill(
+                      '$h h',
+                      _spanH == h,
+                      () => setState(() => _spanH = h),
+                    ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: cCyan,
+                      foregroundColor: Colors.black,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    onPressed: _running ? null : _run,
+                    icon: const Icon(Icons.play_arrow, size: 16),
+                    label: Text(
+                      _running ? '${_rows.length}/$_total' : 'Calcular',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+              child: Text(
+                'Desde ${_RoutingPageState._formatLocal(widget.base)}, con el modelo y los '
+                'ajustes actuales. Toca una salida para usarla.',
+                style: const TextStyle(color: cMuted, fontSize: 10.5),
+              ),
+            ),
+            if (_running)
+              LinearProgressIndicator(
+                value: _total == 0 ? null : _rows.length / _total,
+                minHeight: 2,
+                color: cCyan,
+                backgroundColor: Colors.white12,
+              ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+                child: Text(
+                  _error!,
+                  style: const TextStyle(color: cRed, fontSize: 12),
+                ),
+              ),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: const EdgeInsets.only(bottom: 8),
+                itemCount: _rows.length,
+                separatorBuilder: (_, _) =>
+                    const Divider(height: 1, color: Colors.white10),
+                itemBuilder: (_, i) => _resultRow(i, fast == i, comfy == i),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pill(String t, bool on, VoidCallback onTap) => InkWell(
+    borderRadius: BorderRadius.circular(7),
+    onTap: _running ? null : onTap,
+    child: Container(
+      height: 28,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: on ? cCyan : cPanel2,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: on ? cCyan : Colors.white24),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        t,
+        style: TextStyle(
+          color: on ? Colors.black : cText,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    ),
+  );
+
+  Widget _resultRow(int i, bool fastest, bool comfiest) {
+    final (dep, s) = _rows[i];
+    final eta = s.eta;
+    final ok = s.complete && s.noForecastFrom == null;
+    final details = [
+      s.motorDuration == Duration.zero
+          ? 'todo a vela'
+          : 'motor ${(s.motorFraction * 100).round()} %',
+      if (s.sailDuration > Duration.zero)
+        'ceñida ${(s.upwindFraction * 100).round()} %',
+      'viento ${s.maxTwsKn.round()}${s.maxGustKn == null ? '' : '/${s.maxGustKn!.round()}'} kn',
+      if (s.maxWaveM != null) 'ola ${s.maxWaveM!.toStringAsFixed(1)} m',
+      if (s.tacks + s.gybes > 0) '${s.tacks + s.gybes} maniobras',
+    ].join(' · ');
+    Widget tag(String t, Color c) => Container(
+      margin: const EdgeInsets.only(left: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: c),
+      ),
+      child: Text(
+        t,
+        style: TextStyle(color: c, fontSize: 9.5, fontWeight: FontWeight.w800),
+      ),
+    );
+    return InkWell(
+      onTap: _running ? null : () => Navigator.of(context).pop(dep),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    '${_RoutingPageState._formatLocal(dep)}  →  '
+                    '${eta == null ? '--' : _RoutingPageState._formatLocal(eta)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: ok ? cText : cMuted,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _RoutingPageState._durationText(s.duration),
+                  style: TextStyle(
+                    color: ok ? cCyan : cMuted,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                if (fastest) tag('MÁS RÁPIDA', cGreen),
+                if (comfiest) tag('MÁS CÓMODA', cCyan),
+                if (!s.complete) tag('NO LLEGA', cRed),
+                if (s.complete && s.noForecastFrom != null)
+                  tag('SIN PREVISIÓN', cOrange),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(
+              details,
+              style: TextStyle(
+                color: (s.maxGustKn ?? 0) > widget.constraints.maxAwsKn
+                    ? cOrange
+                    : cMuted,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

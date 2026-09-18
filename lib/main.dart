@@ -15991,10 +15991,25 @@ class _DashboardState extends State<Dashboard> {
               ),
             ),
             const SizedBox(height: 8),
-            TextButton.icon(
-              icon: const Icon(Icons.refresh, size: 18),
-              label: const Text('Reintentar'),
-              onPressed: () => unawaited(_loadWeather(force: true)),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              children: [
+                TextButton.icon(
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('Reintentar'),
+                  onPressed: () => unawaited(_loadWeather(force: true)),
+                ),
+                // La ruta vivía solo en la cabecera de la previsión: si la
+                // previsión fallaba (p. ej. límite diario de Open-Meteo),
+                // no había forma de llegar a ella.
+                if (page == 'predicción')
+                  TextButton.icon(
+                    icon: const Icon(Icons.route, size: 18),
+                    label: const Text('Ruta'),
+                    onPressed: () => _openRouting(context),
+                  ),
+              ],
             ),
           ],
         ),
@@ -16057,157 +16072,147 @@ class _DashboardState extends State<Dashboard> {
     ];
   }
 
+  Widget _forecastHeaderButton({
+    required IconData icon,
+    required Color color,
+    required String label,
+    required bool showLabel,
+    required VoidCallback onTap,
+  }) => SizedBox(
+    height: 40,
+    child: InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: color),
+            if (showLabel) ...[
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+
   Widget _forecastPage() {
     if (weather.hourly.isEmpty) return _weatherEmptyState('predicción');
     final freshness = _weatherFreshness;
     return LayoutBuilder(
       builder: (ctx, c) {
         final compactHeader = c.maxWidth < 850;
-        final summaryHeight = ((c.maxHeight - _forecastHeaderHeight) * 0.42)
+        // En un teléfono en vertical (iPhone por la webapp, ~375–430 px) la
+        // cabecera en una sola línea no cabía y se comía la ubicación y los
+        // botones. Ahí va en dos líneas. Reportado en vivo 2026-09-18.
+        final twoLineHeader = c.maxWidth < 560;
+        final headerHeight = twoLineHeader
+            ? _forecastHeaderHeight + 40
+            : _forecastHeaderHeight;
+        final summaryHeight = ((c.maxHeight - headerHeight) * 0.42)
             .clamp(110.0, 168.0);
+        final place = Text(
+          weather.place,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: cMuted, fontSize: 18),
+        );
+        final badge = Container(
+          margin: const EdgeInsets.only(left: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+          decoration: BoxDecoration(
+            color: freshness.color.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: freshness.color.withValues(alpha: 0.35)),
+          ),
+          child: Text(
+            freshness.text,
+            style: TextStyle(
+              color: freshness.color,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        );
+        final locationColor = _manualWeatherLat != null ? cOrange : cMuted;
+        final actions = <Widget>[
+          _forecastHeaderButton(
+            icon: Icons.edit_location_alt_outlined,
+            color: locationColor,
+            label: 'Cambiar ubicación',
+            showLabel: !compactHeader,
+            onTap: () => _pickWeatherLocation(context),
+          ),
+          _forecastHeaderButton(
+            icon: Icons.stacked_line_chart,
+            color: cCyan,
+            label: 'Comparar modelos',
+            showLabel: !compactHeader,
+            onTap: () => _showModelComparison(context),
+          ),
+          // "Ruta" siempre con su nombre: como icono suelto no lo
+          // encontraba nadie.
+          _forecastHeaderButton(
+            icon: Icons.route,
+            color: cCyan,
+            label: 'Ruta',
+            showLabel: true,
+            onTap: () => _openRouting(context),
+          ),
+          const SizedBox(width: 6),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('24 h')),
+              ButtonSegment(value: true, label: Text('3 días')),
+            ],
+            selected: {_forecastThreeDays},
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            onSelectionChanged: (v) =>
+                setState(() => _forecastThreeDays = v.first),
+          ),
+        ];
         return Column(
           children: [
             SizedBox(
-              height: _forecastHeaderHeight,
+              height: headerHeight,
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(14, 4, 8, 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        weather.place,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: cMuted, fontSize: 18),
-                      ),
-                    ),
-                    Container(
-                      margin: const EdgeInsets.only(left: 8),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: freshness.color.withValues(alpha: 0.10),
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(
-                          color: freshness.color.withValues(alpha: 0.35),
-                        ),
-                      ),
-                      child: Text(
-                        freshness.text,
-                        style: TextStyle(
-                          color: freshness.color,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                    SizedBox(
-                      height: 44,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => _pickWeatherLocation(context),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.edit_location_alt_outlined,
-                                size: 15,
-                                color: _manualWeatherLat != null
-                                    ? cOrange
-                                    : cMuted,
-                              ),
-                              const SizedBox(width: 4),
-                              if (!compactHeader)
-                                Text(
-                                  'Cambiar ubicación',
-                                  style: TextStyle(
-                                    color: _manualWeatherLat != null
-                                        ? cOrange
-                                        : cMuted,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                            ],
+                child: twoLineHeader
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: Row(
+                              children: [Expanded(child: place), badge],
+                            ),
                           ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    SizedBox(
-                      height: 44,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => _showModelComparison(context),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.stacked_line_chart,
-                                size: 15,
-                                color: cCyan,
-                              ),
-                              const SizedBox(width: 5),
-                              if (!compactHeader)
-                                Text(
-                                  'Comparar modelos',
-                                  style: const TextStyle(
-                                    color: cCyan,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                            ],
+                          SizedBox(
+                            height: 40,
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(children: actions),
+                            ),
                           ),
-                        ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          Expanded(child: place),
+                          badge,
+                          ...actions,
+                        ],
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    SizedBox(
-                      height: 44,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(8),
-                        onTap: () => _openRouting(context),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.route, size: 15, color: cCyan),
-                              const SizedBox(width: 5),
-                              if (!compactHeader)
-                                const Text(
-                                  'Ruta',
-                                  style: TextStyle(
-                                    color: cCyan,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment(value: false, label: Text('24 h')),
-                        ButtonSegment(value: true, label: Text('3 días')),
-                      ],
-                      selected: {_forecastThreeDays},
-                      showSelectedIcon: false,
-                      onSelectionChanged: (v) =>
-                          setState(() => _forecastThreeDays = v.first),
-                    ),
-                  ],
-                ),
               ),
             ),
             SizedBox(

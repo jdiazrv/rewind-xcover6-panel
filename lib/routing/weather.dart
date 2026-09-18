@@ -94,10 +94,14 @@ class WeatherSample {
     this.waveHeightM,
     this.waveDirDeg,
     this.wavePeriodS,
+    this.gustKn,
   });
 
   final double twsKn;
   final double twdDeg;
+
+  /// Racha máxima (nudos) de la hora; null si el modelo no la da.
+  final double? gustKn;
   final double? waveHeightM;
   final double? waveDirDeg;
   final double? wavePeriodS;
@@ -134,6 +138,7 @@ class WeatherGrid {
     required this.model,
     required this.source,
     required this.fetchedAt,
+    this.gust,
   }) : assert(times.isNotEmpty),
        assert(windU.length == times.length * nLat * nLon);
 
@@ -150,6 +155,10 @@ class WeatherGrid {
   /// Ola: altura significativa (m), dirección DE DONDE VIENE como vector
   /// unitario, y periodo (s).
   final Float32List waveH, waveDirU, waveDirV, waveT;
+
+  /// Racha (nudos). Opcional: las rejillas guardadas antes de pedirla no
+  /// la tienen.
+  final Float32List? gust;
 
   final WeatherModel model;
 
@@ -187,6 +196,7 @@ class WeatherGrid {
     'waveDirU': base64Encode(waveDirU.buffer.asUint8List()),
     'waveDirV': base64Encode(waveDirV.buffer.asUint8List()),
     'waveT': base64Encode(waveT.buffer.asUint8List()),
+    if (gust != null) 'gust': base64Encode(gust!.buffer.asUint8List()),
     'model': model.name,
     'source': source,
     'fetchedAt': fetchedAt.toUtc().millisecondsSinceEpoch,
@@ -212,6 +222,7 @@ class WeatherGrid {
         waveDirU: f32('waveDirU'),
         waveDirV: f32('waveDirV'),
         waveT: f32('waveT'),
+        gust: j['gust'] is String ? f32('gust') : null,
         model: WeatherModel.byName(j['model'] as String?),
         source: j['source'] as String,
         fetchedAt: DateTime.fromMillisecondsSinceEpoch(
@@ -277,6 +288,7 @@ class WeatherGrid {
     final tws = math.sqrt(u * u + v * v);
     // (u, v) apunta hacia donde sopla; el viento VIENE del lado contrario.
     final twd = _bearingOf(-u, -v);
+    final g = gust == null ? null : _weighted(gust!, idx, w);
 
     final h = _weighted(waveH, idx, w);
     double? wDir;
@@ -295,6 +307,8 @@ class WeatherGrid {
       waveHeightM: h,
       waveDirDeg: wDir,
       wavePeriodS: wPer,
+      // La racha nunca por debajo del viento medio interpolado.
+      gustKn: g == null ? null : math.max(g, tws),
     );
   }
 

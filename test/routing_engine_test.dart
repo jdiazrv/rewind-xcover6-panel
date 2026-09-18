@@ -44,6 +44,7 @@ WeatherGrid flatGrid({
   double lat0 = 36.5,
   double lon0 = 23.5,
   int hours = 30,
+  double? gustKn,
 }) {
   const n = 6;
   final times = [
@@ -72,11 +73,28 @@ WeatherGrid flatGrid({
     waveDirU: du,
     waveDirV: dv,
     waveT: per,
+    gust: gustKn == null ? null : filled(gustKn),
     model: WeatherModel.ecmwf,
     source: 'test',
     fetchedAt: DateTime.utc(2026, 9, 18),
   );
 }
+
+RouteRequest request(
+  WeatherGrid grid,
+  ({double lat, double lon}) dest, {
+  RoutingConstraints constraints = const RoutingConstraints(),
+  RoutingObjective objective = RoutingObjective.fast,
+  DateTime? departure,
+}) => RouteRequest(
+  waypoints: [(lat: 37.4, lon: 24.0), dest],
+  departure: departure ?? DateTime.utc(2026, 9, 19, 6),
+  grid: grid,
+  polar: dehler47,
+  polarFactorPercent: 100,
+  constraints: constraints,
+  objective: objective,
+);
 
 void main() {
   final departure = DateTime.utc(2026, 9, 19, 6);
@@ -278,6 +296,7 @@ void main() {
       const constraints = RoutingConstraints(
         absoluteMaxWaveM: 2.0,
         preferredMaxWaveM: 0.6,
+        maxTimeAbovePreferred: Duration(hours: 12),
       );
       final fast = computeRoute(
         RouteRequest(
@@ -347,6 +366,54 @@ void main() {
         ),
         throwsA(isA<RoutingException>()),
       );
+    });
+  });
+
+  group('AWA mínimo', () {
+    test('sin motor, abre el bordo: ningún tramo a vela más cerrado que el mínimo', () {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 12); // a barlovento
+      const minAwa = 32.0;
+      final result = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(
+            allowMotor: false,
+            minimumAwaDeg: minAwa,
+          ),
+          objective: RoutingObjective.fast,
+        ),
+      );
+      expect(result.complete, isTrue); // no se queda parado: abre el bordo
+      for (final s in result.segments) {
+        expect(s.mode, PropulsionMode.sailing);
+        expect(s.awaDeg.abs(), greaterThanOrEqualTo(minAwa - 0.01));
+      }
+    });
+
+    test('con motor, un rumbo más cerrado que el mínimo nunca va a vela', () {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 12);
+      const minAwa = 32.0;
+      final result = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(minimumAwaDeg: minAwa),
+          objective: RoutingObjective.fast,
+        ),
+      );
+      expect(result.complete, isTrue);
+      for (final s in result.segments.where((s) => s.mode == PropulsionMode.sailing)) {
+        expect(s.awaDeg.abs(), greaterThanOrEqualTo(minAwa - 0.01));
+      }
     });
   });
 
@@ -435,6 +502,182 @@ void main() {
         if (held > maxHeld) maxHeld = held;
       }
       expect(maxHeld, greaterThan(1));
+    });
+  });
+
+  group('arreglos de la auditoría', () {
+    test('F1: Confort no penaliza la ola por debajo de la cómoda', () {
+      // Ola de 0,5 m en toda la zona, por debajo de la cómoda (0,6): Confort
+      // tiene que dar la misma ruta que Rápido.
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, waveHeightM: 0.5);
+      final dest = destinationNm(37.4, 24.0, 60, 15);
+      final d = (lat: dest.lat, lon: dest.lon);
+      final fast = computeRoute(request(grid, d));
+      final comfort = computeRoute(
+        request(grid, d, objective: RoutingObjective.comfort),
+      );
+      expect(comfort.complete, isTrue);
+      expect(comfort.totalDuration, fast.totalDuration);
+      expect(comfort.totalNm, closeTo(fast.totalNm, 0.01));
+    });
+
+    test('F2: Confort respeta el tope de tiempo con ola incómoda', () {
+      // 0,8 m en toda la zona (por encima de la cómoda, por debajo de la
+      // máxima): 15 M son ~2 h, más que la hora que admite por defecto.
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, waveHeightM: 0.8);
+      final dest = destinationNm(37.4, 24.0, 90, 15);
+      final d = (lat: dest.lat, lon: dest.lon);
+      final comfort = computeRoute(
+        request(grid, d, objective: RoutingObjective.comfort),
+      );
+      expect(comfort.complete, isFalse);
+      expect(comfort.warning, contains('ola por encima de la cómoda'));
+      // Rápido no tiene ese tope; con un tope mayor, Confort sí llega.
+      expect(computeRoute(request(grid, d)).complete, isTrue);
+      final relaxed = computeRoute(
+        request(
+          grid,
+          d,
+          objective: RoutingObjective.comfort,
+          constraints: const RoutingConstraints(
+            maxTimeAbovePreferred: Duration(hours: 4),
+          ),
+        ),
+      );
+      expect(relaxed.complete, isTrue);
+    });
+
+    test('F3: Personalizado con peso 0 y sin tope práctico es como Rápido', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, waveHeightM: 0.8);
+      final dest = destinationNm(37.4, 24.0, 60, 15);
+      final d = (lat: dest.lat, lon: dest.lon);
+      const c = RoutingConstraints(
+        comfortWeight: 0,
+        maxTimeAbovePreferred: Duration(hours: 24),
+      );
+      final fast = computeRoute(request(grid, d, constraints: c));
+      final custom = computeRoute(
+        request(grid, d, constraints: c, objective: RoutingObjective.custom),
+      );
+      expect(custom.totalDuration, fast.totalDuration);
+    });
+
+    test('F4: fuera del tiempo descargado lo marca, no motora en silencio', () {
+      // Rejilla de solo 1 h: el resto de la ruta queda sin previsión.
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 1);
+      final dest = destinationNm(37.4, 24.0, 90, 20);
+      final d = (lat: dest.lat, lon: dest.lon);
+      final r = computeRoute(
+        request(grid, d, departure: DateTime.utc(2026, 9, 19)),
+      );
+      expect(r.complete, isTrue);
+      expect(r.noForecastFrom, isNotNull);
+      final blind = r.segments.where((s) => s.noForecast).toList();
+      expect(blind, isNotEmpty);
+      expect(blind.every((s) => s.mode == PropulsionMode.motor), isTrue);
+
+      final noMotor = computeRoute(
+        request(
+          grid,
+          d,
+          departure: DateTime.utc(2026, 9, 19),
+          constraints: const RoutingConstraints(allowMotor: false),
+        ),
+      );
+      expect(noMotor.complete, isFalse);
+      expect(noMotor.warning, contains('sin previsión'));
+    });
+
+    test('F6: las viradas cuestan tiempo real y se cuentan', () {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 18); // a barlovento
+      final r = computeRoute(
+        request(
+          grid,
+          (lat: dest.lat, lon: dest.lon),
+          constraints: const RoutingConstraints(allowMotor: false),
+        ),
+      );
+      expect(r.complete, isTrue);
+      final tacks = r.segments.where((s) => s.maneuver == ManeuverKind.tack);
+      expect(tacks, isNotEmpty);
+      for (final s in tacks) {
+        // Recorre menos de lo que daría la velocidad en todo el tramo.
+        final full = s.stwKn * s.duration.inSeconds / 3600;
+        expect(s.distanceNm, lessThan(full - 0.05));
+      }
+      final sum = RouteSummary.of(r, const RoutingConstraints());
+      expect(sum.tacks, tacks.length);
+      expect(sum.upwindFraction, greaterThan(0.9));
+      expect(sum.motorFraction, 0);
+    });
+
+    test('a motor, cruzar el eje del viento no es una virada', () {
+      final grid = flatGrid(twsKn: 3, twdDeg: 0, hours: 10); // calma: motor
+      final dest = destinationNm(37.4, 24.0, 0, 10);
+      final r = computeRoute(request(grid, (lat: dest.lat, lon: dest.lon)));
+      expect(r.complete, isTrue);
+      expect(r.segments.every((s) => s.mode == PropulsionMode.motor), isTrue);
+      expect(r.segments.where((s) => s.maneuver != null), isEmpty);
+    });
+  });
+
+  group('rachas', () {
+    test('la racha del modelo llega a cada tramo y al resumen', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, gustKn: 21);
+      final dest = destinationNm(37.4, 24.0, 90, 10);
+      final r = computeRoute(request(grid, (lat: dest.lat, lon: dest.lon)));
+      expect(r.segments.every((s) => s.gustKn != null), isTrue);
+      expect(r.segments.first.gustKn, closeTo(21, 0.01));
+      final sum = RouteSummary.of(r, const RoutingConstraints());
+      expect(sum.maxGustKn, closeTo(21, 0.01));
+      expect(sum.maxTwsKn, closeTo(14, 0.01));
+    });
+
+    test('sin rachas en la rejilla, null (no se inventa)', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0);
+      final dest = destinationNm(37.4, 24.0, 90, 10);
+      final r = computeRoute(request(grid, (lat: dest.lat, lon: dest.lon)));
+      expect(r.segments.every((s) => s.gustKn == null), isTrue);
+      expect(RouteSummary.of(r, const RoutingConstraints()).maxGustKn, isNull);
+    });
+
+    test('la racha nunca sale por debajo del viento medio', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, gustKn: 10);
+      expect(grid.sample(37.4, 24.0, departure)!.gustKn, closeTo(14, 0.01));
+    });
+
+    test('la racha sobrevive a guardar y leer de disco', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, gustKn: 19);
+      final back = WeatherGrid.fromJson(grid.toJson())!;
+      expect(back.sample(37.4, 24.0, departure)!.gustKn, closeTo(19, 0.01));
+      final old = flatGrid(twsKn: 14, twdDeg: 0);
+      expect(WeatherGrid.fromJson(old.toJson())!.gust, isNull);
+    });
+  });
+
+  group('isócronas', () {
+    test('se emiten en orden, con puntos, y también desde el isolate', () async {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 12);
+      final req = request(
+        grid,
+        (lat: dest.lat, lon: dest.lon),
+        constraints: const RoutingConstraints(allowMotor: false),
+      );
+      final sync = <RouteIsochrone>[];
+      computeRoute(req, onIsochrone: sync.add);
+      expect(sync.length, greaterThan(4));
+      for (var i = 1; i < sync.length; i++) {
+        expect(sync[i].time.isAfter(sync[i - 1].time), isTrue);
+      }
+      expect(sync.every((iso) => iso.latLon.length >= 2), isTrue);
+      expect(sync.every((iso) => iso.latLon.length.isEven), isTrue);
+
+      final live = <RouteIsochrone>[];
+      final r = await computeRouteInIsolate(req, (_) {}, onIsochrone: live.add);
+      expect(r.complete, isTrue);
+      expect(live.length, sync.length);
     });
   });
 
