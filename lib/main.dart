@@ -48,6 +48,10 @@ import 'performance_report.dart';
 import 'theme.dart';
 import 'widgets/anchor_native_view.dart';
 import 'polars.dart';
+import 'routing/open_meteo_weather.dart';
+import 'routing/routing_page.dart';
+import 'routing/weather.dart' show CachedWeatherProvider, WeatherProvider;
+import 'routing/weather_disk_cache.dart';
 import 'widgets/motor_premium_panel.dart';
 import 'widgets/polar_panel.dart';
 import 'widgets/ship_icon_picker.dart';
@@ -3396,6 +3400,21 @@ class _DashboardState extends State<Dashboard> {
         /* keep empty if corrupted */
       }
     }
+    // Si este host:puerto coincide con un servidor guardado, usar su
+    // nombre como clave — es bajo esa clave donde CFG > Admin guarda la
+    // polar (y sensores/fondeo) de cada barco, no bajo el host:puerto
+    // suelto. Sin esto, un barco sin MMSI publicado (sin AIS propio) no
+    // tenía ninguna otra forma de recuperar su polar al arrancar: la
+    // resolución por MMSI es la única que corrige la clave más tarde, y
+    // si no hay MMSI nunca llega a correr.
+    if (_currentServerConfigKey == null) {
+      for (final s in settings.savedServers) {
+        if (s.host == settings.host && s.port == settings.port) {
+          _currentServerConfigKey = s.name;
+          break;
+        }
+      }
+    }
     final hostKey = _serverConfigKey;
     final polarByHost = settings.polarConfigJsonByHost[hostKey];
     if (polarByHost is Map) {
@@ -4271,8 +4290,18 @@ class _DashboardState extends State<Dashboard> {
               .toJson();
           settings.anchorConfigJsonByHost[previousKey] = settings.anchorConfig
               .toJson();
+          // La polar se guardaba aquí bajo previousKey (host:puerto, o el
+          // nombre del servidor guardado) pero nunca se releía al pasar a
+          // la clave canónica vessel:MMSI: cada vez que esta resolución
+          // corría — es decir, cada arranque, antes de que hubiera vuelto
+          // a conectar por el mismo camino que la guardó — la polar volvía
+          // a quedar en "Ninguna" aunque siguiera guardada. Reportado en
+          // vivo 2026-09-18 ("por que se borra cada vez la polar").
+          settings.polarConfigJsonByHost[previousKey] =
+              settings.polarConfigToJson();
           final canonicalSensor = settings.sensorConfigJsonByHost[canonicalKey];
           final canonicalAnchor = settings.anchorConfigJsonByHost[canonicalKey];
+          final canonicalPolar = settings.polarConfigJsonByHost[canonicalKey];
           _currentServerConfigKey = canonicalKey;
           _moveEngineCache(previousKey, canonicalKey);
           if (canonicalSensor != null) {
@@ -4280,6 +4309,13 @@ class _DashboardState extends State<Dashboard> {
           }
           if (canonicalAnchor != null) {
             settings.anchorConfig = AnchorConfig.fromJson(canonicalAnchor);
+          }
+          if (canonicalPolar is Map) {
+            try {
+              settings.polarConfigFromJson(canonicalPolar.cast<String, dynamic>());
+            } catch (_) {
+              /* keep whatever was already loaded if corrupted */
+            }
           }
           await _saveSettings();
           if (mounted) setState(() {});
@@ -5400,6 +5436,34 @@ class _DashboardState extends State<Dashboard> {
   // Catálogo de polares empotrado (assets/polars/orc_polars.json), leído
   // una vez. Son certificados ORC reales de 18 barcos; ver lib/polars.dart.
   List<PolarTable> _polarCatalogue = const [];
+
+  // Tiempo del routing, con caché en memoria (vive más que la pantalla
+  // RUTA) y en disco (sobrevive a cerrar la app del todo): entre las dos,
+  // solo se pide a Open-Meteo cuando de verdad hace falta — pedirla cada
+  // vez agotaba la cuota gratuita enseguida. 3 h porque los modelos no
+  // cambian mucho más rápido que eso.
+  final _weatherDiskCache = const WeatherDiskCache();
+  late final WeatherProvider _routingWeather = CachedWeatherProvider(
+    OpenMeteoWeatherProvider(),
+    maxAge: const Duration(hours: 3),
+    loadPersisted: _weatherDiskCache.load,
+    savePersisted: (g) => unawaited(_weatherDiskCache.save(g)),
+  );
+
+  void _openRouting(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RoutingPage(
+          weather: _routingWeather,
+          boatLat: _weatherLat,
+          boatLon: _weatherLon,
+          polar: _activePolar,
+          polarFactorPercent: settings.polarFactorPercent,
+          shipIconAsset: boatIconById(settings.shipIconId).pequenoAsset,
+        ),
+      ),
+    );
+  }
 
   Future<void> _loadPolarCatalogue() async {
     try {
@@ -15979,6 +16043,33 @@ class _DashboardState extends State<Dashboard> {
                         ),
                       ),
                     ),
+                    const SizedBox(width: 4),
+                    SizedBox(
+                      height: 44,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => _openRouting(context),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.route, size: 15, color: cCyan),
+                              const SizedBox(width: 5),
+                              if (!compactHeader)
+                                const Text(
+                                  'Ruta',
+                                  style: TextStyle(
+                                    color: cCyan,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 6),
                     SegmentedButton<bool>(
                       segments: const [
@@ -16773,6 +16864,10 @@ class _DashboardState extends State<Dashboard> {
             .toJson();
         settings.anchorConfigJsonByHost[outgoingKey] = settings.anchorConfig
             .toJson();
+        // Misma polar por servidor que sensores/fondeo — se le olvidaba
+        // guardar aquí (ver el mismo fallo en la resolución por MMSI).
+        settings.polarConfigJsonByHost[outgoingKey] =
+            settings.polarConfigToJson();
       }
       settings.host = newHost;
       settings.port = newPort;
@@ -16812,6 +16907,20 @@ class _DashboardState extends State<Dashboard> {
         settings.anchorConfig = savedAnchor != null
             ? AnchorConfig.fromJson(savedAnchor)
             : AnchorConfig();
+        final savedPolar = settings.polarConfigJsonByHost[hostKey];
+        if (savedPolar is Map) {
+          try {
+            settings.polarConfigFromJson(savedPolar.cast<String, dynamic>());
+          } catch (_) {
+            settings.polarBoatId = '';
+            settings.polarFactorPercent = 100;
+            settings.polarCustomJson = null;
+          }
+        } else {
+          settings.polarBoatId = '';
+          settings.polarFactorPercent = 100;
+          settings.polarCustomJson = null;
+        }
         _syncAnchorPublishTimer();
       }
       if (_isSignalKWebapp) {

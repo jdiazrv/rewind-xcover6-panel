@@ -115,8 +115,16 @@ class PolarTable {
   /// decirlo es más honesto que interpolar hacia cero.
   double? speedAt(double twsKn, double twaDeg) {
     if (!isValid) return null;
+    return speedAtCurve(curveFor(twsKn), twaDeg);
+  }
+
+  /// Lo mismo que [speedAt], pero con la curva de este TWS ya calculada
+  /// (ver [curveFor]) — para cuando se van a mirar muchos ángulos al
+  /// mismo viento (el routing evalúa hasta 72 rumbos por nodo, siempre
+  /// al mismo TWS: rehacer la curva en cada uno era el cuello de botella
+  /// real del motor, no el propio cálculo de ruta).
+  static double? speedAtCurve(List<(double, double)> curve, double twaDeg) {
     final a = normalizeRelativeAngle(twaDeg).abs();
-    final curve = curveFor(twsKn);
     if (curve.length < 2) return null;
     if (a < curve.first.$1 || a > curve.last.$1) return null;
     for (var i = 0; i < curve.length - 1; i++) {
