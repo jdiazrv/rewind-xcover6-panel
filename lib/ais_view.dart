@@ -957,6 +957,7 @@ class AisRelativeView extends StatefulWidget {
     this.priorityTcpaMin = 10.0,
     this.onSwipeToNextPage,
     this.onSwipeToPreviousPage,
+    this.receiverStatus,
   });
   final Map<String, AisTarget> targets;
   final double? ownHeadingDeg;
@@ -973,6 +974,12 @@ class AisRelativeView extends StatefulWidget {
   /// gesto para irse de pantalla vive solo en esa franja.
   final VoidCallback? onSwipeToNextPage;
   final VoidCallback? onSwipeToPreviousPage;
+
+  /// Estado del receptor (piloto y "último mensaje hace…"), construido por
+  /// quien sabe si el AIS oye. Va al pie de la columna de la izquierda y se
+  /// ve también con la lista abierta: es lo primero que hay que saber antes
+  /// de fiarse de lo que se pinta (petición 2026-09-18).
+  final Widget? receiverStatus;
 
   @override
   State<AisRelativeView> createState() => _AisRelativeViewState();
@@ -1338,6 +1345,10 @@ class _AisRelativeViewState extends State<AisRelativeView>
                             ),
                           ),
                         ),
+                    ],
+                    if (widget.receiverStatus != null) ...[
+                      const SizedBox(height: 10),
+                      widget.receiverStatus!,
                     ],
                   ],
                 ),

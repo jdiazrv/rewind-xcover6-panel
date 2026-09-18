@@ -470,7 +470,12 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
   // fiable de deducir a qué tanque o nevera pertenece cada una.
   List<String> get _batteryPathsFound =>
       _cfg.detectedPaths
-          .where((p) => p.startsWith('sensors.') && p.endsWith('.voltage'))
+          .where(
+            (p) =>
+                (p.startsWith('sensors.') && p.endsWith('.voltage')) ||
+                // Zigbee de REWIND: la pila al lado del dato y en %.
+                (p.startsWith('environment.') && p.endsWith('.battery')),
+          )
           .toList()
         ..sort();
 
@@ -496,6 +501,7 @@ class _SensorConfigDialogState extends State<_SensorConfigDialog> {
     final parts = path.split('.');
     return parts.length >= 2 ? parts[1] : path;
   }
+  // (environment.fridge_1.battery → fridge_1: el mismo trozo, el del nombre.)
 
   // Candidatas para la hélice de proa: cualquier voltaje de batería que
   // publique el barco, porque el nombre lo pone cada instalación (en REWIND

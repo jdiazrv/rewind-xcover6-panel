@@ -27,7 +27,10 @@ void main() {
     });
 
     test('se puede ajustar el rango para otra química', () {
-      expect(sensorBatteryPercent(3.6, emptyV: 3.0, fullV: 4.2), closeTo(50, 0.1));
+      expect(
+        sensorBatteryPercent(3.6, emptyV: 3.0, fullV: 4.2),
+        closeTo(50, 0.1),
+      );
     });
   });
 
@@ -67,7 +70,10 @@ void main() {
     });
 
     test('sin candidatas devuelve null', () {
-      expect(guessSensorBatteryPath('tanks.freshWater.0', 'Agua', const []), isNull);
+      expect(
+        guessSensorBatteryPath('tanks.freshWater.0', 'Agua', const []),
+        isNull,
+      );
     });
   });
 
@@ -93,6 +99,50 @@ void main() {
         TankSlot.fromJson(tank.toJson()).batteryPath,
         'sensors.mopeka_water_tank.battery.voltage',
       );
+    });
+  });
+
+  // REWIND publica la pila de sus sondas Zigbee al lado del dato y en %, no
+  // en voltios bajo sensors.*: durante meses la app no la vio nunca.
+  group('pilas en porcentaje, al lado del dato (Zigbee de REWIND)', () {
+    test('la pila de una sonda es su hermana .battery', () {
+      expect(
+        siblingBatteryPath('environment.fridge_1.temperature'),
+        'environment.fridge_1.battery',
+      );
+      expect(
+        siblingBatteryPath('environment.outside.temperature'),
+        'environment.outside.battery',
+      );
+    });
+    test('fuera de environment.* no se inventa nada', () {
+      expect(siblingBatteryPath('tanks.freshWater.0.currentLevel'), isNull);
+      expect(siblingBatteryPath('sin_puntos'), isNull);
+    });
+    test('porcentaje, tanto por uno y voltios', () {
+      expect(sensorBatteryPercentFor('environment.fridge_2.battery', 50), 50);
+      expect(sensorBatteryPercentFor('environment.x.battery', 0.5), 50);
+      expect(sensorBatteryPercentFor('environment.x.battery', 1.0), 100);
+      expect(
+        sensorBatteryPercentFor('sensors.mopeka.battery.voltage', 3.0),
+        100,
+      );
+      expect(sensorBatteryPercentFor('environment.x.battery', null), isNull);
+    });
+    test('el texto de la tarjeta avisa cuando está baja', () {
+      expect(
+        sensorBatteryText('environment.fridge_2.battery', 50),
+        'pila\u00a050\u00a0%',
+      );
+      expect(
+        sensorBatteryText('environment.fridge_2.battery', 15),
+        'pila\u00a0baja\u00a015\u00a0%',
+      );
+      expect(
+        sensorBatteryText('sensors.mopeka.battery.voltage', 2.5625),
+        'pila\u00a02,56\u00a0V\u00a0(45\u00a0%)',
+      );
+      expect(sensorBatteryText('environment.x.battery', null), '');
     });
   });
 }

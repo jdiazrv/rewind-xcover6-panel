@@ -66,6 +66,7 @@ part 'widgets/misc_cards.dart';
 part 'widgets/marine_help.dart';
 part 'widgets/alarm_and_shell.dart';
 part 'widgets/alarm_lamp_panel.dart';
+part 'widgets/vertical_pager.dart';
 part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
@@ -263,6 +264,10 @@ class _DashboardState extends State<Dashboard> {
 
   int page = 0;
   String _selectedPageId = 'NAV';
+  // Sub-página de TIEMPO (PREVISIÓN, MAR o A BORDO). Se guarda por nombre:
+  // A BORDO solo existe en barcos con sensores y un índice cambiaría de
+  // sentido de un barco a otro.
+  String _weatherSub = kWeatherForecast;
 
   // The Premium NAV screens (Vela/Motor/Fondeado) were tuned against the
   // tablet's landscape height (~700dp+); a phone in the same forced-
@@ -1300,10 +1305,55 @@ class _DashboardState extends State<Dashboard> {
     final now = DateTime.now();
     _aisTargets.removeWhere((context, t) {
       if (_isOwnShipTarget(context, t)) return false;
-      final last = t.lastUpdate;
+      // Por la última POSICIÓN, no por el último dato: un plugin del
+      // servidor (derived-data, por ejemplo) escribe la máxima aproximación
+      // de cada blanco cada segundo y, contando eso, los blancos no
+      // caducaban nunca aunque el AIS estuviera apagado (2026-09-18).
+      final last = t.positionUpdate ?? t.lastUpdate;
       return last == null || now.difference(last) > _aisTargetExpiry;
     });
   }
+
+  // ¿Oye el receptor AIS? Ver aisReceiverAlive. Horas del SERVIDOR (las del
+  // mensaje), no de llegada a la app: al abrir una pantalla, la foto que
+  // manda Signal K trae posiciones de hace rato y no deben contar como
+  // recién oídas.
+  DateTime? _aisLastPositionAt;
+  DateTime? _aisLastBaseStationAt;
+
+  void _noteAisPosition(DateTime at, {bool baseStation = false}) {
+    final utc = at.toUtc();
+    if (_aisLastPositionAt == null || utc.isAfter(_aisLastPositionAt!)) {
+      _aisLastPositionAt = utc;
+    }
+    if (baseStation &&
+        (_aisLastBaseStationAt == null ||
+            utc.isAfter(_aisLastBaseStationAt!))) {
+      _aisLastBaseStationAt = utc;
+    }
+  }
+
+  Duration? get _aisSilence {
+    final at = _aisLastPositionAt;
+    if (at == null) return null;
+    final d = skNow().difference(at);
+    return d.isNegative ? Duration.zero : d;
+  }
+
+  bool get _aisAlive {
+    final base = _aisLastBaseStationAt;
+    return aisReceiverAlive(
+      _aisSilence,
+      baseStationHeard:
+          base != null && skNow().difference(base) < kAisSilenceOff,
+    );
+  }
+
+  /// Blancos con posición reciente: lo que de verdad se está viendo.
+  int get _aisLiveTargetCount => _visibleAisTargets.values.where((t) {
+    final p = t.positionUpdate;
+    return p != null && DateTime.now().difference(p) <= _aisTargetExpiry;
+  }).length;
 
   // Every read of _aisTargets meant for display/CPA math should go through
   // this instead of the raw map, so the own ship never shows up as a
@@ -2258,7 +2308,7 @@ class _DashboardState extends State<Dashboard> {
         p.contains('interior') ||
         p.contains('pressure') ||
         p.contains('humidity')) {
-      return 'MET';
+      return 'TIEMPO';
     }
     return null;
   }
@@ -2620,6 +2670,9 @@ class _DashboardState extends State<Dashboard> {
     // pantalla concreta (…/?page=PWR). Ver initialPageIdFromUrl.
     final pageFromUrl = kIsWeb ? initialPageIdFromUrl(Uri.base) : null;
     if (pageFromUrl != null) _selectedPageId = pageFromUrl;
+    // ?page=MAR sigue abriendo el mar, ahora dentro de TIEMPO.
+    final subFromUrl = kIsWeb ? initialSubPageFromUrl(Uri.base) : null;
+    if (subFromUrl != null) _weatherSub = subFromUrl;
     _reloadShipIcon();
     unawaited(_boot());
     // Re-render periodically so nav/wind cards flip to "--" once stale, even
@@ -2664,6 +2717,75 @@ class _DashboardState extends State<Dashboard> {
   // back to host:port only for the very first connection, before Admin
   // has ever been used to switch to a named entry.
   String? _currentServerConfigKey;
+  // Cuentahoras guardado por barco (ver EngineHoursCache) y de qué barco son
+  // los valores que hay ahora mismo en signalK.lastEngine*.
+  Map<String, EngineHoursCache> _engineCacheByHost = {};
+  Timer? _engineHistoryRetry;
+  int _engineHistoryAttempts = 0;
+  String? _engineCacheHost;
+
+  /// Guarda en el mapa lo que hay ahora en pantalla, bajo el barco al que
+  /// pertenece. No hace nada si todavía no se sabe de qué barco es.
+  void _stashEngineCache() {
+    final host = _engineCacheHost;
+    if (host == null) return;
+    _engineCacheByHost[host] = EngineHoursCache(
+      hours: signalK.lastEngineHours,
+      hoursAt: signalK.lastEngineHoursAt,
+      runHours: signalK.lastEngineRunHours,
+      runAt: signalK.lastEngineRunAt,
+      runStartedAt: signalK.lastEngineRunStartedAt,
+    );
+  }
+
+  /// La clave de un mismo barco cambia al conectar: empieza siendo su
+  /// dirección (192.168.1.82:3000) y pasa a su identidad (`vessel:<MMSI>`) en
+  /// cuanto el servidor dice su MMSI. Es el MISMO barco, así que su caché se
+  /// muda con él en vez de borrarse; si ya había una guardada bajo el MMSI,
+  /// esa manda porque es la de siempre.
+  void _moveEngineCache(String from, String to) {
+    if (from == to) return;
+    if (_engineCacheHost == from) _stashEngineCache();
+    final moved = _engineCacheByHost.remove(from);
+    if (moved != null && !moved.isEmpty && _engineCacheByHost[to] == null) {
+      _engineCacheByHost[to] = moved;
+    }
+    if (_engineCacheHost == from) {
+      final cache = _engineCacheByHost[to];
+      if (cache != null) {
+        signalK
+          ..lastEngineHours = cache.hours
+          ..lastEngineHoursAt = cache.hoursAt
+          ..lastEngineRunHours = cache.runHours
+          ..lastEngineRunAt = cache.runAt
+          ..lastEngineRunStartedAt = cache.runStartedAt;
+      }
+      _engineCacheHost = to;
+    }
+  }
+
+  /// Pone en pantalla el cuentahoras del barco al que se está conectado. Al
+  /// cambiar de barco guarda el del anterior y borra también las horas EN
+  /// VIVO que dejó: signalK es un solo objeto para toda la vida de la app y
+  /// nadie las pisaba hasta que el motor nuevo publicara las suyas.
+  void _useEngineCacheFor(String host) {
+    if (_engineCacheHost == host) return;
+    _stashEngineCache();
+    final cache = _engineCacheByHost[host];
+    signalK
+      ..lastEngineHours = cache?.hours
+      ..lastEngineHoursAt = cache?.hoursAt
+      ..lastEngineRunHours = cache?.runHours
+      ..lastEngineRunAt = cache?.runAt
+      ..lastEngineRunStartedAt = cache?.runStartedAt;
+    if (_engineCacheHost != null) {
+      signalK
+        ..engineHours = null
+        ..engineHoursUpdate = null;
+    }
+    _engineCacheHost = host;
+  }
+
   String get _serverConfigKey =>
       _currentServerConfigKey ?? '${settings.host}:${settings.port}';
   // LAN scan (CFG → Conexión → "Buscar en la red") result state — was
@@ -2962,6 +3084,10 @@ class _DashboardState extends State<Dashboard> {
     // se volvía a TÉCNICA. El propio _windPage ya corrige el índice si la
     // página ha dejado de existir.
     _windPageIndex = (prefs.getInt('windPageIndex') ?? 0).clamp(0, 2);
+    // La URL manda sobre lo guardado: un quiosco con ?page=MAR abre el mar.
+    if (!kIsWeb || initialSubPageFromUrl(Uri.base) == null) {
+      _weatherSub = prefs.getString('weatherSubPage') ?? _weatherSub;
+    }
     settings.brightnessMode =
         prefs.getString('brightnessMode') ??
         (kIsWeb ? 'dia' : settings.brightnessMode);
@@ -3181,27 +3307,22 @@ class _DashboardState extends State<Dashboard> {
         /* keep empty if corrupted */
       }
     }
-    signalK.lastEngineHours = prefs.getDouble('lastEngineHours');
-    signalK.lastEngineRunHours = prefs.getDouble('lastEngineRunHours');
-    final lastRunMs = prefs.getInt('lastEngineRunAt');
-    signalK.lastEngineRunAt = lastRunMs == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(lastRunMs);
-    final lastRunStartedMs = prefs.getInt('lastEngineRunStartedAt');
-    signalK.lastEngineRunStartedAt = lastRunStartedMs == null
-        ? (signalK.lastEngineRunAt != null && signalK.lastEngineRunHours != null
-              ? signalK.lastEngineRunAt!.subtract(
-                  Duration(
-                    milliseconds: (signalK.lastEngineRunHours! * 3600000)
-                        .round(),
-                  ),
-                )
-              : null)
-        : DateTime.fromMillisecondsSinceEpoch(lastRunStartedMs);
-    final lastHoursMs = prefs.getInt('lastEngineHoursAt');
-    signalK.lastEngineHoursAt = lastHoursMs == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(lastHoursMs);
+    // El cuentahoras guardado es de CADA barco. Las claves sueltas de antes
+    // (lastEngineHours…) eran de todos a la vez y pueden llevar las horas de
+    // otro barco, así que se tiran: el histórico del servidor las rehace en
+    // cuanto se conecta.
+    _engineCacheByHost = EngineHoursCache.mapFromJson(
+      prefs.getString('engineHoursCacheByHost'),
+    );
+    for (final legacy in const [
+      'lastEngineHours',
+      'lastEngineHoursAt',
+      'lastEngineRunHours',
+      'lastEngineRunAt',
+      'lastEngineRunStartedAt',
+    ]) {
+      await prefs.remove(legacy);
+    }
     final polarByHostJson = prefs.getString('polarConfigByHostJson');
     if (polarByHostJson != null) {
       try {
@@ -3284,6 +3405,9 @@ class _DashboardState extends State<Dashboard> {
       await prefs.remove('anchorShowElectrical');
     }
     await _migrateAndValidateSettings(prefs);
+    // Con el servidor ya cargado: enseña desde el primer momento las horas
+    // guardadas de ESTE barco, sin esperar a conectar.
+    _useEngineCacheFor(_serverConfigKey);
     _repairCorruptedAnchorDroppedAt();
     _migrateLegacyTempAlarmTargets();
     _applyWakelock();
@@ -3466,27 +3590,13 @@ class _DashboardState extends State<Dashboard> {
       'polarConfigByHostJson',
       jsonEncode(settings.polarConfigJsonByHost),
     );
-    // El cuentahoras sobrevive a cerrar la app: ver lastEngineHours.
-    if (signalK.lastEngineHours != null) {
-      await prefs.setDouble('lastEngineHours', signalK.lastEngineHours!);
-      await prefs.setInt(
-        'lastEngineHoursAt',
-        (signalK.lastEngineHoursAt ?? DateTime.now()).millisecondsSinceEpoch,
-      );
-    }
-    if (signalK.lastEngineRunHours != null) {
-      await prefs.setDouble('lastEngineRunHours', signalK.lastEngineRunHours!);
-      await prefs.setInt(
-        'lastEngineRunAt',
-        (signalK.lastEngineRunAt ?? DateTime.now()).millisecondsSinceEpoch,
-      );
-      if (signalK.lastEngineRunStartedAt != null) {
-        await prefs.setInt(
-          'lastEngineRunStartedAt',
-          signalK.lastEngineRunStartedAt!.millisecondsSinceEpoch,
-        );
-      }
-    }
+    // El cuentahoras sobrevive a cerrar la app, uno por barco: ver
+    // EngineHoursCache.
+    _stashEngineCache();
+    await prefs.setString(
+      'engineHoursCacheByHost',
+      EngineHoursCache.mapToJson(_engineCacheByHost),
+    );
     await prefs.setString(
       'savedServers',
       jsonEncode([
@@ -4100,6 +4210,7 @@ class _DashboardState extends State<Dashboard> {
           final canonicalSensor = settings.sensorConfigJsonByHost[canonicalKey];
           final canonicalAnchor = settings.anchorConfigJsonByHost[canonicalKey];
           _currentServerConfigKey = canonicalKey;
+          _moveEngineCache(previousKey, canonicalKey);
           if (canonicalSensor != null) {
             settings.sensorConfig = SensorConfig.fromJson(canonicalSensor);
           }
@@ -4300,12 +4411,17 @@ class _DashboardState extends State<Dashboard> {
       // Zonas de otro barco no deben quedarse pintadas en ALM.
       _skNotifAll.clear();
       _skZoneDefs = const {};
+      _aisLastPositionAt = null;
+      _aisLastBaseStationAt = null;
       unawaited(_fetchSkZones());
       unawaited(_seedOwnTrackFromHistory());
       unawaited(_autoConfigureBlankSensorPaths());
       // Antes de tocar nada: lo que diga el servidor es la configuración
       // acordada del barco. Este dispositivo no sube la suya por reconectar.
       unawaited(_pullSharedConfig());
+      // Antes de rellenar desde el histórico: el máximo se calcula sobre lo
+      // guardado, y lo guardado tiene que ser de ESTE barco.
+      _useEngineCacheFor(_serverConfigKey);
       unawaited(_seedEngineHoursFromHistory());
       // signalK.connected/status flip to true/'Signal K' in
       // _onSignalKMessage, only once real data actually arrives — that's
@@ -4408,6 +4524,15 @@ class _DashboardState extends State<Dashboard> {
         if (s.enabled && (s.batteryPath ?? '').isNotEmpty) s.batteryPath!,
       for (final t in settings.sensorConfig.tanks)
         if (t.enabled && (t.batteryPath ?? '').isNotEmpty) t.batteryPath!,
+      // Y la pila "hermana" de cada sonda (environment.X.battery junto a
+      // environment.X.temperature), que es donde la publican los Zigbee de
+      // REWIND. Pedirla aunque no exista no cuesta nada: el servidor solo
+      // manda lo que tiene.
+      for (final s in settings.sensorConfig.tempSensors)
+        if (s.enabled && (s.batteryPath ?? '').isEmpty)
+          ?siblingBatteryPath(s.path),
+      'environment.outside.battery',
+      'environment.interior.battery',
       ..._dynamicHandlers.keys,
       for (final rule in settings.customAlarms)
         if (rule.type == 'tempAbove' && rule.target != null) rule.target!,
@@ -4594,6 +4719,11 @@ class _DashboardState extends State<Dashboard> {
               final volts = _num(item['value']);
               if (volts != null) signalK.voltsByPath[path] = volts;
             }
+            // La pila en porcentaje, al lado del dato (Zigbee de REWIND).
+            if (path.endsWith('.battery')) {
+              final pct = _num(item['value']);
+              if (pct != null) signalK.batteryByPath[path] = pct;
+            }
             if (path ==
                 'electrical.batteries.${settings.sensorConfig.batteryHouseId}.current') {
               final amps = _num(item['value']);
@@ -4636,6 +4766,18 @@ class _DashboardState extends State<Dashboard> {
     dynamic value,
     DateTime? dataTime,
   ) {
+    // Estaciones base (y cualquier emisor que no sea un barco): no se pintan
+    // como blancos, pero que se oiga su posición dice que el receptor
+    // funciona, y una estación base lo dice cada 10 s.
+    if (!context.startsWith('vessels.')) {
+      if (path == 'navigation.position' && dataTime != null) {
+        _noteAisPosition(
+          dataTime,
+          baseStation: context.startsWith('shore.basestations.'),
+        );
+      }
+      return;
+    }
     final t = _aisTargets.putIfAbsent(context, () => AisTarget(context));
     final ts = dataTime ?? DateTime.now();
     t.lastUpdate = ts;
@@ -4647,6 +4789,13 @@ class _DashboardState extends State<Dashboard> {
           t.lon = _num(value['longitude']);
           t.positionUpdate = ts;
           t.recordTrackPoint();
+          // La posición de OTRO barco es la única prueba de que el receptor
+          // oye. Lo demás que llega sobre un blanco puede escribirlo un
+          // plugin del servidor cada segundo (distancias, máxima
+          // aproximación) con el AIS apagado.
+          if (dataTime != null && !_isOwnShipTarget(context, t)) {
+            _noteAisPosition(dataTime);
+          }
         }
       case 'navigation.courseOverGroundTrue':
         t.cogDeg = n == null ? null : n * 57.2957795;
@@ -4711,6 +4860,16 @@ class _DashboardState extends State<Dashboard> {
         ],
       }),
     );
+    // Solo su posición: basta para saber que el receptor oye, y emiten cada
+    // 10 s haya o no barcos alrededor.
+    channel?.sink.add(
+      jsonEncode({
+        'context': 'shore.basestations.*',
+        'subscribe': [
+          {'path': 'navigation.position', 'policy': 'instant'},
+        ],
+      }),
+    );
   }
 
   // Whether the AIS page is open, or the merged AIS NAV card needs live AIS
@@ -4736,7 +4895,14 @@ class _DashboardState extends State<Dashboard> {
     // RESUMEN dice si el AIS está activo y cuántos blancos hay: sin la
     // suscripción diría siempre "sin blancos" en el barco con más tráfico.
     final onSummaryPage = currentId == 'RES';
-    if (onAisPage || onAncPage || onSummaryPage || _navWantsAis) {
+    // ALM enseña si la alarma de colisión se está vigilando, y eso depende
+    // de si el receptor oye.
+    final onAlarmsPage = currentId == 'ALM';
+    if (onAisPage ||
+        onAncPage ||
+        onSummaryPage ||
+        onAlarmsPage ||
+        _navWantsAis) {
       _subscribeAis();
     } else {
       _unsubscribeAis();
@@ -4755,6 +4921,14 @@ class _DashboardState extends State<Dashboard> {
     channel?.sink.add(
       jsonEncode({
         'context': 'vessels.*',
+        'unsubscribe': [
+          {'path': '*'},
+        ],
+      }),
+    );
+    channel?.sink.add(
+      jsonEncode({
+        'context': 'shore.basestations.*',
         'unsubscribe': [
           {'path': '*'},
         ],
@@ -5660,7 +5834,16 @@ class _DashboardState extends State<Dashboard> {
   /// lleve días apagado.
   Future<void> _seedEngineHoursFromHistory({bool force = false}) async {
     if (settings.demoMode || _engineHistoryLoading) return;
+    _engineHistoryRetry?.cancel();
     final serverKey = _serverConfigKey;
+    // Para saber si se ha cambiado de barco mientras la consulta —un año de
+    // histórico, tarda— estaba en marcha, se mira a qué servidor se está
+    // conectado y NO la clave de configuración: la clave cambia sola a mitad
+    // de camino (de la dirección al MMSI, mismo barco) y comparándola se
+    // tiraba el resultado sin avisar. En REWIND el cuentahoras no se
+    // recuperaba nunca del histórico por eso (visto en vivo 2026-09-18).
+    final target = '${settings.host}:${settings.port}';
+    bool sameBoat() => mounted && target == '${settings.host}:${settings.port}';
     final lastFetch = _engineHistoryFetchedAt;
     if (!force &&
         _engineHistoryFetchedFor == serverKey &&
@@ -5678,7 +5861,7 @@ class _DashboardState extends State<Dashboard> {
         // así que la ruta se quedaba en blanco justo en el caso en que hace
         // falta. El histórico sí la recuerda.
         path = await _discoverEnginePathFromHistory();
-        if (path == null || !mounted || serverKey != _serverConfigKey) return;
+        if (path == null || !sameBoat()) return;
         setState(() => settings.sensorConfig.enginePath = path);
         _buildDynamicHandlers();
         _sendSignalKSubscription();
@@ -5700,7 +5883,10 @@ class _DashboardState extends State<Dashboard> {
         resolution: const Duration(hours: 6),
         aggFn: 'max',
       );
-      if (!mounted || serverKey != _serverConfigKey) return;
+      if (!sameBoat()) return;
+      // El punto de partida es lo guardado de ESTE barco y de ningún otro
+      // (ver _useEngineCacheFor): partir de un máximo ajeno era el fallo.
+      _useEngineCacheFor(_serverConfigKey);
       var best = signalK.lastEngineHours ?? 0.0;
       DateTime? bestAt = signalK.lastEngineHoursAt;
       for (final point in totals) {
@@ -5716,6 +5902,9 @@ class _DashboardState extends State<Dashboard> {
       // can be larger/slower; its failure must never make the already-found
       // hour meter disappear from web or webapp.
       if (best > 0) {
+        debugPrint(
+          '[MOTOR] Horas recuperadas del histórico: ${best.toStringAsFixed(1)} h',
+        );
         setState(() {
           signalK.lastEngineHours = best;
           signalK.lastEngineHoursAt = bestAt;
@@ -5777,7 +5966,7 @@ class _DashboardState extends State<Dashboard> {
             sessionGap: const Duration(minutes: 25),
           );
         }
-        if (!mounted || serverKey != _serverConfigKey) return;
+        if (!sameBoat()) return;
         final completedRun = lastRun;
         if (completedRun != null) {
           setState(() {
@@ -5800,7 +5989,18 @@ class _DashboardState extends State<Dashboard> {
       _engineHistoryLoading = false;
       if (completed) {
         _engineHistoryFetchedAt = DateTime.now();
-        _engineHistoryFetchedFor = serverKey;
+        _engineHistoryFetchedFor = _serverConfigKey;
+        _engineHistoryAttempts = 0;
+      } else if (mounted && !settings.demoMode && _engineHistoryAttempts < 5) {
+        // Sin esto, un fallo pasajero dejaba la sesión entera sin horas: el
+        // siguiente intento solo llegaba con una reconexión. Pasa cada vez
+        // que se reinicia Signal K (al desplegar): la app conecta, pregunta,
+        // el servidor aún no escucha y "Connection refused".
+        _engineHistoryAttempts++;
+        _engineHistoryRetry = Timer(
+          Duration(seconds: 20 * _engineHistoryAttempts),
+          () => unawaited(_seedEngineHoursFromHistory(force: true)),
+        );
       }
     }
   }
@@ -6755,6 +6955,7 @@ class _DashboardState extends State<Dashboard> {
     _windToastTimer?.cancel();
     _demoTimer?.cancel();
     _staleWatchdog?.cancel();
+    _engineHistoryRetry?.cancel();
     _engineContactExpiryTimer?.cancel();
     _engineRunRefreshTimer?.cancel();
     _anchorPublishTimer?.cancel();
@@ -6855,9 +7056,9 @@ class _DashboardState extends State<Dashboard> {
     'PWR',
     if (_hasTempData) 'TMP',
     if (_hasTankData) 'TNK',
-    if (_hasMetData) 'MET',
-    'PRON',
-    'MAR',
+    // PREVISIÓN, MAR y A BORDO en una sola pestaña: eran MET, PRON y MAR,
+    // tres entradas del menú que son "el tiempo" (2026-09-18).
+    'TIEMPO',
     'ANC',
     'MAP',
     'AIS',
@@ -7109,9 +7310,7 @@ class _DashboardState extends State<Dashboard> {
       ('PWR', Icons.bolt, _powerPage()),
       if (_hasTempData) ('TMP', Icons.thermostat, _tempPage()),
       if (_hasTankData) ('TNK', Icons.water_drop, _tankPage()),
-      if (_hasMetData) ('MET', Icons.cloud, _metPage()),
-      ('PRON', Icons.wb_sunny, _forecastPage()),
-      ('MAR', Icons.waves, _marinePage()),
+      ('TIEMPO', Icons.cloud, _weatherPage()),
       ('ANC', Icons.anchor, _nativeAnchorPage()),
       ('MAP', Icons.map_outlined, _mapPage()),
       ('AIS', Icons.radar, _aisPage()),
@@ -9853,6 +10052,37 @@ class _DashboardState extends State<Dashboard> {
                               path: '${t.skPath}  (toca para ver todo)',
                             ),
                           ),
+                        // Todas las pilas de sensor que están llegando, con su
+                        // ruta: es donde se comprueba de un vistazo que la
+                        // app las está viendo, y cuál se está gastando.
+                        if (signalK.batteryByPath.isNotEmpty ||
+                            signalK.voltsByPath.keys.any(
+                              (p) => p.startsWith('sensors.'),
+                            )) ...[
+                          const SizedBox(height: 12),
+                          const Text('PILAS DE SENSORES', style: cfgSubLabel),
+                          const SizedBox(height: 4),
+                          for (final e in [
+                            ...signalK.batteryByPath.entries,
+                            ...signalK.voltsByPath.entries.where(
+                              (e) => e.key.startsWith('sensors.'),
+                            ),
+                          ])
+                            _diagRow(
+                              skPathLabel(
+                                e.key.replaceFirst(
+                                  RegExp(r'\.battery(\.voltage)?$'),
+                                  '.temperature',
+                                ),
+                              ).replaceFirst('Temperatura ', ''),
+                              sensorBatteryText(e.key, e.value),
+                              (sensorBatteryPercentFor(e.key, e.value) ?? 0) <=
+                                      20
+                                  ? cOrange
+                                  : cGreen,
+                              path: e.key,
+                            ),
+                        ],
                         const SizedBox(height: 10),
                         const Divider(color: Color(0xff1e3040), height: 1),
                         const SizedBox(height: 6),
@@ -10564,35 +10794,43 @@ class _DashboardState extends State<Dashboard> {
           },
           child: Stack(
             children: [
-              Scrollbar(
-                controller: _windScrollController,
-                thumbVisibility: true,
-                child: ListView(
-                  key: const PageStorageKey<String>('wind-scroll'),
+              // Canal propio a la derecha para los puntos: antes iban
+              // encima de la página y tapaban las tarjetas (2026-09-18).
+              Padding(
+                padding: const EdgeInsets.only(right: kPagerGutter),
+                child: Scrollbar(
                   controller: _windScrollController,
-                  physics: _pagingScrollPhysics,
-                  padding: EdgeInsets.zero,
-                  children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 200),
-                      child: page,
-                    ),
-                  ],
+                  thumbVisibility: true,
+                  child: ListView(
+                    key: const PageStorageKey<String>('wind-scroll'),
+                    controller: _windScrollController,
+                    physics: _pagingScrollPhysics,
+                    padding: EdgeInsets.zero,
+                    children: [
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 200),
+                        child: page,
+                      ),
+                    ],
+                  ),
                 ),
               ),
               Positioned(
-                top: 6,
-                right: 10,
-                child: _NavPageIndicator(
-                  total: totalPages,
-                  current: _windPageIndex,
-                  label: pageLabels[_windPageIndex],
-                  onDotTap: (i) {
-                    if (i == _windPageIndex) return;
-                    setState(() => _windPageIndex = i);
-                    _persistWindPageIndex();
-                    _flashWindToast(pageLabels[i]);
-                  },
+                top: 0,
+                bottom: 0,
+                right: 0,
+                width: kPagerGutter,
+                child: Center(
+                  child: _NavPageIndicator(
+                    total: totalPages,
+                    current: _windPageIndex,
+                    onDotTap: (i) {
+                      if (i == _windPageIndex) return;
+                      setState(() => _windPageIndex = i);
+                      _persistWindPageIndex();
+                      _flashWindToast(pageLabels[i]);
+                    },
+                  ),
                 ),
               ),
               Positioned.fill(
@@ -10809,36 +11047,42 @@ class _DashboardState extends State<Dashboard> {
           },
           child: Stack(
             children: [
-              Scrollbar(
-                controller: _navScrollController,
-                thumbVisibility: true,
-                child: ListView(
-                  key: const PageStorageKey<String>('nav-scroll'),
+              // Canal propio a la derecha para los puntos: antes iban
+              // encima de la página y tapaban las tarjetas (2026-09-18).
+              Padding(
+                padding: const EdgeInsets.only(right: kPagerGutter),
+                child: Scrollbar(
                   controller: _navScrollController,
-                  physics: _pagingScrollPhysics,
-                  padding: EdgeInsets.zero,
-                  children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 200),
-                      child: page,
-                    ),
-                  ],
+                  thumbVisibility: true,
+                  child: ListView(
+                    key: const PageStorageKey<String>('nav-scroll'),
+                    controller: _navScrollController,
+                    physics: _pagingScrollPhysics,
+                    padding: EdgeInsets.zero,
+                    children: [
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 200),
+                        child: page,
+                      ),
+                    ],
+                  ),
                 ),
               ),
               Positioned(
-                top: 6,
-                right: 10,
-                child: _NavPageIndicator(
-                  total: totalPages,
-                  current: _navPageIndex,
-                  label: _navPageIndex < pageLabels.length
-                      ? pageLabels[_navPageIndex]
-                      : null,
-                  onDotTap: (i) {
-                    if (i == _navPageIndex) return;
-                    setState(() => _navPageIndex = i);
-                    if (i < pageLabels.length) _flashNavToast(pageLabels[i]);
-                  },
+                top: 0,
+                bottom: 0,
+                right: 0,
+                width: kPagerGutter,
+                child: Center(
+                  child: _NavPageIndicator(
+                    total: totalPages,
+                    current: _navPageIndex,
+                    onDotTap: (i) {
+                      if (i == _navPageIndex) return;
+                      setState(() => _navPageIndex = i);
+                      if (i < pageLabels.length) _flashNavToast(pageLabels[i]);
+                    },
+                  ),
                 ),
               ),
               Positioned.fill(
@@ -10904,6 +11148,12 @@ class _DashboardState extends State<Dashboard> {
         graphMetrics: data.graphMetrics,
         trend: data.trend,
         bigLines: data.bigLines,
+        corner: data.aisReceiverAlive == null
+            ? null
+            : ChromeLed(
+                state: data.aisReceiverAlive! ? LampState.ok : LampState.alarm,
+                size: 14,
+              ),
         onTap: data.id == 'heel'
             ? () => _showAttitudeGauges(context)
             : data.id == 'gps'
@@ -11194,6 +11444,28 @@ class _DashboardState extends State<Dashboard> {
           color: positionFresh ? cGreen : cMuted,
         );
       case 'ais':
+        // Con el receptor apagado no se enseña un CPA calculado con
+        // posiciones viejas como si fuera actual: se dice que está apagado y
+        // desde cuándo, y el piloto de la esquina lo pone en rojo.
+        if (!_aisAlive) {
+          return NavCardData(
+            id: id,
+            title: 'AIS',
+            value: '--',
+            bigLines: const ['TCPA --', 'CPA --'],
+            // Corto: en la tarjeta Premium comparte línea y no hay sitio para
+            // frases. "Apagado · hace 4 min" dice lo mismo.
+            subtitle: _aisSilence == null
+                ? 'Sin AIS'
+                : [
+                    'Apagado',
+                    ?aisSilenceText(_aisSilence)
+                        ?.replaceFirst('último mensaje ', ''),
+                  ].join(' · '),
+            color: cMuted,
+            aisReceiverAlive: false,
+          );
+        }
         // CPA and TCPA are the two numbers that actually matter for
         // "should I worry" at a glance, so they're the two big equal-size
         // lines; name/distancia/demora are secondary context and go below
@@ -11232,6 +11504,7 @@ class _DashboardState extends State<Dashboard> {
           aisName: closest != null ? _aisTargetName(closest.target) : null,
           aisCrossing: closest?.crossing,
           color: closest == null ? cMuted : (cpaCritical ? cRed : cOrange),
+          aisReceiverAlive: true,
         );
       case 'time':
         final now = DateTime.now();
@@ -12314,7 +12587,18 @@ class _DashboardState extends State<Dashboard> {
           builder: (context, constraints) => Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _premiumTitle('AIS', data.color),
+              Row(
+                children: [
+                  Expanded(child: _premiumTitle('AIS', data.color)),
+                  if (data.aisReceiverAlive != null)
+                    ChromeLed(
+                      state: data.aisReceiverAlive!
+                          ? LampState.ok
+                          : LampState.alarm,
+                      size: 16,
+                    ),
+                ],
+              ),
               Expanded(
                 child: Row(
                   children: [
@@ -12439,12 +12723,16 @@ class _DashboardState extends State<Dashboard> {
                         ),
                       if (data.subtitle != null) ...[
                         if (data.aisName != null) const SizedBox(width: 8),
-                        Text(
-                          data.subtitle!,
-                          style: const TextStyle(
-                            color: cMuted,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
+                        Flexible(
+                          child: Text(
+                            data.subtitle!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: cMuted,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       ],
@@ -13467,19 +13755,30 @@ class _DashboardState extends State<Dashboard> {
     ].where((part) => part.isNotEmpty).join(' · ');
   }
 
-  /// "pila 2,56 V (45%)" para un sensor inalámbrico, o cadena vacía si no se
-  /// le ha configurado pila o todavía no ha llegado su voltaje.
+  /// La pila de un sensor: la que tenga asignada en CFG o, si no tiene, su
+  /// hermana `.battery` si está llegando. Null si no hay ninguna con dato.
+  String? _batteryPathFor(String? configured, String sensorPath) {
+    if (configured != null && configured.isNotEmpty) return configured;
+    final sibling = siblingBatteryPath(sensorPath);
+    if (sibling != null && signalK.batteryByPath.containsKey(sibling)) {
+      return sibling;
+    }
+    return null;
+  }
+
+  /// "pila 50 %", "pila baja 15 %" o "pila 2,56 V (45 %)" para la tarjeta de
+  /// un sensor, o cadena vacía si no tiene pila o aún no ha llegado.
   ///
   /// Una pila agotada explica una lectura congelada mejor que cualquier aviso
   /// de dato antiguo: en AREA SECADA el sensor de agua va a 2,56 V y pasa
   /// cuartos de hora callado.
-  String _sensorBatteryLabel(String? batteryPath) {
-    if (batteryPath == null || batteryPath.isEmpty) return '';
-    final volts = signalK.voltsByPath[batteryPath];
-    if (volts == null) return '';
-    final pct = sensorBatteryPercent(volts);
-    final v = volts.toStringAsFixed(2).replaceAll('.', ',');
-    return pct == null ? 'pila $v V' : 'pila $v V (${pct.round()}%)';
+  String _sensorBatteryLabel(String? configured, String sensorPath) {
+    final path = _batteryPathFor(configured, sensorPath);
+    if (path == null) return '';
+    final value = path.endsWith('.voltage')
+        ? signalK.voltsByPath[path]
+        : signalK.batteryByPath[path];
+    return sensorBatteryText(path, value);
   }
 
   // ─── ALARMAS page (panel de testigos) ───────────────────────────────────
@@ -13631,13 +13930,17 @@ class _DashboardState extends State<Dashboard> {
       lamps: [
         AlarmLamp(
           label: 'Colisión AIS',
-          detail: settings.alarmAisEnabled
+          detail: !settings.alarmAisEnabled
+              ? ''
+              : _aisAlive
               ? 'CPA ${_n(settings.alarmAisCpaNm, 2)} NM · TCPA ${_n(settings.alarmAisTcpaMin, 0)} min'
-              : '',
+              : 'receptor AIS apagado · ${aisSilenceText(_aisSilence) ?? ''}',
+          // Se vigila si el receptor OYE, no si la app está suscrita: con el
+          // AIS apagado la alarma de colisión no protege de nada.
           state: _lampFor(
             enabled: settings.alarmAisEnabled,
             firing: isFiring('ais'),
-            watching: _aisSubscribed,
+            watching: _aisAlive,
           ),
           muted: isMuted('ais'),
         ),
@@ -13782,15 +14085,52 @@ class _DashboardState extends State<Dashboard> {
               ],
             ),
           ),
-          for (final g in groups)
-            AlarmPanelPlate(
-              title: g.title,
-              child: Column(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final plates = [
+                for (final g in groups)
+                  (
+                    rows: g.lamps.length,
+                    widget: AlarmPanelPlate(
+                      title: g.title,
+                      child: Column(
+                        children: [
+                          for (final lamp in g.lamps) AlarmLampRow(lamp: lamp),
+                        ],
+                      ),
+                    ),
+                  ),
+              ];
+              if (constraints.maxWidth < 640) {
+                return Column(children: [for (final p in plates) p.widget]);
+              }
+              // Dos columnas, repartiendo por filas y no por número de
+              // placas: la de Signal K puede tener diez pilotos y la de
+              // navegación dos, y a partes iguales una columna quedaría el
+              // doble de larga que la otra. Se mantiene el orden de lectura.
+              final total = plates.fold<int>(0, (n, p) => n + p.rows + 2);
+              final left = <Widget>[];
+              final right = <Widget>[];
+              var acc = 0;
+              for (final p in plates) {
+                final weight = p.rows + 2;
+                if (right.isEmpty && acc + weight / 2 <= total / 2) {
+                  left.add(p.widget);
+                  acc += weight;
+                } else {
+                  right.add(p.widget);
+                }
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  for (final lamp in g.lamps) AlarmLampRow(lamp: lamp),
+                  Expanded(child: Column(children: left)),
+                  const SizedBox(width: 10),
+                  Expanded(child: Column(children: right)),
                 ],
-              ),
-            ),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -13807,6 +14147,9 @@ class _DashboardState extends State<Dashboard> {
     required Color accent,
     required Widget child,
     String? trailing,
+    // Algo pequeño en la esquina superior derecha, tras el texto de estado:
+    // el piloto del AIS.
+    Widget? corner,
   }) => Container(
     padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
     decoration: BoxDecoration(
@@ -13847,6 +14190,7 @@ class _DashboardState extends State<Dashboard> {
                   fontWeight: FontWeight.w700,
                 ),
               ),
+            if (corner != null) ...[const SizedBox(width: 8), corner],
           ],
         ),
         const SizedBox(height: 8),
@@ -14037,8 +14381,6 @@ class _DashboardState extends State<Dashboard> {
     final lat = posFresh ? signalK.latitude : null;
     final lon = posFresh ? signalK.longitude : null;
     final sats = signalK.gnssSatellites;
-    final aisCount = _visibleAisTargets.length;
-    final aisOn = _aisSubscribed;
     final now = DateTime.now();
 
     final energia = _summaryPanel(
@@ -14244,10 +14586,17 @@ class _DashboardState extends State<Dashboard> {
                     alternatorV == null ? '--' : fmt(alternatorV, 2, ' V'),
                     altColor,
                   ),
-                  if (signalK.engineHours != null)
+                  // En vivo o, con el motor parado, la última lectura
+                  // guardada de ESTE barco: un cuentahoras solo sube, así
+                  // que una lectura vieja sigue siendo cierta.
+                  if ((signalK.engineHours ?? signalK.lastEngineHours) != null)
                     _summaryChip(
                       'HORAS',
-                      fmt(signalK.engineHours, 1, ' h'),
+                      fmt(
+                        signalK.engineHours ?? signalK.lastEngineHours,
+                        1,
+                        ' h',
+                      ),
                       cCyan,
                     ),
                 ],
@@ -14258,28 +14607,45 @@ class _DashboardState extends State<Dashboard> {
       ),
     );
 
-    // Solo se dice "a la escucha" cuando se ve que el receptor está vivo, es
-    // decir, cuando entran blancos; sin nada que recibir se dice APAGADO y no
-    // se promete una vigilancia que no se está haciendo (petición en vivo
-    // 2026-09-17). Los blancos caducan a los 18 minutos, así que "hay
-    // blancos" equivale a "está llegando AIS".
-    final recibiendo = aisOn && aisCount > 0;
+    // El receptor está vivo si ha llegado la POSICIÓN de algún otro barco (o
+    // de una estación base) hace poco: ver aisReceiverAlive. Antes se miraba
+    // si quedaban blancos en la lista, y como caducan a los 18 minutos —y en
+    // REWIND no caducaban nunca, porque un plugin escribe sobre ellos cada
+    // segundo— el piloto seguía verde con el AIS apagado (2026-09-18).
+    final aisAlive = _aisAlive;
+    final aisCount = _aisLiveTargetCount;
+    final aisSilence = aisSilenceText(_aisSilence);
     final ais = _summaryPanel(
       title: 'AIS',
       icon: Icons.radar,
-      accent: recibiendo ? cGreen : cMuted,
-      trailing: recibiendo ? 'A LA ESCUCHA' : 'APAGADO',
+      accent: aisAlive ? cGreen : cMuted,
+      trailing: !aisAlive
+          ? 'APAGADO'
+          : aisCount > 0
+          ? 'A LA ESCUCHA'
+          : 'SIN BLANCOS',
+      // Piloto en la esquina: verde si el receptor oye, rojo si no. Rojo y no
+      // apagado: sin AIS no hay vigilancia de colisión, y eso tiene que
+      // verse de lejos (petición 2026-09-18).
+      corner: ChromeLed(
+        state: aisAlive ? LampState.ok : LampState.alarm,
+        size: 16,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           _summaryValue(
-            recibiendo ? '$aisCount' : '--',
-            recibiendo ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
-            recibiendo ? cGreen : cMuted,
-            footer: recibiendo
-                ? 'vistos en 18 min'
-                : 'receptor apagado o sin alcance',
+            aisAlive ? '$aisCount' : '--',
+            aisAlive ? (aisCount == 1 ? 'blanco' : 'blancos') : '',
+            aisAlive ? cGreen : cMuted,
+            // "último mensaje hace X" en cuanto pasa del minuto, también con
+            // el piloto aún en verde: así se ve venir el apagado.
+            footer:
+                aisSilence ??
+                (aisAlive
+                    ? 'vistos en 18 min'
+                    : 'receptor apagado o sin alcance'),
           ),
         ],
       ),
@@ -14743,7 +15109,7 @@ class _DashboardState extends State<Dashboard> {
               ? const Duration(minutes: 10)
               : const Duration(minutes: 5),
         ),
-        _sensorBatteryLabel(s.batteryPath),
+        _sensorBatteryLabel(s.batteryPath, s.path),
       ].where((part) => part.isNotEmpty).join(' · ');
       final isFridge = s.role == 'nevera' || s.role == 'congelador';
       cards.add(
@@ -15168,6 +15534,16 @@ class _DashboardState extends State<Dashboard> {
     return b * gamma / (a - gamma);
   }
 
+  /// Une los trozos de un subtítulo con " · " saltándose los vacíos; null si
+  /// no queda ninguno, para que la tarjeta no reserve una línea en blanco.
+  String? _joinSubtitle(List<String?> parts) {
+    final kept = [
+      for (final p in parts)
+        if (p != null && p.isNotEmpty) p,
+    ];
+    return kept.isEmpty ? null : kept.join(' · ');
+  }
+
   String? _humiditySubtitle(double? temperatureK, double? humidityPct) {
     if (humidityPct == null) return null;
     final dewPoint = _dewPointC(temperatureK, humidityPct);
@@ -15179,34 +15555,52 @@ class _DashboardState extends State<Dashboard> {
     return 'HR ${fmt(humidityPct, 0, '%')} · rocío ${dewPoint.round()}°$risk';
   }
 
+  // ─── TIEMPO ──────────────────────────────────────────────────────────────
+  // Tres pantallas separadas por el ORIGEN del dato, sin mezclar: lo que
+  // predice internet (PREVISIÓN y MAR, de Open-Meteo) y lo que mide el barco
+  // (A BORDO). Antes MET tenía medio de cada cosa —presión y temperaturas del
+  // barco, pero también la rosa del modelo y una tarjeta de "Previsión
+  // local"—, y "MET" y "PRON" no decían en qué se diferenciaban.
+  Widget _weatherPage() {
+    final pages = [
+      (label: kWeatherForecast, child: _forecastPage()),
+      (label: kWeatherMarine, child: _marinePage()),
+      if (_hasMetData) (label: kWeatherOnBoard, child: _metPage()),
+    ];
+    return _VerticalPager(
+      // Cambia de clave si aparece o desaparece A BORDO, para que el
+      // carrusel no se quede con un índice de otra lista.
+      key: ValueKey('tiempo-${pages.length}'),
+      pages: pages,
+      initialLabel: _weatherSub,
+      onChanged: (label) {
+        _weatherSub = label;
+        SharedPreferences.getInstance().then(
+          (prefs) => prefs.setString('weatherSubPage', label),
+        );
+      },
+    );
+  }
+
+  // A BORDO: lo que mide el barco, y nada más. La previsión vive en
+  // PREVISIÓN; mezclar las dos cosas en la misma pantalla era justo lo que
+  // hacía confusas MET y PRON.
   Widget _metPage() {
-    final forecast = elementAtOrNull(weather.summary, 0);
-    final freshness = _weatherFreshness;
     return Padding(
       padding: const EdgeInsets.all(8),
       child: Column(
         children: [
-          SizedBox(
+          const SizedBox(
             height: 16,
             child: Row(
               children: [
-                const Icon(Icons.cloud_outlined, size: 14, color: cMuted),
-                const SizedBox(width: 5),
+                Icon(Icons.sailing, size: 14, color: cMuted),
+                SizedBox(width: 5),
                 Expanded(
                   child: Text(
-                    'Observación Signal K · previsión Open-Meteo (modelo automático)',
+                    'Medido a bordo por los sensores del barco',
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: cMuted, fontSize: 9),
-                  ),
-                ),
-                Text(
-                  forecast == null
-                      ? freshness.text
-                      : '${forecast.time.toLocal().hour.toString().padLeft(2, '0')}:00 · ${freshness.text}',
-                  style: TextStyle(
-                    color: freshness.color,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
+                    style: TextStyle(color: cMuted, fontSize: 9),
                   ),
                 ),
               ],
@@ -15215,8 +15609,10 @@ class _DashboardState extends State<Dashboard> {
           Expanded(
             child: Row(
               children: [
+                // La tendencia del barómetro es lo más útil de esta pantalla
+                // y ahora tiene el sitio que le quitaba la previsión.
                 Expanded(
-                  flex: 11,
+                  flex: 3,
                   child: PressureTrendCard(
                     value: signalK.outsidePressureHpa,
                     history: _pressureHistory,
@@ -15226,66 +15622,48 @@ class _DashboardState extends State<Dashboard> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  flex: 18,
+                  flex: 2,
                   child: Column(
                     children: [
                       Expanded(
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: MetricCard(
-                                title: 'T. exterior',
-                                value: tempNum(signalK.outsideTempK),
-                                unit: '°C',
-                                subtitle: _humiditySubtitle(
-                                  signalK.outsideTempK,
-                                  signalK.outsideHumidity,
-                                ),
-                                color: cCyan,
-                                zoom: _showZoom,
-                                graphMetrics: const [mOutdoorTemp],
-                              ),
+                        child: MetricCard(
+                          title: 'T. exterior',
+                          value: tempNum(signalK.outsideTempK),
+                          unit: '°C',
+                          subtitle: _joinSubtitle([
+                            _humiditySubtitle(
+                              signalK.outsideTempK,
+                              signalK.outsideHumidity,
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: MetricCard(
-                                title: 'T. interior',
-                                value: tempNum(signalK.indoorTempK),
-                                unit: '°C',
-                                subtitle: _humiditySubtitle(
-                                  signalK.indoorTempK,
-                                  signalK.indoorHumidity,
-                                ),
-                                color: cCyan,
-                                zoom: _showZoom,
-                                graphMetrics: const [mIndoorTemp],
-                              ),
+                            _sensorBatteryLabel(
+                              null,
+                              'environment.outside.temperature',
                             ),
-                          ],
+                          ]),
+                          color: cCyan,
+                          zoom: _showZoom,
+                          graphMetrics: const [mOutdoorTemp],
                         ),
                       ),
                       const SizedBox(height: 8),
                       Expanded(
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: ModelWindCompassCard(
-                                forecast: forecast,
-                                tws: _freshWind(_dTws, signalK.twsUpdate),
-                                zoom: _showZoom,
-                              ),
+                        child: MetricCard(
+                          title: 'T. interior',
+                          value: tempNum(signalK.indoorTempK),
+                          unit: '°C',
+                          subtitle: _joinSubtitle([
+                            _humiditySubtitle(
+                              signalK.indoorTempK,
+                              signalK.indoorHumidity,
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: ForecastCard(
-                                title: weather.place.isEmpty
-                                    ? 'Previsión local'
-                                    : weather.place,
-                                point: forecast,
-                                zoom: _showZoom,
-                              ),
+                            _sensorBatteryLabel(
+                              null,
+                              'environment.interior.temperature',
                             ),
-                          ],
+                          ]),
+                          color: cCyan,
+                          zoom: _showZoom,
+                          graphMetrics: const [mIndoorTemp],
                         ),
                       ),
                     ],
@@ -15515,6 +15893,16 @@ class _DashboardState extends State<Dashboard> {
               height: summaryHeight,
               child: Row(
                 children: [
+                  // Venía de MET, donde era la única cosa de previsión
+                  // mezclada con los sensores del barco. Es el viento que da
+                  // el modelo, así que su sitio es aquí.
+                  Expanded(
+                    child: ModelWindCompassCard(
+                      forecast: elementAtOrNull(weather.summary, 0),
+                      tws: _freshWind(_dTws, signalK.twsUpdate),
+                      zoom: _showZoom,
+                    ),
+                  ),
                   for (var i = 0; i < 3; i++)
                     Expanded(
                       child: ForecastCard(
@@ -16163,7 +16551,48 @@ class _DashboardState extends State<Dashboard> {
     onSwipeToPreviousPage: () {
       if (page > 0) _selectPage(page - 1);
     },
+    receiverStatus: _aisReceiverChip(),
   );
+
+  /// Píldora con el piloto del receptor, para la columna de la pantalla AIS:
+  /// verde si oye, rojo si no, y "último mensaje hace X" pasado el minuto.
+  Widget _aisReceiverChip() {
+    final alive = _aisAlive;
+    final silence = aisSilenceText(_aisSilence);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(15),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ChromeLed(state: alive ? LampState.ok : LampState.alarm, size: 16),
+          const SizedBox(width: 8),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                alive ? 'RECEPTOR A LA ESCUCHA' : 'RECEPTOR APAGADO',
+                style: TextStyle(
+                  color: alive ? cGreen : cRed,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              if (silence != null)
+                Text(
+                  silence,
+                  style: const TextStyle(color: cMuted, fontSize: 10.5),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
   // ─── Settings page ──────────────────────────────────────────────────────────
 

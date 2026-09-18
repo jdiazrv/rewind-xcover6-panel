@@ -18,6 +18,7 @@ class MetricCard extends StatelessWidget {
     this.bigLines,
     this.subtitleFontSize = 28,
     this.onHelp,
+    this.corner,
   });
 
   final String title;
@@ -44,6 +45,10 @@ class MetricCard extends StatelessWidget {
   // Interrogación en la esquina para las tarjetas que necesitan explicar
   // de dónde sale el número, no solo enseñarlo.
   final VoidCallback? onHelp;
+
+  /// Algo pequeño al final de la línea del título: el piloto del receptor
+  /// en la tarjeta AIS.
+  final Widget? corner;
 
   @override
   Widget build(BuildContext context) {
@@ -108,6 +113,7 @@ class MetricCard extends StatelessWidget {
                   ),
                 ],
                 if (onHelp != null) HelpDot(onTap: onHelp!, color: color),
+                if (corner != null) ...[const SizedBox(width: 6), corner!],
               ],
             ),
             Expanded(

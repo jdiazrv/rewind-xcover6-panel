@@ -95,7 +95,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('PRON layout fits landscape phone size', (
+  testWidgets('TIEMPO abre en PREVISIÓN y cabe en el móvil apaisado', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(915, 412);
@@ -104,7 +104,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const RewindApp());
-    await tester.tap(find.text('PRON'));
+    await tester.tap(find.text('TIEMPO'));
     await tester.pumpAndSettle();
 
     // No network in the test environment, so this lands on the "still
@@ -456,7 +456,10 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('MET overview fits the XCover landscape viewport', (
+  // MET, PRON y MAR son ahora una sola pestaña TIEMPO con carrusel
+  // vertical. A BORDO enseña solo lo que mide el barco: la previsión que
+  // tenía MET mezclada ("Viento previsto") se fue a PREVISIÓN.
+  testWidgets('TIEMPO pasa de PREVISIÓN a MAR y a A BORDO deslizando', (
     WidgetTester tester,
   ) async {
     tester.view.physicalSize = const Size(915, 412);
@@ -465,13 +468,35 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     await tester.pumpWidget(const RewindApp());
-    await tester.tap(find.text('MET'));
+    // Ni MET, ni PRON, ni MAR en el menú: una sola entrada.
+    expect(find.text('MET'), findsNothing);
+    expect(find.text('PRON'), findsNothing);
+    await tester.tap(find.text('TIEMPO'));
     await tester.pumpAndSettle();
 
+    Future<void> siguiente() async {
+      await tester.drag(find.byType(ListView).last, const Offset(0, -300));
+      await tester.pumpAndSettle();
+    }
+
+    // Arranca en PREVISIÓN; deslizando se llega a A BORDO (el arranque sin
+    // conexión es modo DEMO, que tiene barómetro y temperaturas).
+    for (
+      var i = 0;
+      i < 3 && find.text('PRESIÓN ATMOSFÉRICA').evaluate().isEmpty;
+      i++
+    ) {
+      await siguiente();
+    }
     expect(find.text('PRESIÓN ATMOSFÉRICA'), findsOneWidget);
     expect(find.text('T. exterior'), findsOneWidget);
     expect(find.text('T. interior'), findsOneWidget);
-    expect(find.text('Viento previsto'), findsOneWidget);
+    // Nada de previsión en A BORDO.
+    expect(find.text('Viento previsto'), findsNothing);
+    expect(
+      find.text('Medido a bordo por los sensores del barco'),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 

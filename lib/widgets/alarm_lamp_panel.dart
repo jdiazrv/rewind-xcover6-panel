@@ -257,7 +257,12 @@ class AlarmPanelPlate extends StatelessWidget {
   );
 }
 
-/// Una fila: piloto, leyenda grabada y, a la derecha, en qué estado está.
+/// Una fila: piloto y leyenda grabada.
+///
+/// Sin etiqueta de estado a la derecha ("EN ORDEN", "SIN VIGILAR",
+/// "DESACTIVADA"): el piloto ya lo dice y en dos columnas ese texto se comía
+/// el ancho de la leyenda (petición 2026-09-18). Solo se escribe cuando hay
+/// que actuar: una alarma disparada, o silenciada.
 class AlarmLampRow extends StatelessWidget {
   const AlarmLampRow({super.key, required this.lamp});
 
@@ -265,20 +270,30 @@ class AlarmLampRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final estado = lamp.muted && lamp.state == LampState.warn
-        ? 'SILENCIADA'
-        : lamp.state.label;
+    // Sin vigilar: la leyenda en gris, para que lo que sí protege destaque.
+    final sinVigilar = lamp.state == LampState.warn;
+    final labelColor = sinVigilar
+        ? const Color(0xff7d8a93)
+        : const Color(0xffe8eef2);
+    final detailColor = sinVigilar
+        ? const Color(0xff66737c)
+        : const Color(0xff8c9aa3);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
-          ChromeLed(state: lamp.state),
-          const SizedBox(width: 12),
+          ChromeLed(state: lamp.state, size: 24),
+          const SizedBox(width: 11),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                EngravedText(lamp.label, size: 13, maxLines: 1),
+                EngravedText(
+                  lamp.label,
+                  size: 13,
+                  color: labelColor,
+                  maxLines: 1,
+                ),
                 if (lamp.detail.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 1),
@@ -287,24 +302,24 @@ class AlarmLampRow extends StatelessWidget {
                       size: 11,
                       weight: FontWeight.w500,
                       letterSpacing: 0.2,
-                      color: const Color(0xff8c9aa3),
+                      color: detailColor,
                       maxLines: 1,
                     ),
                   ),
               ],
             ),
           ),
-          const SizedBox(width: 10),
-          EngravedText(
-            estado,
-            size: 10,
-            weight: FontWeight.w800,
-            letterSpacing: 1.1,
-            color: lamp.state == LampState.off
-                ? const Color(0xff67757e)
-                : lamp.state.color,
-            maxLines: 1,
-          ),
+          if (lamp.state == LampState.alarm) ...[
+            const SizedBox(width: 8),
+            EngravedText(
+              lamp.muted ? 'SILENCIADA' : 'ALARMA',
+              size: 10,
+              weight: FontWeight.w800,
+              letterSpacing: 1.1,
+              color: lamp.muted ? LampState.warn.color : LampState.alarm.color,
+              maxLines: 1,
+            ),
+          ],
         ],
       ),
     );

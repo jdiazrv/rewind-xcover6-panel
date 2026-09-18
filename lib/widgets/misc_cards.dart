@@ -2562,12 +2562,10 @@ class _NavPageIndicator extends StatelessWidget {
   const _NavPageIndicator({
     required this.total,
     required this.current,
-    this.label,
     this.onDotTap,
   });
   final int total;
   final int current;
-  final String? label;
   // Web has no touch swipe and mouse-drag on a nested ListView is
   // unreliable ("no se puede deslizar" — click-and-drag scrolling here
   // fights the overscroll-distance page-change detection above). Tapping a
@@ -2577,34 +2575,14 @@ class _NavPageIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Va en su propio canal de 20 px a la derecha (kPagerGutter), no encima
+    // de la página: sin fondo que tape nada y sin márgenes que no quepan.
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(10),
-      ),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       // Vertical, matching the vertical swipe direction it reflects.
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (label != null) ...[
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 72),
-              child: Text(
-                label!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: cText,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-            const SizedBox(height: 3),
-          ],
           for (var i = 0; i < total; i++) ...[
             if (i > 0) const SizedBox(height: 5),
             GestureDetector(
@@ -2618,12 +2596,14 @@ class _NavPageIndicator extends StatelessWidget {
                   duration: const Duration(milliseconds: 150),
                   width: i == current ? 8 : 6,
                   height: i == current ? 8 : 6,
+                  // El círculo se hace con borderRadius y no con
+                  // BoxShape.circle: AnimatedContainer no sabe interpolar de
+                  // una forma a la otra y, a mitad de la animación, pedía
+                  // un círculo con esquinas redondeadas y la aserción de
+                  // Flutter saltaba (lo cazó el test de TIEMPO, 2026-09-18).
                   decoration: BoxDecoration(
                     color: i == current ? cCyan : cMuted.withValues(alpha: 0.5),
-                    shape: i == current ? BoxShape.rectangle : BoxShape.circle,
-                    borderRadius: i == current
-                        ? BorderRadius.circular(2)
-                        : null,
+                    borderRadius: BorderRadius.circular(i == current ? 2 : 3),
                   ),
                 ),
               ),

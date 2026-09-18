@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -819,6 +820,7 @@ class NavCardData {
     this.bigLines,
     this.aisName,
     this.aisCrossing,
+    this.aisReceiverAlive,
   });
 
   final String id;
@@ -838,6 +840,9 @@ class NavCardData {
   // own and never eats into the distance/bearing or crossing side text.
   final String? aisName;
   final String? aisCrossing; // 'POR PROA' | 'POR POPA' | null
+  // Solo AIS: si el receptor oye (ver aisReceiverAlive). La tarjeta lleva un
+  // piloto verde o rojo según esto.
+  final bool? aisReceiverAlive;
 }
 
 // ─── Alarms ─────────────────────────────────────────────────────────────────
@@ -1076,6 +1081,12 @@ class SignalKModel {
   /// porque cada barco nombra los suyos a su manera. Lo leen las tarjetas de
   /// temperatura y de tanque (ver sensorBatteryPercent).
   final Map<String, double> voltsByPath = {};
+
+  /// Última lectura de cada ruta `*.battery` (pila en porcentaje, o en tanto
+  /// por uno si el plugin sigue la especificación). Es la forma de los
+  /// sensores Zigbee de REWIND: environment.fridge_1.battery = 100 junto a
+  /// environment.fridge_1.temperature. Ver sensorBatteryPercentFor.
+  final Map<String, double> batteryByPath = {};
   // Wind
   double? awsKn;
   double? awaDeg;
@@ -1549,6 +1560,48 @@ double? sensorBatteryPercent(
   return pct.clamp(0, 100).toDouble();
 }
 
+/// Ruta natural de la pila de un sensor: la hermana `.battery` de su dato.
+///
+/// Los sensores Zigbee de REWIND publican la pila al lado de lo que miden
+/// (environment.fridge_1.temperature → environment.fridge_1.battery). Esa
+/// relación sí es estructural, así que no hace falta adivinar ni asignarla a
+/// mano en CFG. Durante meses la app solo buscaba la forma de los Mopeka
+/// (`sensors.<nombre>.battery.voltage`) y en REWIND no enseñó nunca ninguna
+/// pila aunque las cinco sondas la publicaban (visto en vivo 2026-09-18).
+String? siblingBatteryPath(String sensorPath) {
+  final i = sensorPath.lastIndexOf('.');
+  if (i <= 0) return null;
+  if (!sensorPath.startsWith('environment.')) return null;
+  return '${sensorPath.substring(0, i)}.battery';
+}
+
+/// Carga de la pila en %, venga en voltios o ya en porcentaje.
+///
+///  - `….voltage` → voltios de una CR2032, se estima con sensorBatteryPercent.
+///  - `….battery` → ya es un porcentaje (Zigbee: 100, 50…) o un tanto por uno
+///    si el plugin sigue la especificación de Signal K (1.0, 0.5…).
+double? sensorBatteryPercentFor(String path, double? value) {
+  if (value == null || !value.isFinite) return null;
+  if (path.endsWith('.voltage')) return sensorBatteryPercent(value);
+  final pct = value <= 1.0 ? value * 100 : value;
+  return pct.clamp(0, 100).toDouble();
+}
+
+/// "pila 50 %", "pila baja 15 %" o "pila 2,56 V (45 %)"; vacío sin dato.
+String sensorBatteryText(String path, double? value) {
+  final pct = sensorBatteryPercentFor(path, value);
+  if (pct == null) return '';
+  // Espacios que no se parten (\u00a0): en una tarjeta estrecha el "%" se
+  // quedaba solo en la línea de abajo (visto en el XCover, 2026-09-18).
+  const nb = '\u00a0';
+  final baja = pct <= 20 ? 'pila${nb}baja' : 'pila';
+  if (path.endsWith('.voltage')) {
+    final v = value!.toStringAsFixed(2).replaceAll('.', ',');
+    return '$baja$nb$v${nb}V$nb(${pct.round()}$nb%)';
+  }
+  return '$baja$nb${pct.round()}$nb%';
+}
+
 /// Busca, entre las rutas de pila que publica el barco, la que corresponde a
 /// un sensor concreto.
 ///
@@ -1613,17 +1666,39 @@ const kPageIdCatalogue = <String>[
   'NAV',
   'VNT',
   'RES',
+  'ALM',
   'PWR',
   'TMP',
   'TNK',
-  'MET',
-  'PRON',
-  'MAR',
+  'TIEMPO',
   'ANC',
   'MAP',
   'AIS',
   'CFG',
 ];
+
+/// Sub-páginas de TIEMPO, en el orden en que se recorren.
+const kWeatherForecast = 'PREVISIÓN';
+const kWeatherMarine = 'MAR';
+const kWeatherOnBoard = 'A BORDO';
+
+/// Pantallas que se fundieron en otra: el nombre viejo sigue funcionando y
+/// abre la nueva en la sub-página que le corresponde. MET, PRON y MAR pasaron
+/// a ser TIEMPO el 18/09/2026, y cualquier arranque en quiosco o enlace
+/// guardado con ?page=PRON tiene que seguir abriendo la previsión.
+const kPageAliases = <String, ({String page, String sub})>{
+  'PRON': (page: 'TIEMPO', sub: kWeatherForecast),
+  'MAR': (page: 'TIEMPO', sub: kWeatherMarine),
+  'MET': (page: 'TIEMPO', sub: kWeatherOnBoard),
+};
+
+/// El id de pantalla que toca, resolviendo los alias. Null si no existe.
+({String page, String? sub})? resolvePageId(String raw) {
+  final id = raw.toUpperCase();
+  final alias = kPageAliases[id];
+  if (alias != null) return (page: alias.page, sub: alias.sub);
+  return kPageIdCatalogue.contains(id) ? (page: id, sub: null) : null;
+}
 
 /// Pantalla con la que debe abrirse la webapp, tomada de la URL.
 ///
@@ -1639,8 +1714,20 @@ String? initialPageIdFromUrl(Uri uri) {
     raw = match?.group(1);
   }
   if (raw == null || raw.isEmpty) return null;
-  final id = raw.toUpperCase();
-  return kPageIdCatalogue.contains(id) ? id : null;
+  return resolvePageId(raw)?.page;
+}
+
+/// La sub-página que pide la URL, si el id era un alias (?page=MAR abre
+/// TIEMPO en MAR).
+String? initialSubPageFromUrl(Uri uri) {
+  String? raw = uri.queryParameters['page'];
+  if (raw == null || raw.isEmpty) {
+    final match = RegExp(r'(?:^|[?&/])page=([A-Za-z]+)')
+        .firstMatch(uri.fragment);
+    raw = match?.group(1);
+  }
+  if (raw == null || raw.isEmpty) return null;
+  return resolvePageId(raw)?.sub;
 }
 
 /// Tarjetas que solo tienen sentido en algunos barcos, con la ruta que
@@ -4280,4 +4367,134 @@ String skZoneSummary(List<SkZoneBand> bands) {
     out.add('${word(b.state)} $range'.trim());
   }
   return out.join(' · ');
+}
+
+// ─── Cuentahoras guardado, por barco ────────────────────────────────────────
+//
+// La última lectura del cuentahoras y el último uso del motor se guardan en
+// el dispositivo para enseñarlos con el motor apagado. Se guardaban UNA vez
+// para todos los barcos, y como al conectar se rellenan con el MÁXIMO entre
+// lo guardado y el histórico (un cuentahoras solo sube), el barco con más
+// horas "ganaba" para siempre: lysmarine enseñaba las horas del último barco
+// al que te habías conectado (visto en vivo 2026-09-18).
+
+/// Lo que se recuerda del motor de UN barco.
+class EngineHoursCache {
+  EngineHoursCache({
+    this.hours,
+    this.hoursAt,
+    this.runHours,
+    this.runAt,
+    this.runStartedAt,
+  });
+
+  double? hours;
+  DateTime? hoursAt;
+  double? runHours;
+  DateTime? runAt;
+  DateTime? runStartedAt;
+
+  bool get isEmpty => hours == null && runHours == null;
+
+  Map<String, dynamic> toJson() => {
+    if (hours != null) 'hours': hours,
+    if (hoursAt != null) 'hoursAt': hoursAt!.millisecondsSinceEpoch,
+    if (runHours != null) 'runHours': runHours,
+    if (runAt != null) 'runAt': runAt!.millisecondsSinceEpoch,
+    if (runStartedAt != null)
+      'runStartedAt': runStartedAt!.millisecondsSinceEpoch,
+  };
+
+  factory EngineHoursCache.fromJson(Map<String, dynamic> j) {
+    DateTime? t(dynamic v) =>
+        v is int ? DateTime.fromMillisecondsSinceEpoch(v) : null;
+    double? d(dynamic v) => v is num ? v.toDouble() : null;
+    return EngineHoursCache(
+      hours: d(j['hours']),
+      hoursAt: t(j['hoursAt']),
+      runHours: d(j['runHours']),
+      runAt: t(j['runAt']),
+      runStartedAt: t(j['runStartedAt']),
+    );
+  }
+
+  static Map<String, EngineHoursCache> mapFromJson(String? raw) {
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return {
+        for (final e in decoded.entries)
+          if (e.value is Map)
+            e.key.toString(): EngineHoursCache.fromJson(
+              Map<String, dynamic>.from(e.value as Map),
+            ),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static String mapToJson(Map<String, EngineHoursCache> map) => jsonEncode({
+    for (final e in map.entries)
+      if (!e.value.isEmpty) e.key: e.value.toJson(),
+  });
+}
+
+// ─── ¿Está vivo el AIS? ─────────────────────────────────────────────────────
+//
+// La única señal fiable es cuándo llegó la última POSICIÓN de otro emisor AIS
+// (barco, estación base, ayuda a la navegación…). No se mira ningún plugin:
+// lo que un plugin escriba sobre un blanco (distancias, estados) no es una
+// posición, así que no cuenta y no puede engañar. El B954 de REWIND manda
+// también su propia posición y su hora, pero Signal K las descarta por
+// prioridad de fuente antes de guardarlas y no sirven de latido (comprobado
+// en vivo 2026-09-18).
+//
+// Los plazos son los mismos que usa sk-ais-status para dar un blanco por
+// perdido, según quién emite.
+
+/// A partir de cuánto silencio se avisa de "último mensaje hace…".
+const kAisSilenceNotice = Duration(minutes: 1);
+
+/// Sin estaciones base al alcance: un barco fondeado, de clase A o B, informa
+/// como mucho cada 3 minutos. Menos que esto daría falsas alarmas de noche en
+/// un fondeadero tranquilo.
+const kAisSilenceOff = Duration(minutes: 3);
+
+/// Con una estación base al alcance: emiten cada 10 s pase lo que pase, así
+/// que 30 s de silencio total solo pueden ser el receptor.
+const kAisSilenceOffWithBase = Duration(seconds: 30);
+
+/// ¿Está el receptor funcionando?
+///
+/// [silence] es el tiempo desde la última posición de cualquier emisor.
+/// [baseStationHeard] dice si se ha oído alguna estación base hace poco: si
+/// la hay, su latido de 10 s permite detectar el apagado mucho antes.
+bool aisReceiverAlive(Duration? silence, {bool baseStationHeard = false}) {
+  if (silence == null) return false;
+  final limit = baseStationHeard ? kAisSilenceOffWithBase : kAisSilenceOff;
+  return silence < limit;
+}
+
+/// "último mensaje hace 4 min" cuando hace más de un minuto; null si no hay
+/// que decir nada.
+String? aisSilenceText(Duration? silence) {
+  if (silence == null) return 'ningún mensaje AIS recibido';
+  if (silence < kAisSilenceNotice) return null;
+  final m = silence.inMinutes;
+  // Con segundos mientras son pocos minutos: "hace 1 min" truncaba 1:59 y
+  // parecía que la app se quedaba corta (2026-09-18).
+  if (m < 5) {
+    final sec = silence.inSeconds % 60;
+    return sec == 0
+        ? 'último mensaje hace $m min'
+        : 'último mensaje hace $m min $sec s';
+  }
+  if (m < 60) return 'último mensaje hace $m min';
+  final h = silence.inHours;
+  final rest = m % 60;
+  return rest == 0
+      ? 'último mensaje hace $h h'
+      : 'último mensaje hace $h h $rest min';
 }
