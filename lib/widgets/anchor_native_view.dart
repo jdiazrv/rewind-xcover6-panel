@@ -3546,6 +3546,7 @@ class _LayersSheetState extends State<_LayersSheet> {
             ..showScope = true
             ..showAisNearby = true
             ..showOwnTrack = true
+            ..showElectrical = true
             ..showSatelliteLayer = false
             ..showSeamarkLayer = true;
           break;
@@ -3556,6 +3557,7 @@ class _LayersSheetState extends State<_LayersSheet> {
             ..showScope = true
             ..showAisNearby = true
             ..showOwnTrack = true
+            ..showElectrical = true
             ..showSatelliteLayer = true
             ..showSeamarkLayer = true;
           break;
@@ -3566,6 +3568,7 @@ class _LayersSheetState extends State<_LayersSheet> {
             ..showScope = false
             ..showAisNearby = false
             ..showOwnTrack = false
+            ..showElectrical = false
             ..showSatelliteLayer = false
             ..showSeamarkLayer = true;
           break;
@@ -3715,6 +3718,12 @@ class _LayersSheetState extends State<_LayersSheet> {
                                 Icons.route,
                                 c.showOwnTrack,
                                 (c, v) => c.showOwnTrack = v,
+                              ),
+                              _toggle(
+                                'Datos eléctricos',
+                                Icons.bolt,
+                                c.showElectrical,
+                                (c, v) => c.showElectrical = v,
                               ),
                             ], constraints.maxWidth),
                             _sectionTitle('CARTOGRAFÍA'),

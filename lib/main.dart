@@ -65,6 +65,7 @@ part 'widgets/graph_dialog.dart';
 part 'widgets/misc_cards.dart';
 part 'widgets/marine_help.dart';
 part 'widgets/alarm_and_shell.dart';
+part 'widgets/alarm_lamp_panel.dart';
 part 'utils/trackers.dart';
 part 'signalk/ntfy_push.dart';
 part 'ais/closest_approach.dart';
@@ -1317,6 +1318,12 @@ class _DashboardState extends State<Dashboard> {
   // alert/warn/alarm/emergency state. See AlarmEngine below for how this
   // combines with custom alarms into what's actually shown/sounded.
   final _notifications = <String, ({String state, String? message})>{};
+  // Para el panel de testigos (ALM): TODAS las notificaciones, también las
+  // normales, y las zonas que define el servidor. _notifications de arriba
+  // solo guarda las que están en alerta porque es lo que hace sonar; esto no
+  // suena, solo informa.
+  final _skNotifAll = <String, ({String state, String? message})>{};
+  Map<String, List<SkZoneBand>> _skZoneDefs = const {};
   static const _activeAlertStates = {'alert', 'warn', 'alarm', 'emergency'};
   AudioPlayer? _alarmPlayer;
   bool _alarmSoundPlaying = false;
@@ -1687,6 +1694,14 @@ class _DashboardState extends State<Dashboard> {
     // genuinely NEW occurrence of the same alarm later started muted too,
     // never actually sounding. Reported live 2026-09-04.
     final muteKey = 'sk:$path';
+    if (value is Map && value['state'] is String) {
+      _skNotifAll[path] = (
+        state: value['state'] as String,
+        message: value['message'] as String?,
+      );
+    } else {
+      _skNotifAll.remove(path);
+    }
     if (value is! Map) {
       _notifications.remove(path);
       _mutedAlarms.remove(muteKey);
@@ -3090,8 +3105,7 @@ class _DashboardState extends State<Dashboard> {
     settings.anchorPhoneGpsRequiresSignalK =
         prefs.getBool('anchorPhoneGpsRequiresSignalK') ??
         settings.anchorPhoneGpsRequiresSignalK;
-    settings.anchorShowElectrical =
-        prefs.getBool('anchorShowElectrical') ?? settings.anchorShowElectrical;
+
     settings.alarmEngineOilSound =
         prefs.getBool('alarmEngineOilSound') ?? settings.alarmEngineOilSound;
     settings.alarmEngineOilMinBar =
@@ -3259,6 +3273,15 @@ class _DashboardState extends State<Dashboard> {
           /* keep defaults if corrupted */
         }
       }
+    }
+    // "Mostrar datos eléctricos" era un ajuste suelto del dispositivo en CFG y
+    // ahora es un interruptor más de los de la propia ANC, dentro de
+    // AnchorConfig. Se hereda lo que hubiera puesto: se puede quitar cuando ya
+    // no queden instalaciones con la clave vieja.
+    final legacyShowElectrical = prefs.getBool('anchorShowElectrical');
+    if (legacyShowElectrical != null) {
+      settings.anchorConfig.showElectrical = legacyShowElectrical;
+      await prefs.remove('anchorShowElectrical');
     }
     await _migrateAndValidateSettings(prefs);
     _repairCorruptedAnchorDroppedAt();
@@ -3598,7 +3621,6 @@ class _DashboardState extends State<Dashboard> {
       'anchorPhoneGpsRequiresSignalK',
       settings.anchorPhoneGpsRequiresSignalK,
     );
-    await prefs.setBool('anchorShowElectrical', settings.anchorShowElectrical);
     await prefs.setBool('alarmEngineOilSound', settings.alarmEngineOilSound);
     await prefs.setDouble(
       'alarmEngineOilMinBar',
@@ -3913,6 +3935,41 @@ class _DashboardState extends State<Dashboard> {
       }
     } catch (_) {
       // Best-effort — live tracking still works without this.
+    }
+  }
+
+  // Zonas (meta.zones) y el estado actual de todas las notificaciones, para
+  // ALM. Por REST y no por el websocket porque las zonas son metadatos y no
+  // viajan como deltas, y porque el websocket solo cuenta los cambios: una
+  // zona que lleva horas en "nominal" no vuelve a decirlo al conectar.
+  Future<void> _fetchSkZones() async {
+    try {
+      final uri = Uri.parse(
+        'http://${settings.host}:${settings.port}/signalk/v1/api/vessels/self',
+      );
+      final response = await http
+          .get(
+            uri,
+            headers: settings.authBase64.isEmpty
+                ? {}
+                : {'Authorization': 'Basic ${settings.authBase64}'},
+          )
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return;
+      final doc = jsonDecode(response.body);
+      if (doc is! Map<String, dynamic>) return;
+      final snap = parseSkZonesSnapshot(doc);
+      if (!mounted) return;
+      setState(() {
+        _skZoneDefs = snap.zones;
+        // Lo que ya haya llegado por el websocket es más nuevo que la foto.
+        for (final e in snap.notifications.entries) {
+          _skNotifAll.putIfAbsent(e.key, () => e.value);
+        }
+      });
+    } catch (_) {
+      // Sin esto ALM solo pierde la lista completa de zonas; las alarmas
+      // siguen sonando por el websocket igual que antes.
     }
   }
 
@@ -4240,6 +4297,10 @@ class _DashboardState extends State<Dashboard> {
       // on it.
       unawaited(_fetchVesselName());
       unawaited(_fetchSelfMmsi());
+      // Zonas de otro barco no deben quedarse pintadas en ALM.
+      _skNotifAll.clear();
+      _skZoneDefs = const {};
+      unawaited(_fetchSkZones());
       unawaited(_seedOwnTrackFromHistory());
       unawaited(_autoConfigureBlankSensorPaths());
       // Antes de tocar nada: lo que diga el servidor es la configuración
@@ -6788,6 +6849,9 @@ class _DashboardState extends State<Dashboard> {
     // Resumen de todo lo que el barco publica, pensado para barcos con pocos
     // sensores — ver _summaryPage. Se activa en CFG.
     if (settings.summaryPageEnabled) 'RES',
+    // Cuadro de testigos: qué alarmas hay puestas y en qué estado está cada
+    // una. Va pegada a RES porque las dos se miran de un vistazo.
+    'ALM',
     'PWR',
     if (_hasTempData) 'TMP',
     if (_hasTankData) 'TNK',
@@ -7041,6 +7105,7 @@ class _DashboardState extends State<Dashboard> {
       if (_hasWindData) ('VNT', Icons.air, _windPage()),
       if (settings.summaryPageEnabled)
         ('RES', Icons.dashboard_outlined, _summaryPage()),
+      ('ALM', Icons.notifications_active_outlined, _alarmPanelPage()),
       ('PWR', Icons.bolt, _powerPage()),
       if (_hasTempData) ('TMP', Icons.thermostat, _tempPage()),
       if (_hasTankData) ('TNK', Icons.water_drop, _tankPage()),
@@ -8240,23 +8305,6 @@ class _DashboardState extends State<Dashboard> {
               },
               title: 'Ocultar menú automáticamente',
               subtitle: 'En NAV, VNT, PWR y AIS. ANC y MAP siempre usan toda la pantalla.',
-            ),
-          ],
-        ),
-        SettingsGroup(
-          title: 'PANTALLA DE FONDEO (ANC)',
-          scope: CfgScope.device,
-          icon: Icons.bolt,
-          children: [
-            SettingsSwitchRow(
-              value: settings.anchorShowElectrical,
-              onChanged: (v) {
-                setSt(() => settings.anchorShowElectrical = v);
-                setState(() {});
-                unawaited(_saveSettings());
-              },
-              title: 'Mostrar datos eléctricos',
-              subtitle: 'Voltaje, SOC y corriente de la batería de servicio, junto a viento/profundidad',
             ),
           ],
         ),
@@ -13434,6 +13482,320 @@ class _DashboardState extends State<Dashboard> {
     return pct == null ? 'pila $v V' : 'pila $v V (${pct.round()}%)';
   }
 
+  // ─── ALARMAS page (panel de testigos) ───────────────────────────────────
+  // La campana de la cabecera dice si HAY una alarma sonando. Esto dice qué
+  // alarmas hay puestas y en qué estado está cada una, que es lo que se mira
+  // antes de salir y al entrar de guardia (petición en vivo 2026-09-17).
+  //
+  // Un piloto apagado significa "no configurada", verde "configurada y en
+  // orden", naranja "configurada pero ahora mismo no se está vigilando"
+  // (motor parado, ancla sin armar, sin dato) y rojo "disparada". Que el
+  // naranja exista es lo importante: una alarma que no puede evaluarse no
+  // está protegiendo nada, y en verde mentiría.
+  LampState _lampFor({
+    required bool enabled,
+    required bool firing,
+    required bool watching,
+  }) {
+    if (!enabled) return LampState.off;
+    if (firing) return LampState.alarm;
+    return watching ? LampState.ok : LampState.warn;
+  }
+
+  String _n(double v, [int d = 1]) => v.toStringAsFixed(d).replaceAll('.', ',');
+
+  List<({String title, List<AlarmLamp> lamps})> _alarmLampGroups() {
+    final firing = {for (final a in _activeAlarms) a.key: a};
+    bool isFiring(String key) => firing.containsKey(key);
+    bool isMuted(String key) => firing[key]?.muted ?? false;
+    final groups = <({String title, List<AlarmLamp> lamps})>[];
+
+    // ── Motor. Las tres de seguridad no se pueden apagar: o se están
+    // vigilando (motor en marcha y dato fresco) o no.
+    final engineRpm = _freshEngine(signalK.engineRpm, signalK.engineRpmUpdate);
+    final hasEngine =
+        settings.demoMode ||
+        engineRpm != null ||
+        signalK.engineHours != null ||
+        _sensorDetected(settings.sensorConfig.enginePath);
+    if (hasEngine) {
+      final running = _engineRunning;
+      final motivo = running ? '' : ' · motor parado';
+      groups.add((
+        title: 'MOTOR',
+        lamps: [
+          AlarmLamp(
+            label: 'Presión de aceite baja',
+            detail: 'mín. ${_n(settings.alarmEngineOilMinBar)} bar$motivo',
+            state: _lampFor(
+              enabled: true,
+              firing: isFiring('engineOil'),
+              watching: running,
+            ),
+            muted: isMuted('engineOil'),
+          ),
+          AlarmLamp(
+            label: 'Temperatura del motor alta',
+            detail: 'máx. ${_n(settings.alarmEngineTempMaxC, 0)} °C$motivo',
+            state: _lampFor(
+              enabled: true,
+              firing: isFiring('engineTemp'),
+              watching: running,
+            ),
+            muted: isMuted('engineTemp'),
+          ),
+          AlarmLamp(
+            label: 'Tensión de alternador / MDI baja',
+            detail: 'mín. ${_n(settings.alarmEngineVoltMinV, 1)} V$motivo',
+            state: _lampFor(
+              enabled: true,
+              firing: isFiring('engineVolt'),
+              watching: running,
+            ),
+            muted: isMuted('engineVolt'),
+          ),
+          AlarmLamp(
+            label: 'Fallo de calentadores o relé',
+            detail: 'aviso del propio motor (DM1)',
+            state: _lampFor(
+              enabled: true,
+              firing: isFiring('engineGlowPlug'),
+              watching: _engineContactOn,
+            ),
+            muted: isMuted('engineGlowPlug'),
+          ),
+        ],
+      ));
+    }
+
+    // ── Fondeo. Sin ancla armada no se vigila nada de esto, y decirlo es
+    // justo el sentido de que exista el naranja.
+    final armed = settings.anchorConfig.armed;
+    groups.add((
+      title: 'FONDEO',
+      lamps: [
+        AlarmLamp(
+          label: 'Garreo',
+          detail: armed
+              ? 'radio ${settings.anchorConfig.radiusM.round()} m'
+              : 'ancla sin armar',
+          state: _lampFor(
+            enabled: true,
+            firing: isFiring('anchorDrag') || isFiring('anchorAutoRaise'),
+            watching: armed,
+          ),
+          muted: isMuted('anchorDrag'),
+        ),
+        AlarmLamp(
+          label: 'Cambio de profundidad',
+          detail: settings.alarmAnchorDepthEnabled
+              ? '± ${_n(settings.alarmAnchorDepthMarginM)} m'
+              : '',
+          state: _lampFor(
+            enabled: settings.alarmAnchorDepthEnabled,
+            firing: isFiring('anchorDepth'),
+            watching:
+                armed &&
+                _freshEngine(signalK.depthM, signalK.depthMUpdate) != null,
+          ),
+          muted: isMuted('anchorDepth'),
+        ),
+        AlarmLamp(
+          label: 'Viento fuerte',
+          detail: settings.alarmAnchorWindEnabled
+              ? 'más de ${_n(settings.alarmAnchorWindKn, 0)} kt'
+              : '',
+          state: _lampFor(
+            enabled: settings.alarmAnchorWindEnabled,
+            firing: isFiring('anchorWind'),
+            watching: armed,
+          ),
+          muted: isMuted('anchorWind'),
+        ),
+        AlarmLamp(
+          label: 'Sin posición estando fondeado',
+          detail: armed ? '' : 'ancla sin armar',
+          state: _lampFor(
+            enabled: settings.alarmAnchorNoPositionEnabled,
+            firing: isFiring('anchorNoPosition'),
+            watching: armed,
+          ),
+          muted: isMuted('anchorNoPosition'),
+        ),
+      ],
+    ));
+
+    // ── Navegación.
+    groups.add((
+      title: 'NAVEGACIÓN',
+      lamps: [
+        AlarmLamp(
+          label: 'Colisión AIS',
+          detail: settings.alarmAisEnabled
+              ? 'CPA ${_n(settings.alarmAisCpaNm, 2)} NM · TCPA ${_n(settings.alarmAisTcpaMin, 0)} min'
+              : '',
+          state: _lampFor(
+            enabled: settings.alarmAisEnabled,
+            firing: isFiring('ais'),
+            watching: _aisSubscribed,
+          ),
+          muted: isMuted('ais'),
+        ),
+        AlarmLamp(
+          label: 'Corredera (SOG sin STW)',
+          detail: settings.alarmCorrederaEnabled
+              ? 'navegando a más de 2 kt'
+              : '',
+          state: _lampFor(
+            enabled: settings.alarmCorrederaEnabled,
+            firing: isFiring('corredera'),
+            watching: signalK.connected,
+          ),
+          muted: isMuted('corredera'),
+        ),
+      ],
+    ));
+
+    // ── Personalizadas.
+    if (settings.customAlarms.isNotEmpty) {
+      groups.add((
+        title: 'PERSONALIZADAS',
+        lamps: [
+          for (final rule in settings.customAlarms)
+            AlarmLamp(
+              label: rule.label,
+              detail: rule.sound ? 'con aviso sonoro' : 'sin sonido',
+              state: _lampFor(
+                enabled: rule.enabled,
+                firing: isFiring('custom:${rule.id}'),
+                watching: signalK.connected,
+              ),
+              muted: isMuted('custom:${rule.id}'),
+            ),
+        ],
+      ));
+    }
+
+    // ── Signal K: todas las zonas que define el servidor y todas las
+    // notificaciones que publica, cada una con su estado, estén disparadas o
+    // no. El estado lo manda el servidor: además de alarm/emergency tiene
+    // alert/warn, que es exactamente el naranja.
+    final skPaths = <String>{..._skZoneDefs.keys, ..._skNotifAll.keys};
+    final zonas = <AlarmLamp>[];
+    for (final path in skPaths) {
+      final notif = _skNotifAll[path];
+      final bands = _skZoneDefs[path];
+      final cfg = settings.skZoneAlarms[path];
+      final desactivada = cfg != null && !cfg.enabled;
+      final lamp = desactivada
+          ? LampState.off
+          : notif == null
+          // Zona definida de la que el servidor no ha dicho nada: no se sabe
+          // en qué franja está, luego no se está vigilando.
+          ? LampState.warn
+          : lampForSkState(notif.state);
+      final partes = <String>[
+        if (bands != null && skZoneSummary(bands).isNotEmpty)
+          skZoneSummary(bands)
+        else if (notif?.message != null && notif!.message!.isNotEmpty)
+          notif.message!,
+        if (desactivada)
+          'desactivada en CFG'
+        else if (notif == null)
+          'sin estado del servidor',
+      ];
+      zonas.add(
+        AlarmLamp(
+          label: skPathLabel(path),
+          detail: partes.join(' · '),
+          state: lamp,
+          muted: _mutedAlarms.contains('sk:$path'),
+        ),
+      );
+    }
+    // Las disparadas arriba: es lo primero que hay que ver.
+    int peso(LampState st) => switch (st) {
+      LampState.alarm => 0,
+      LampState.warn => 1,
+      LampState.ok => 2,
+      LampState.off => 3,
+    };
+    zonas.sort((a, b) {
+      final byState = peso(a.state).compareTo(peso(b.state));
+      return byState != 0 ? byState : a.label.compareTo(b.label);
+    });
+    if (zonas.isNotEmpty || settings.alarmsUseSkZones) {
+      groups.add((
+        // Si la app no usa las zonas para avisar, el panel lo dice: el
+        // piloto enseña lo que diga el servidor, pero aquí no va a sonar.
+        title: settings.alarmsUseSkZones
+            ? 'SIGNAL K · ZONAS Y NOTIFICACIONES'
+            : 'SIGNAL K · SOLO INFORMA (LA APP NO AVISA)',
+        lamps: zonas.isEmpty
+            ? const [
+                AlarmLamp(
+                  label: 'El servidor no define zonas',
+                  detail: 'ni publica notifications.*',
+                  state: LampState.off,
+                ),
+              ]
+            : zonas,
+      ));
+    }
+    return groups;
+  }
+
+  Widget _alarmPanelPage() {
+    final groups = _alarmLampGroups();
+    final total = groups.fold<int>(0, (n, g) => n + g.lamps.length);
+    final rojas = groups
+        .expand((g) => g.lamps)
+        .where((l) => l.state == LampState.alarm)
+        .length;
+    final naranjas = groups
+        .expand((g) => g.lamps)
+        .where((l) => l.state == LampState.warn)
+        .length;
+    return Container(
+      color: const Color(0xff05080a),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 14),
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10, left: 2),
+            child: Row(
+              children: [
+                const ChromeLed(state: LampState.ok, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: EngravedText(
+                    '$total ALARMAS CONFIGURADAS'
+                    '${rojas > 0 ? ' · $rojas DISPARADAS' : ''}'
+                    '${naranjas > 0 ? ' · $naranjas SIN VIGILAR' : ''}',
+                    size: 11,
+                    weight: FontWeight.w800,
+                    letterSpacing: 1.6,
+                    color: const Color(0xffaebac2),
+                    maxLines: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          for (final g in groups)
+            AlarmPanelPlate(
+              title: g.title,
+              child: Column(
+                children: [
+                  for (final lamp in g.lamps) AlarmLampRow(lamp: lamp),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   // ─── RESUMEN page ───────────────────────────────────────────────────────
   // Hay barcos con muy pocos sensores: AREA SECADA tiene un shunt y los
   // tanques, y poco más. En ellos las pantallas especializadas salen medio
@@ -15694,7 +16056,7 @@ class _DashboardState extends State<Dashboard> {
       detectPhoneLeftBySteps: settings.anchorDetectPhoneLeftBySteps,
       detectPhoneLeftByWifi: settings.anchorDetectPhoneLeftByWifi,
       boatWifiSsid: settings.anchorBoatWifiSsid,
-      showElectrical: settings.anchorShowElectrical,
+      showElectrical: settings.anchorConfig.showElectrical,
       houseVoltage: signalK.houseV,
       houseSoc: signalK.houseSoc,
       houseCurrentA: signalK.houseA,
@@ -16365,13 +16727,6 @@ class _DashboardState extends State<Dashboard> {
               tab: 5,
             ),
             (
-              title: 'Datos eléctricos en ANC',
-              section: 'PANTALLA · Pantalla de fondeo (ANC)',
-              keywords:
-                  'anc pantalla electrico bateria voltaje soc corriente fondeo',
-              tab: 3,
-            ),
-            (
               title: 'Avisos push del fondeo',
               section: 'FONDEO · Garreo y avisos',
               keywords:
@@ -16555,39 +16910,13 @@ class _DashboardState extends State<Dashboard> {
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(12, 4, 8, 0),
-                    child: Row(
-                      children: [
-                        Icon(
-                          signalK.connected ? Icons.check_circle : Icons.error,
-                          size: 14,
-                          color: signalK.connected ? cGreen : cRed,
-                        ),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          child: Text(
-                            'Signal K ${signalK.connected ? 'conectado' : 'desconectado'} · ${settings.historySource == 'auto' ? 'histórico automático' : settings.historySource} · ${_activeAlarms.length} alarmas',
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: cMuted, fontSize: 10),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        // Leyenda de las etiquetas que lleva cada grupo: sin
-                        // ella no hay forma de saber si lo que tocas viaja al
-                        // resto de dispositivos del barco o se queda aquí.
-                        const CfgScopeTag(CfgScope.boat, dense: true),
-                        const SizedBox(width: 4),
-                        const CfgScopeTag(CfgScope.device, dense: true),
-                        const SizedBox(width: 8),
-                        const Flexible(
-                          child: Text(
-                            'INSTALACIÓN: conexión/sensores/histórico · USO: pantalla/alarmas/fondeo',
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.right,
-                            style: TextStyle(color: cMuted, fontSize: 9),
-                          ),
-                        ),
-                      ],
-                    ),
+                    // Solo la leyenda de las marcas de alcance: sin ella no
+                    // hay forma de saber si lo que tocas viaja al resto de
+                    // dispositivos del barco o se queda aquí. El estado de
+                    // Signal K lo dice ya el icono de la cabecera de la app, y
+                    // una frase de 9 px con el orden de las pestañas no se
+                    // leía y encima se salía de la pantalla.
+                    child: Row(children: [const CfgScopeLegend()]),
                   ),
                   Row(
                     children: [

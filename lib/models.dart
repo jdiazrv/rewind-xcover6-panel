@@ -2040,6 +2040,11 @@ class AnchorConfig {
   bool showScope = false;
   bool showAisNearby = true;
   bool showOwnTrack = true;
+  // Estaba en CFG, como ajuste suelto del dispositivo, lejos del resto de
+  // "qué se ve en ANC". Es una cosa más que mostrar en la pantalla de fondeo,
+  // igual que el viento o la profundidad, así que vive donde se enciende y se
+  // apaga: en los interruptores de la propia ANC (petición 2026-09-17).
+  bool showElectrical = false;
   // Independent checkboxes, not exclusive — satellite + OpenSeaMap
   // together is a legitimate hybrid (imagery with nautical marks on top),
   // and both off just means a plain background, not an invalid state.
@@ -2071,6 +2076,7 @@ class AnchorConfig {
     'showScope': showScope,
     'showAisNearby': showAisNearby,
     'showOwnTrack': showOwnTrack,
+    'showElectrical': showElectrical,
     'showSatelliteLayer': showSatelliteLayer,
     'showSeamarkLayer': showSeamarkLayer,
     'scopeRatios': scopeRatios,
@@ -2108,6 +2114,12 @@ class AnchorConfig {
     c.showScope = j['showScope'] as bool? ?? false;
     c.showAisNearby = j['showAisNearby'] as bool? ?? true;
     c.showOwnTrack = j['showOwnTrack'] as bool? ?? true;
+    // 'anchorShowElectrical' es la clave vieja, la que guardaba el ajuste
+    // cuando vivía en CFG: se lee para que nadie pierda lo que tenía puesto.
+    c.showElectrical =
+        j['showElectrical'] as bool? ??
+        j['anchorShowElectrical'] as bool? ??
+        false;
     // Migrates the old exclusive 'baseLayer' string (satellite/seamark/
     // none) if present, otherwise reads the new independent checkboxes.
     final legacyBaseLayer = j['baseLayer'] as String?;
@@ -3973,7 +3985,6 @@ class SettingsModel {
   // ANC's own HUD (voltage/SOC/corriente of the house/service battery) —
   // off by default since not everyone fondeando wants a battery readout
   // competing for space with viento/profundidad. Reported live 2026-09-06.
-  bool anchorShowElectrical = false;
 
   /// Polar activa: id del catálogo empotrado, 'custom' para una tabla
   /// importada, o vacío para no usar ninguna. Ver lib/polars.dart.
@@ -4085,4 +4096,188 @@ class TankViewData {
     if (unweightedCount > 0) return unweightedSum / unweightedCount;
     return null;
   }
+}
+
+// ─── Zonas y notificaciones de Signal K ─────────────────────────────────────
+//
+// El panel de testigos (ALM) tiene que enseñar TODAS las zonas que define el
+// servidor y en qué estado está cada una, no solo las que están disparadas.
+// La app, para sonar, solo guarda las notificaciones en estado de alerta y
+// tira las "normal", así que con todo en orden la placa de Signal K salía
+// vacía aunque REWIND define cinco zonas y publica once notificaciones
+// (comprobado en vivo 2026-09-18). Esto lee la foto completa del servidor.
+
+/// Una franja de meta.zones: entre [lower] y [upper] el path está en [state].
+class SkZoneBand {
+  const SkZoneBand({required this.state, this.lower, this.upper});
+  final String state;
+  final double? lower;
+  final double? upper;
+}
+
+/// Todo lo que hace falta de un /signalk/v1/api/vessels/self para el panel.
+class SkZonesSnapshot {
+  const SkZonesSnapshot({required this.zones, required this.notifications});
+
+  /// Path → sus franjas, solo para los paths que definen meta.zones.
+  final Map<String, List<SkZoneBand>> zones;
+
+  /// Path (sin el "notifications." de delante) → estado y mensaje, en
+  /// cualquier estado, también normal/nominal.
+  final Map<String, ({String state, String? message})> notifications;
+}
+
+SkZonesSnapshot parseSkZonesSnapshot(Map<String, dynamic> self) {
+  double? asDouble(dynamic v) => v is num ? v.toDouble() : null;
+  final zones = <String, List<SkZoneBand>>{};
+  final notifications = <String, ({String state, String? message})>{};
+
+  void walkZones(dynamic node, String path) {
+    if (node is! Map) return;
+    final meta = node['meta'];
+    if (meta is Map && meta['zones'] is List) {
+      final bands = <SkZoneBand>[
+        for (final z in meta['zones'] as List)
+          if (z is Map && z['state'] is String)
+            SkZoneBand(
+              state: z['state'] as String,
+              lower: asDouble(z['lower']),
+              upper: asDouble(z['upper']),
+            ),
+      ];
+      if (bands.isNotEmpty && path.isNotEmpty) zones[path] = bands;
+    }
+    for (final e in node.entries) {
+      final k = e.key.toString();
+      if (k == 'meta' || k == 'value' || k == 'values' || k == r'$source') {
+        continue;
+      }
+      if (path.isEmpty && k == 'notifications') continue;
+      walkZones(e.value, path.isEmpty ? k : '$path.$k');
+    }
+  }
+
+  void walkNotifications(dynamic node, String path) {
+    if (node is! Map) return;
+    final value = node['value'];
+    if (value is Map && value['state'] is String && path.isNotEmpty) {
+      notifications[path] = (
+        state: value['state'] as String,
+        message: value['message'] as String?,
+      );
+    }
+    for (final e in node.entries) {
+      final k = e.key.toString();
+      if (k == 'meta' || k == 'value' || k == 'values' || k == r'$source') {
+        continue;
+      }
+      walkNotifications(e.value, path.isEmpty ? k : '$path.$k');
+    }
+  }
+
+  walkZones(self, '');
+  walkNotifications(self['notifications'], '');
+  return SkZonesSnapshot(zones: zones, notifications: notifications);
+}
+
+/// Nombre legible para un path con zona o notificación.
+String skPathLabel(String path) {
+  // Algún plugin publica bajo notifications.notifications.*: el prefijo
+  // repetido no es parte del nombre.
+  var p = path;
+  while (p.startsWith('notifications.')) {
+    p = p.substring('notifications.'.length);
+  }
+  final parts = p.split('.');
+  String pretty(String s) {
+    final t = s.replaceAll('_', ' ').replaceAll('-', ' ').trim();
+    return t.isEmpty ? s : t[0].toUpperCase() + t.substring(1);
+  }
+
+  if (p.startsWith('environment.depth.')) return 'Profundidad';
+  if (p == 'environment.wind.speedTrue') return 'Viento real';
+  if (p == 'environment.wind.speedApparent') return 'Viento aparente';
+  if (p.startsWith('navigation.anchor')) return 'Fondeo (servidor)';
+  if (parts.length >= 4 &&
+      parts[0] == 'electrical' &&
+      parts[1] == 'batteries') {
+    final what = switch (parts.sublist(3).join('.')) {
+      'voltage' => 'tensión',
+      'current' => 'corriente',
+      'capacity.stateOfCharge' => 'carga',
+      final other => other,
+    };
+    return 'Batería ${parts[2]} · $what';
+  }
+  if (parts.length >= 3 && parts[0] == 'propulsion') {
+    final what = switch (parts.last) {
+      'oilTemperature' => 'temperatura del aceite',
+      'coolantTemperature' || 'temperature' => 'refrigerante',
+      'oilPressure' => 'presión de aceite',
+      'revolutions' => 'revoluciones',
+      final other => other,
+    };
+    return 'Motor ${parts[1]} · $what';
+  }
+  if (parts.length >= 3 && parts.last == 'temperature') {
+    return 'Temperatura ${pretty(parts[parts.length - 2]).toLowerCase()}';
+  }
+  if (parts.length >= 2) {
+    return '${pretty(parts[parts.length - 2])} · ${parts.last}';
+  }
+  return pretty(p);
+}
+
+/// Las franjas que avisan, en corto: "alarma < 12,3 · aviso 12,3–12,45".
+String skZoneSummary(List<SkZoneBand> bands) {
+  String n(double v) {
+    final s = v == v.roundToDouble()
+        ? v.toStringAsFixed(0)
+        : v.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '');
+    return s.replaceAll('.', ',');
+  }
+
+  String word(String state) => switch (state) {
+    'emergency' => 'emergencia',
+    'alarm' => 'alarma',
+    'warn' => 'aviso',
+    'alert' => 'alerta',
+    _ => state,
+  };
+
+  // La franja de arriba del todo a veces se cierra con un tope ficticio
+  // (100 V para una batería de 12 V, visto en REWIND): es "sin límite", no un
+  // valor. Pero solo cuando esa franja está POR ENCIMA de la normal; en la
+  // profundidad las franjas son todas por abajo y el 2,9 de arriba es un
+  // límite de verdad.
+  final uppers = [for (final b in bands) ?b.upper];
+  final topUpper = uppers.isEmpty ? null : uppers.reduce(math.max);
+  final nominalUppers = [
+    for (final b in bands)
+      if (b.state == 'nominal' || b.state == 'normal') ?b.upper,
+  ];
+  final nominalTop = nominalUppers.isEmpty
+      ? null
+      : nominalUppers.reduce(math.max);
+  final out = <String>[];
+  for (final b in bands) {
+    if (b.state == 'nominal' || b.state == 'normal') continue;
+    final lo = b.lower;
+    final openEnded =
+        b.upper != null &&
+        b.upper == topUpper &&
+        nominalTop != null &&
+        lo != null &&
+        lo >= nominalTop;
+    final hi = openEnded ? null : b.upper;
+    final range = (lo == null || lo == 0) && hi != null
+        ? '< ${n(hi)}'
+        : hi == null && lo != null
+        ? '> ${n(lo)}'
+        : (lo != null && hi != null)
+        ? '${n(lo)}–${n(hi)}'
+        : '';
+    out.add('${word(b.state)} $range'.trim());
+  }
+  return out.join(' · ');
 }

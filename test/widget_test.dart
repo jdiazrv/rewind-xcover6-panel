@@ -187,14 +187,15 @@ void main() {
     await tester.pumpAndSettle();
 
     // La leyenda de la cabecera, siempre visible.
-    expect(find.text('BARCO'), findsWidgets);
-    expect(find.text('ESTE APARATO'), findsWidgets);
+    expect(find.text('SE GUARDA EN'), findsOneWidget);
+    expect(find.text('TODO EL BARCO'), findsWidgets);
+    expect(find.text('SOLO AQUÍ'), findsWidgets);
 
     await tester.tap(find.text('FONDEO'));
     await tester.pumpAndSettle();
     // Grupos del barco y filas del aparato conviviendo, cada una marcada.
-    expect(find.text('BARCO'), findsWidgets);
-    expect(find.text('ESTE APARATO'), findsWidgets);
+    expect(find.text('TODO EL BARCO'), findsWidgets);
+    expect(find.text('SOLO AQUÍ'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
@@ -330,6 +331,58 @@ void main() {
     expect(find.text('TEMP'), findsOneWidget);
     expect(find.text('ALTERN.'), findsOneWidget);
 
+    expect(tester.takeException(), isNull);
+  });
+
+  // El cuadro de testigos: no enseña lo que está sonando (eso es la campana)
+  // sino TODAS las alarmas configuradas y en qué estado está cada una. Lo que
+  // no puede fallar es que un piloto verde no mienta: una alarma que ahora
+  // mismo no se puede evaluar —ancla sin armar, motor parado— va en naranja.
+  testWidgets('ALM enseña las alarmas configuradas con su testigo', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(915, 412);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const RewindApp());
+    await tester.tap(find.text('ALM'));
+    await tester.pumpAndSettle();
+
+    // Las placas y sus leyendas grabadas.
+    expect(find.text('FONDEO'), findsOneWidget);
+    expect(find.text('NAVEGACIÓN'), findsOneWidget);
+    expect(find.text('Garreo'), findsOneWidget);
+    expect(find.text('Colisión AIS'), findsOneWidget);
+    expect(find.byType(ChromeLed), findsWidgets);
+
+    // Sin ancla armada el garreo no se está vigilando: naranja, no verde.
+    final garreo = tester.widget<AlarmLampRow>(
+      find
+          .ancestor(
+            of: find.text('Garreo'),
+            matching: find.byType(AlarmLampRow),
+          )
+          .first,
+    );
+    expect(garreo.lamp.state, LampState.warn);
+    expect(find.text('ancla sin armar'), findsWidgets);
+
+    // Una alarma sin configurar sale apagada, no en verde.
+    final ais = tester.widget<AlarmLampRow>(
+      find
+          .ancestor(
+            of: find.text('Colisión AIS'),
+            matching: find.byType(AlarmLampRow),
+          )
+          .first,
+    );
+    expect(ais.lamp.state, LampState.off);
+
+    // Scroll vertical, y sin desbordes en el alto del XCover.
+    await tester.drag(find.byType(ListView).last, const Offset(0, -200));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 

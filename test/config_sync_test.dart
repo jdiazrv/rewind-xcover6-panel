@@ -88,19 +88,16 @@ void main() {
       final origen = SettingsModel()
         ..alarmAisSound = false
         ..alarmAnchorWindSound = false
-        ..anchorShowElectrical = true
         ..anchorDetectPhoneLeftByWifi = true;
       final destino = SettingsModel()
         ..alarmAisSound = true
         ..alarmAnchorWindSound = true
-        ..anchorShowElectrical = false
         ..anchorDetectPhoneLeftByWifi = false;
 
       applySharedConfig(destino, sharedConfigFromSettings(origen));
 
       expect(destino.alarmAisSound, isTrue);
       expect(destino.alarmAnchorWindSound, isTrue);
-      expect(destino.anchorShowElectrical, isFalse);
       expect(destino.anchorDetectPhoneLeftByWifi, isFalse);
     });
   });

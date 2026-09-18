@@ -51,7 +51,6 @@ const kNeverSharedKeys = <String>[
   'anchorDetectPhoneLeftByMotion',
   'anchorDetectPhoneLeftBySteps',
   'anchorDetectPhoneLeftByWifi',
-  'anchorShowElectrical',
 ];
 
 /// Lo que este dispositivo propone como configuración del barco.

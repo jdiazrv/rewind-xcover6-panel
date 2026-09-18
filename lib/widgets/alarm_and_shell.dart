@@ -19,54 +19,85 @@ part of '../main.dart';
 /// and could not tell whether the phone would follow. Now every group says
 /// which it is, and a row that differs from its group says so too.
 enum CfgScope {
-  boat('BARCO', Icons.sailing),
-  device('ESTE APARATO', Icons.phone_android);
+  // "BARCO" y "ESTE APARATO" no decían nada por sí solos: hay que leer lo que
+  // PASA, no dónde se guarda. Con "TODO EL BARCO" y "SOLO AQUÍ" se entiende
+  // sin tooltip, y con dos colores distintos se distinguen de un vistazo en
+  // vez de tener que leerlos (2026-09-17).
+  boat('TODO EL BARCO', Icons.sailing, cCyan),
+  device('SOLO AQUÍ', Icons.phone_android, cPurple);
 
-  const CfgScope(this.label, this.icon);
+  const CfgScope(this.label, this.icon, this.color);
   final String label;
   final IconData icon;
+  final Color color;
+
+  String get explanation => this == CfgScope.boat
+      ? 'Se guarda en el barco: el cambio llega a todas las tablets, móviles '
+            'y navegadores que se conecten.'
+      : 'Se queda en este aparato: los demás no se enteran.';
 }
 
-/// The little badge that marks a group header or a single row.
+/// Marca de alcance para una cabecera de grupo o una fila suelta.
 class CfgScopeTag extends StatelessWidget {
   const CfgScopeTag(this.scope, {super.key, this.dense = false});
   final CfgScope scope;
+
+  /// Para una fila dentro de un grupo, donde compite con su etiqueta.
   final bool dense;
 
   @override
-  Widget build(BuildContext context) {
-    final boat = scope == CfgScope.boat;
-    final color = boat ? cCyan : cMuted;
-    return Tooltip(
-      message: boat
-          ? 'Se guarda en el barco: llega a todos los dispositivos.'
-          : 'Solo en este dispositivo.',
-      child: Container(
-        padding: EdgeInsets.symmetric(horizontal: dense ? 5 : 7, vertical: 2),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: color.withValues(alpha: 0.35)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(scope.icon, size: dense ? 10 : 11, color: color),
-            const SizedBox(width: 4),
-            Text(
-              scope.label,
-              style: TextStyle(
-                color: color,
-                fontSize: dense ? 8 : 9,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.6,
-              ),
+  Widget build(BuildContext context) => Tooltip(
+    message: scope.explanation,
+    child: Container(
+      padding: EdgeInsets.fromLTRB(dense ? 6 : 8, 3, dense ? 8 : 10, 3),
+      decoration: BoxDecoration(
+        color: scope.color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: scope.color.withValues(alpha: 0.55)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(scope.icon, size: dense ? 12 : 14, color: scope.color),
+          const SizedBox(width: 5),
+          Text(
+            scope.label,
+            style: TextStyle(
+              color: scope.color,
+              fontSize: dense ? 10 : 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.4,
             ),
-          ],
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// La leyenda de la cabecera de CFG: las dos marcas con su significado.
+class CfgScopeLegend extends StatelessWidget {
+  const CfgScopeLegend({super.key});
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      const Text(
+        'SE GUARDA EN',
+        style: TextStyle(
+          color: cMuted,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
         ),
       ),
-    );
-  }
+      const SizedBox(width: 6),
+      const CfgScopeTag(CfgScope.boat, dense: true),
+      const SizedBox(width: 5),
+      const CfgScopeTag(CfgScope.device, dense: true),
+    ],
+  );
 }
 
 /// A sub-heading inside a group, with the gap that always followed it.
