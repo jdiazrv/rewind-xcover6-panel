@@ -229,7 +229,11 @@ class _RoutingPageState extends State<RoutingPage> {
       final p = await SharedPreferences.getInstance();
       await p.setString(_kPrefModel, _model.name);
       String enc(ll.LatLng x) => '${x.latitude},${x.longitude}';
-      if (_origin != null) await p.setString(_kPrefOrigin, enc(_origin!));
+      if (_origin != null) {
+        await p.setString(_kPrefOrigin, enc(_origin!));
+      } else {
+        await p.remove(_kPrefOrigin);
+      }
       if (_destination != null) {
         await p.setString(_kPrefDest, enc(_destination!));
       } else {
@@ -456,6 +460,27 @@ class _RoutingPageState extends State<RoutingPage> {
       _routeStale = false;
       _routeError = null;
     });
+  }
+
+  /// Distinto de [_clearRoute]: no borra solo el cálculo, borra los
+  /// puntos (salida, llegada y vías) para empezar una ruta nueva desde
+  /// cero. Reportado en vivo 2026-09-18 ("hay dos cosas diferentes:
+  /// borrar el routing y borrar la ruta").
+  void _clearPoints() {
+    _debounce?.cancel();
+    setState(() {
+      _origin = null;
+      _destination = null;
+      _vias.clear();
+      _originName = null;
+      _destinationName = null;
+      _placing = null;
+      _route = null;
+      _routeStale = false;
+      _routeError = null;
+      _etaTarget = null;
+    });
+    unawaited(_persist());
   }
 
   void _fitPoints() {
@@ -1075,8 +1100,6 @@ class _RoutingPageState extends State<RoutingPage> {
                   ),
                 if (_origin != null && _destination != null && widget.polar != null)
                   _recalculateButton(),
-                if (_route != null)
-                  _smallAction(Icons.delete_outline, 'Borrar ruta', _clearRoute),
                 _modeAndObjectiveBadge(),
                 _smallAction(Icons.tune, 'Ajustes de la ruta', _openSettings),
               ],
@@ -1101,6 +1124,14 @@ class _RoutingPageState extends State<RoutingPage> {
                   if (_origin != null && _destination != null)
                     _smallAction(Icons.swap_horiz, 'Invertir', _swapEnds),
                   _departureChip(),
+                  const SizedBox(width: 8),
+                  // Dos borrados distintos: el cálculo (la ruta coloreada;
+                  // los puntos se quedan) y los puntos (S, L y vías, para
+                  // empezar otra ruta).
+                  if (_route != null)
+                    _labeledAction(Icons.layers_clear, 'Borrar cálculo', _clearRoute),
+                  if (_orderedPoints.isNotEmpty)
+                    _labeledAction(Icons.delete_outline, 'Borrar puntos', _clearPoints),
                 ],
               ),
             ),
@@ -1151,6 +1182,42 @@ class _RoutingPageState extends State<RoutingPage> {
       ),
     ),
   );
+
+  /// Botón pequeño con texto: en táctil un icono suelto no dice nada (el
+  /// tooltip solo aparece con pulsación larga).
+  Widget _labeledAction(IconData icon, String label, VoidCallback onTap) =>
+      Padding(
+        padding: const EdgeInsets.only(right: 4),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(7),
+          onTap: onTap,
+          child: Container(
+            height: 26,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            decoration: BoxDecoration(
+              color: cPanel2,
+              borderRadius: BorderRadius.circular(7),
+              border: Border.all(color: Colors.white24),
+            ),
+            alignment: Alignment.center,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 13, color: cMuted),
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: cMuted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 
   Widget _modeAndObjectiveBadge() => Padding(
     padding: const EdgeInsets.only(right: 4),

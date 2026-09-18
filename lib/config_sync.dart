@@ -147,8 +147,19 @@ void applySharedConfig(SettingsModel s, Map<String, dynamic> config) {
       mergeSensorJson(local: s.sensorConfig.toJson(), remote: sensors),
     );
   }
+  // Misma regla que los sensores: una polar vacía en el servidor ("no
+  // configurada") nunca borra la que este aparato ya tiene elegida. Antes
+  // se aplicaba a ciegas y, como el servidor solía tener la de fábrica
+  // vacía, cada arranque dejaba la polar en "Ninguna". Reportado en vivo
+  // 2026-09-18 ("se sigue borrando a cada vez la polar").
   final polar = _map(config['polar']);
-  if (polar != null) s.polarConfigFromJson(polar);
+  if (polar != null) {
+    final remoteId = polar['boatId'];
+    final remoteEmpty = remoteId is! String || remoteId.trim().isEmpty;
+    if (!remoteEmpty || s.polarBoatId.isEmpty) {
+      s.polarConfigFromJson(polar);
+    }
+  }
   final ship = _map(config['ship']);
   if (ship != null && ship['iconId'] is String) {
     s.shipIconId = ship['iconId'] as String;

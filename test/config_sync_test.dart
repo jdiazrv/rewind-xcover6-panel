@@ -278,4 +278,47 @@ void main() {
     expect(sharedConfigEquals(a, Map<String, dynamic>.from(a)), isTrue);
     expect(sharedConfigEquals(a, b), isFalse);
   });
+
+  group('polar compartida', () {
+    test('una polar vacía en el servidor no borra la elegida aquí', () {
+      final s = SettingsModel()
+        ..polarBoatId = 'dehler47'
+        ..polarFactorPercent = 90;
+      applySharedConfig(s, {
+        'polar': {'boatId': '', 'factor': 100},
+      });
+      expect(s.polarBoatId, 'dehler47');
+      expect(s.polarFactorPercent, 90);
+    });
+
+    test('una polar elegida en otro aparato sí se adopta', () {
+      final s = SettingsModel()..polarBoatId = 'dehler47';
+      applySharedConfig(s, {
+        'polar': {'boatId': 'first40', 'factor': 85},
+      });
+      expect(s.polarBoatId, 'first40');
+      expect(s.polarFactorPercent, 85);
+    });
+
+    test('sin polar local, se toma la del servidor aunque venga vacía', () {
+      final s = SettingsModel();
+      applySharedConfig(s, {
+        'polar': {'boatId': '', 'factor': 95},
+      });
+      expect(s.polarBoatId, '');
+      expect(s.polarFactorPercent, 95);
+    });
+
+    test('motor, transmisión y hélice vacíos en el servidor no se borran', () {
+      final s = SettingsModel();
+      s.sensorConfig.engineModelId = 'volvo-d2-40';
+      s.sensorConfig.engineDriveType = 'saildrive';
+      s.sensorConfig.enginePropellerType = 'folding';
+      final remote = SettingsModel().sensorConfig.toJson();
+      applySharedConfig(s, {'sensors': remote});
+      expect(s.sensorConfig.engineModelId, 'volvo-d2-40');
+      expect(s.sensorConfig.engineDriveType, 'saildrive');
+      expect(s.sensorConfig.enginePropellerType, 'folding');
+    });
+  });
 }

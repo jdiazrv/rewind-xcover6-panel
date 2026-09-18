@@ -3407,6 +3407,18 @@ class _DashboardState extends State<Dashboard> {
     // tenía ninguna otra forma de recuperar su polar al arrancar: la
     // resolución por MMSI es la única que corrige la clave más tarde, y
     // si no hay MMSI nunca llega a correr.
+    // Primero, el barco que la última vez resultó estar detrás de esta
+    // dirección (su MMSI): es la clave bajo la que de verdad se guarda todo
+    // una vez conectado. Sin esto, al arrancar se leía la config vieja de
+    // "lysmarine.local:3000" y cualquier guardado antes de resolver el MMSI
+    // la daba por buena — motor, transmisión y hélice volvían a vacío.
+    if (_currentServerConfigKey == null) {
+      final remembered =
+          prefs.getString('canonicalKey.${settings.host}:${settings.port}');
+      if (remembered != null && remembered.isNotEmpty) {
+        _currentServerConfigKey = remembered;
+      }
+    }
     if (_currentServerConfigKey == null) {
       for (final s in settings.savedServers) {
         if (s.host == settings.host && s.port == settings.port) {
@@ -3859,6 +3871,7 @@ class _DashboardState extends State<Dashboard> {
     );
     _applyWakelock();
     _applyPhoneHeelSetting();
+    _maybePushSharedConfig();
   }
 
   void _applyWakelock() {
@@ -4220,7 +4233,11 @@ class _DashboardState extends State<Dashboard> {
     // entries with two different hosts, but if they share a name (e.g.
     // both called "REWIND") they must share one sensor/anchor config, not
     // be treated as separate boats. Confirmed explicit request 2026-09-02.
-    _currentServerConfigKey = s.name;
+    // Pero si ya se sabe qué barco (MMSI) hay detrás de esta dirección, esa
+    // es la clave buena: es donde se guardó todo la última vez.
+    final prefsSwitch = await SharedPreferences.getInstance();
+    _currentServerConfigKey =
+        prefsSwitch.getString('canonicalKey.${s.host}:${s.port}') ?? s.name;
     final hostKey = _serverConfigKey;
     final savedPolar = settings.polarConfigJsonByHost[hostKey];
     if (savedPolar is Map) {
@@ -4281,6 +4298,16 @@ class _DashboardState extends State<Dashboard> {
       if (mmsiStr != null && mmsiStr.isNotEmpty) {
         _selfMmsi = mmsiStr;
         final canonicalKey = 'vessel:$mmsiStr';
+        // Recordado para el próximo arranque (ver _loadSettings): así la
+        // config de este barco se lee bien desde el primer momento, no solo
+        // después de resolver el MMSI.
+        try {
+          final p = await SharedPreferences.getInstance();
+          await p.setString(
+            'canonicalKey.${settings.host}:${settings.port}',
+            canonicalKey,
+          );
+        } catch (_) {}
         final previousKey = _serverConfigKey;
         if (previousKey != canonicalKey) {
           // Persist what was associated with the access address/name before
@@ -15118,11 +15145,78 @@ class _DashboardState extends State<Dashboard> {
       ? 'REWIND'
       : 'REWIND ${settings.anchorDeviceId}';
 
+  // ── Por qué se "borraba" la polar (y motor, transmisión, hélice):
+  // antes, cambiar esos ajustes solo los guardaba en este aparato — subirlos
+  // al barco solo ocurría al pulsar "Configurar sensores" —, y la revisión
+  // conocida del servidor empezaba en 0 en cada arranque. Al conectar, la
+  // app adoptaba SIEMPRE la copia del servidor (vieja) y pisaba lo elegido.
+  // Ahora: la revisión y lo último acordado con el servidor se recuerdan
+  // entre arranques; si este aparato tiene cambios sin subir, se suben (o,
+  // si no se puede, se conservan) en vez de pisarlos con la copia vieja; y
+  // cualquier cambio de un ajuste del barco se sube solo al guardarlo.
+  // Reportado en vivo 2026-09-18 ("te lo he dicho ya varias veces").
+
+  /// Lo último que este aparato y el servidor dieron por bueno, tal como
+  /// lo serializa [sharedConfigFromSettings]. Si lo actual difiere, hay
+  /// cambios locales sin subir.
+  String? _sharedSyncedJson;
+  String? _sharedStateLoadedFor;
+  Timer? _sharedPushTimer;
+
+  String get _sharedPrefsKey => '${settings.host}:${settings.port}';
+
+  String _currentSharedJson() => jsonEncode(sharedConfigFromSettings(settings));
+
+  Future<void> _loadSharedSyncState() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      _sharedConfigRevision = p.getInt('sharedCfg.rev.$_sharedPrefsKey') ?? 0;
+      _sharedSyncedJson = p.getString('sharedCfg.synced.$_sharedPrefsKey');
+    } catch (_) {}
+  }
+
+  Future<void> _storeSharedSyncState() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setInt('sharedCfg.rev.$_sharedPrefsKey', _sharedConfigRevision);
+      final s = _sharedSyncedJson;
+      if (s != null) await p.setString('sharedCfg.synced.$_sharedPrefsKey', s);
+    } catch (_) {}
+  }
+
+  bool get _hasUnpushedSharedChanges {
+    final synced = _sharedSyncedJson;
+    return synced != null && synced != _currentSharedJson();
+  }
+
+  /// Llamado al final de cada guardado: si lo que es del barco ha cambiado
+  /// respecto a lo acordado con el servidor, se sube (con un pequeño
+  /// retardo para agrupar varios cambios seguidos, p. ej. un deslizador).
+  void _maybePushSharedConfig() {
+    if (settings.demoMode || !settings.syncConfigWithServer) return;
+    // Hasta haber hablado con ESTE servidor no se sabe qué es "nuevo".
+    if (_sharedStateLoadedFor != _sharedPrefsKey) return;
+    if (!_hasUnpushedSharedChanges) return;
+    _sharedPushTimer?.cancel();
+    _sharedPushTimer = Timer(
+      const Duration(seconds: 2),
+      () => unawaited(_pushSharedConfig()),
+    );
+  }
+
   Future<void> _pullSharedConfig() async {
     if (settings.demoMode || !settings.syncConfigWithServer) return;
     if (_sharedConfigBusy) return;
     _sharedConfigBusy = true;
     try {
+      // Estado de sincronización por servidor: al cambiar de barco no vale
+      // el del anterior.
+      if (_sharedStateLoadedFor != _sharedPrefsKey) {
+        _sharedConfigRevision = 0;
+        _sharedSyncedJson = null;
+        await _loadSharedSyncState();
+        _sharedStateLoadedFor = _sharedPrefsKey;
+      }
       // Con sesión iniciada se lee con el token; sin ella se intenta igual,
       // porque hay servidores que permiten lectura anónima.
       final doc = await fetchPanelConfig(
@@ -15132,11 +15226,22 @@ class _DashboardState extends State<Dashboard> {
         token: await _ensureSkConfigToken(),
       );
       if (!mounted || doc == null) return;
+      // Cambios de este aparato aún sin subir: NO se pisan con la copia del
+      // servidor. Se intenta subirlos; si el servidor tiene algo más nuevo
+      // de otro aparato, el propio servidor lo dirá (409) y se adopta lo
+      // suyo. Si no se puede subir (sin usuario/contraseña), se conservan.
+      if (_hasUnpushedSharedChanges) {
+        _sharedConfigBusy = false;
+        await _pushSharedConfig();
+        return;
+      }
       if (!shouldAdoptRemote(
         remoteRevision: doc.revision,
         localKnownRevision: _sharedConfigRevision,
       )) {
         _sharedConfigRevision = doc.revision;
+        _sharedSyncedJson ??= _currentSharedJson();
+        await _storeSharedSyncState();
         return;
       }
       setState(() {
@@ -15146,6 +15251,8 @@ class _DashboardState extends State<Dashboard> {
             'Configuración del barco r${doc.revision}'
             '${doc.updatedBy.isEmpty ? '' : ' · ${doc.updatedBy}'}';
       });
+      _sharedSyncedJson = _currentSharedJson();
+      await _storeSharedSyncState();
       // Los sensores pueden haber cambiado: sin rehacer handlers y
       // suscripción no llegarían sus datos hasta la próxima reconexión.
       _buildDynamicHandlers();
@@ -15161,7 +15268,19 @@ class _DashboardState extends State<Dashboard> {
   Future<void> _pushSharedConfig() async {
     if (settings.demoMode || !settings.syncConfigWithServer) return;
     final token = await _ensureSkConfigToken();
-    if (token == null || !mounted) return;
+    if (!mounted) return;
+    if (token == null) {
+      // Antes fallaba en silencio: el cambio se quedaba solo aquí y al
+      // volver a conectar parecía que se "borraba".
+      setState(
+        () => _sharedConfigStatus =
+            'Cambios guardados solo en este aparato: para compartirlos con '
+            'el barco hace falta usuario y contraseña de Signal K '
+            '(CFG > Conexión)',
+      );
+      return;
+    }
+    final pushedJson = _currentSharedJson();
     final result = await pushPanelConfig(
       host: settings.host,
       port: settings.port,
@@ -15177,6 +15296,8 @@ class _DashboardState extends State<Dashboard> {
         _sharedConfigRevision = doc.revision;
         _sharedConfigStatus = 'Configuración compartida (r${doc.revision})';
       });
+      _sharedSyncedJson = pushedJson;
+      await _storeSharedSyncState();
       return;
     }
     // 409: otro dispositivo la cambió mientras tanto. No se pisa lo suyo por
@@ -15190,6 +15311,10 @@ class _DashboardState extends State<Dashboard> {
             'Otro dispositivo cambió la configuración (r${doc.revision}): '
             'se ha adoptado la suya, revisa tus cambios';
       });
+      // Lo adoptado pasa a ser lo acordado — si no, el guardado de abajo
+      // lo vería como "cambio sin subir" y volvería a empujarlo.
+      _sharedSyncedJson = _currentSharedJson();
+      await _storeSharedSyncState();
       _buildDynamicHandlers();
       _sendSignalKSubscription();
       await _saveSettings();
@@ -16884,7 +17009,11 @@ class _DashboardState extends State<Dashboard> {
             break;
           }
         }
-        _currentServerConfigKey = matching?.name;
+        _currentServerConfigKey =
+            (await SharedPreferences.getInstance()).getString(
+              'canonicalKey.$newHost:$newPort',
+            ) ??
+            matching?.name;
         // A saved server's OWN Signal K credentials, not whatever is left
         // over in settings.skUsername/skPassword from a previous boat —
         // these fields are live-bound (see skUsernameController's
