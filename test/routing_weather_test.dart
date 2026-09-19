@@ -1,4 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:rewind_xcover6_panel/routing/open_meteo_weather.dart';
 import 'package:rewind_xcover6_panel/routing/weather.dart';
 
@@ -48,7 +52,9 @@ WeatherGrid grid2x2({
       wind ??
       List.generate(
         4,
-        (_) => windPoint(t2, {'ecmwf_ifs025': ([10, 20], [0, 0])}),
+        (_) => windPoint(t2, {
+          'ecmwf_ifs025': ([10, 20], [0, 0]),
+        }),
       ),
   marinePoints:
       marine ??
@@ -58,6 +64,39 @@ WeatherGrid grid2x2({
 );
 
 void main() {
+  test('el error 429 de Marine se muestra y no crea olas vacías', () async {
+    final client = MockClient((request) async {
+      if (request.url.host == 'marine-api.open-meteo.com') {
+        return http.Response(
+          '{"error":true,"reason":"Daily API request limit exceeded"}',
+          429,
+        );
+      }
+      final count = request.url.queryParameters['latitude']!.split(',').length;
+      return http.Response(
+        jsonEncode(
+          List.generate(
+            count,
+            (_) => windPoint(t2, {
+              'ecmwf_ifs025': ([10, 10], [0, 0]),
+            }),
+          ),
+        ),
+        200,
+      );
+    });
+    final provider = OpenMeteoWeatherProvider(client: client);
+    await expectLater(
+      provider.fetchGrid(
+        box: const GeoBox(south: 37, west: 24, north: 37.1, east: 24.1),
+        from: DateTime.utc(2026, 9, 19, 4),
+        to: DateTime.utc(2026, 9, 19, 5),
+        model: WeatherModel.ecmwf,
+      ),
+      throwsA(predicate((e) => '$e'.contains('HTTP 429'))),
+    );
+  });
+
   group('WeatherGrid.sample', () {
     test('interpola en el tiempo', () {
       final g = grid2x2();
@@ -69,20 +108,30 @@ void main() {
       expect(s.wavePeriodS, closeTo(5, 1e-4));
     });
 
-    test('la dirección se interpola como vector: 350° y 10° dan 0°, no 180°',
-        () {
-      final wind = [
-        windPoint(t2, {'ecmwf_ifs025': ([10, 10], [350, 350])}),
-        windPoint(t2, {'ecmwf_ifs025': ([10, 10], [10, 10])}),
-        windPoint(t2, {'ecmwf_ifs025': ([10, 10], [350, 350])}),
-        windPoint(t2, {'ecmwf_ifs025': ([10, 10], [10, 10])}),
-      ];
-      final g = grid2x2(wind: wind);
-      final s = g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!;
-      final d = s.twdDeg > 180 ? s.twdDeg - 360 : s.twdDeg;
-      expect(d, closeTo(0, 1e-3));
-      expect(s.twsKn, closeTo(10 * 0.98481, 1e-3)); // cos 10°
-    });
+    test(
+      'la dirección se interpola como vector: 350° y 10° dan 0°, no 180°',
+      () {
+        final wind = [
+          windPoint(t2, {
+            'ecmwf_ifs025': ([10, 10], [350, 350]),
+          }),
+          windPoint(t2, {
+            'ecmwf_ifs025': ([10, 10], [10, 10]),
+          }),
+          windPoint(t2, {
+            'ecmwf_ifs025': ([10, 10], [350, 350]),
+          }),
+          windPoint(t2, {
+            'ecmwf_ifs025': ([10, 10], [10, 10]),
+          }),
+        ];
+        final g = grid2x2(wind: wind);
+        final s = g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!;
+        final d = s.twdDeg > 180 ? s.twdDeg - 360 : s.twdDeg;
+        expect(d, closeTo(0, 1e-3));
+        expect(s.twsKn, closeTo(10 * 0.98481, 1e-3)); // cos 10°
+      },
+    );
 
     test('fuera de la rejilla o de las horas no hay dato (null), no calma', () {
       final g = grid2x2();
@@ -172,7 +221,10 @@ void main() {
     test('sin rachas en la respuesta, la rejilla no las tiene', () {
       final g = grid2x2();
       expect(g.gust, isNull);
-      expect(g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!.gustKn, isNull);
+      expect(
+        g.sample(37.05, 24.05, DateTime.utc(2026, 9, 19, 4))!.gustKn,
+        isNull,
+      );
     });
   });
 
@@ -196,7 +248,11 @@ void main() {
     test('rechaza respuestas descuadradas', () {
       expect(
         () => grid2x2(
-          wind: [windPoint(t2, {'ecmwf_ifs025': ([1, 1], [0, 0])})],
+          wind: [
+            windPoint(t2, {
+              'ecmwf_ifs025': ([1, 1], [0, 0]),
+            }),
+          ],
         ),
         throwsA(isA<WeatherFetchException>()),
       );
@@ -222,6 +278,30 @@ void main() {
   });
 
   group('caché', () {
+    test('descarta una rejilla antigua sin ningún dato de ola', () async {
+      final bad = grid2x2(
+        marine: List.generate(
+          4,
+          (_) => marinePoint(t2, [null, null], [null, null], [null, null]),
+        ),
+      );
+      expect(bad.hasWaveData, isFalse);
+      final inner = _FakeProvider(() => grid2x2());
+      final c = CachedWeatherProvider(
+        inner,
+        now: () => DateTime.utc(2026, 9, 18, 10),
+        loadPersisted: (_) async => bad,
+      );
+      final result = await c.fetchGrid(
+        box: const GeoBox(south: 37.02, west: 24.02, north: 37.08, east: 24.08),
+        from: DateTime.utc(2026, 9, 19, 4),
+        to: DateTime.utc(2026, 9, 19, 5),
+        model: WeatherModel.ecmwf,
+      );
+      expect(inner.calls, 1);
+      expect(result.hasWaveData, isTrue);
+    });
+
     test('no vuelve a descargar lo que ya cubre, sí al caducar', () async {
       var now = DateTime.utc(2026, 9, 18, 10);
       final inner = _FakeProvider(() => grid2x2());
@@ -229,48 +309,269 @@ void main() {
       const box = GeoBox(south: 37.02, west: 24.02, north: 37.08, east: 24.08);
       final from = DateTime.utc(2026, 9, 19, 4);
       final to = DateTime.utc(2026, 9, 19, 5);
-      await c.fetchGrid(box: box, from: from, to: to, model: WeatherModel.ecmwf);
-      await c.fetchGrid(box: box, from: from, to: to, model: WeatherModel.ecmwf);
+      await c.fetchGrid(
+        box: box,
+        from: from,
+        to: to,
+        model: WeatherModel.ecmwf,
+      );
+      await c.fetchGrid(
+        box: box,
+        from: from,
+        to: to,
+        model: WeatherModel.ecmwf,
+      );
       expect(inner.calls, 1);
       // Otro modelo es otra descarga.
       await c.fetchGrid(box: box, from: from, to: to, model: WeatherModel.gfs);
       expect(inner.calls, 2);
       now = now.add(const Duration(hours: 2));
-      await c.fetchGrid(box: box, from: from, to: to, model: WeatherModel.ecmwf);
+      await c.fetchGrid(
+        box: box,
+        from: from,
+        to: to,
+        model: WeatherModel.ecmwf,
+      );
       expect(inner.calls, 3);
     });
 
-    test('con caché en disco, una app recién abierta no vuelve a pedirla',
-        () async {
-      // Simula el disco con un mapa en memoria — lo que importa es que
-      // CachedWeatherProvider lo consulta ANTES de la red, y que guarda
-      // ahí lo que sí descarga.
-      final disk = <WeatherModel, WeatherGrid>{};
-      final inner = _FakeProvider(() => grid2x2());
-      final now = DateTime.utc(2026, 9, 18, 10);
-      final c1 = CachedWeatherProvider(
-        inner,
-        now: () => now,
-        loadPersisted: (m) async => disk[m],
-        savePersisted: (g) => disk[g.model] = g,
-      );
-      const box = GeoBox(south: 37.02, west: 24.02, north: 37.08, east: 24.08);
-      final from = DateTime.utc(2026, 9, 19, 4);
-      final to = DateTime.utc(2026, 9, 19, 5);
-      await c1.fetchGrid(box: box, from: from, to: to, model: WeatherModel.ecmwf);
-      expect(inner.calls, 1);
-      expect(disk[WeatherModel.ecmwf], isNotNull);
+    test(
+      'con caché en disco, una app recién abierta no vuelve a pedirla',
+      () async {
+        // Simula el disco con un mapa en memoria — lo que importa es que
+        // CachedWeatherProvider lo consulta ANTES de la red, y que guarda
+        // ahí lo que sí descarga.
+        final disk = <WeatherModel, WeatherGrid>{};
+        final inner = _FakeProvider(() => grid2x2());
+        final now = DateTime.utc(2026, 9, 18, 10);
+        final c1 = CachedWeatherProvider(
+          inner,
+          now: () => now,
+          loadPersisted: (m) async => disk[m],
+          savePersisted: (g) => disk[g.model] = g,
+        );
+        const box = GeoBox(
+          south: 37.02,
+          west: 24.02,
+          north: 37.08,
+          east: 24.08,
+        );
+        final from = DateTime.utc(2026, 9, 19, 4);
+        final to = DateTime.utc(2026, 9, 19, 5);
+        await c1.fetchGrid(
+          box: box,
+          from: from,
+          to: to,
+          model: WeatherModel.ecmwf,
+        );
+        expect(inner.calls, 1);
+        expect(disk[WeatherModel.ecmwf], isNotNull);
 
-      // "Reabrir la app": una caché en memoria nueva, mismo disco.
-      final c2 = CachedWeatherProvider(
-        inner,
-        now: () => now,
-        loadPersisted: (m) async => disk[m],
-        savePersisted: (g) => disk[g.model] = g,
+        // "Reabrir la app": una caché en memoria nueva, mismo disco.
+        final c2 = CachedWeatherProvider(
+          inner,
+          now: () => now,
+          loadPersisted: (m) async => disk[m],
+          savePersisted: (g) => disk[g.model] = g,
+        );
+        await c2.fetchGrid(
+          box: box,
+          from: from,
+          to: to,
+          model: WeatherModel.ecmwf,
+        );
+        expect(inner.calls, 1); // sigue en 1: se sirvió del disco
+      },
+    );
+  });
+
+  group('cuota de Open-Meteo y ola de respaldo', () {
+    // Responde con viento/ola planos para tantas posiciones como pida.
+    MockClient client({
+      int marineFailures = 0,
+      String marineReason = 'Minutely API request limit exceeded',
+      List<String>? log,
+    }) {
+      var failed = 0;
+      return MockClient((request) async {
+        final count = request.url.queryParameters['latitude']!
+            .split(',')
+            .length;
+        log?.add('${request.url.host} $count');
+        if (request.url.host == 'marine-api.open-meteo.com') {
+          if (failed < marineFailures) {
+            failed++;
+            return http.Response(
+              jsonEncode({'error': true, 'reason': marineReason}),
+              429,
+            );
+          }
+          return http.Response(
+            jsonEncode(
+              List.generate(
+                count,
+                (_) => marinePoint(t2, [0.7, 0.7], [0, 0], [5, 5]),
+              ),
+            ),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode(
+            List.generate(
+              count,
+              (_) => windPoint(t2, {
+                'ecmwf_ifs025': ([12, 12], [0, 0]),
+              }),
+            ),
+          ),
+          200,
+        );
+      });
+    }
+
+    const box = GeoBox(south: 37, west: 24, north: 38, east: 25);
+    final from = DateTime.utc(2026, 9, 19, 4);
+    final to = DateTime.utc(2026, 9, 19, 5);
+
+    test('la rejilla va al paso real del modelo: ECMWF 0,25°', () async {
+      final log = <String>[];
+      final p = OpenMeteoWeatherProvider(client: client(log: log));
+      final g = await p.fetchGrid(
+        box: box,
+        from: from,
+        to: to,
+        model: WeatherModel.ecmwf,
       );
-      await c2.fetchGrid(box: box, from: from, to: to, model: WeatherModel.ecmwf);
-      expect(inner.calls, 1); // sigue en 1: se sirvió del disco
+      expect(g.step, 0.25);
+      expect(g.pointCount, 25); // 5 × 5, antes 11 × 11 = 121 a 0,1°
+      // Viento primero, ola después.
+      expect(log, ['api.open-meteo.com 25', 'marine-api.open-meteo.com 25']);
+      expect(p.quota.usedToday, 50);
     });
+
+    test(
+      'cuota: espera si el minuto está lleno y avisa antes del día',
+      () async {
+        var now = DateTime.utc(2026, 9, 19, 12);
+        final waits = <Duration>[];
+        final q = OpenMeteoQuota(
+          now: () => now,
+          sleep: (d) async {
+            waits.add(d);
+            now = now.add(d);
+          },
+        );
+        await q.reserve(400);
+        await q.reserve(300); // 700 > 600 en el minuto: espera
+        expect(waits, hasLength(1));
+        expect(q.usedToday, 700);
+        final big = OpenMeteoQuota(now: () => now)
+          ..load('[[${now.millisecondsSinceEpoch}, 9900]]');
+        expect(
+          () => big.reserve(200),
+          throwsA(predicate((e) => '$e'.contains('cuota del día'))),
+        );
+      },
+    );
+
+    test('ola cortada por el límite por minuto: reintenta y la trae', () async {
+      final p = OpenMeteoWeatherProvider(
+        client: client(marineFailures: 1),
+        quota: OpenMeteoQuota(sleep: (_) async {}),
+      );
+      final g = await p.fetchGrid(
+        box: box,
+        from: from,
+        to: to,
+        model: WeatherModel.ecmwf,
+      );
+      expect(g.hasWaveData, isTrue);
+    });
+
+    test(
+      'sin ola del momento, usa la última guardada (≤ 12 h) y lo dice',
+      () async {
+        var now = DateTime.utc(2026, 9, 19, 4, 30);
+        var failMarine = false;
+        final inner = OpenMeteoWeatherProvider(
+          now: () => now,
+          quota: OpenMeteoQuota(now: () => now, sleep: (_) async {}),
+          client: MockClient((request) async {
+            final count = request.url.queryParameters['latitude']!
+                .split(',')
+                .length;
+            if (request.url.host == 'marine-api.open-meteo.com') {
+              if (failMarine) {
+                return http.Response(
+                  '{"error":true,"reason":"Daily API request limit exceeded"}',
+                  429,
+                );
+              }
+              return http.Response(
+                jsonEncode(
+                  List.generate(
+                    count,
+                    (_) => marinePoint(t2, [0.9, 0.9], [45, 45], [6, 6]),
+                  ),
+                ),
+                200,
+              );
+            }
+            return http.Response(
+              jsonEncode(
+                List.generate(
+                  count,
+                  (_) => windPoint(t2, {
+                    'ecmwf_ifs025': ([12, 12], [0, 0]),
+                    'gfs_seamless': ([12, 12], [0, 0]),
+                  }),
+                ),
+              ),
+              200,
+            );
+          }),
+        );
+        final cache = CachedWeatherProvider(
+          inner,
+          maxAge: const Duration(hours: 3),
+          now: () => now,
+        );
+        await cache.fetchGrid(
+          box: box,
+          from: from,
+          to: to,
+          model: WeatherModel.ecmwf,
+        );
+
+        // Otro modelo, ya sin cuota para la ola: toma la ola de antes.
+        failMarine = true;
+        now = now.add(const Duration(minutes: 20));
+        final g = await cache.fetchGrid(
+          box: box,
+          from: from,
+          to: to,
+          model: WeatherModel.gfs,
+        );
+        expect(g.hasWaveData, isTrue);
+        expect(g.source, contains('respaldo'));
+        final s = g.sample(37.5, 24.5, DateTime.utc(2026, 9, 19, 4))!;
+        expect(s.waveHeightM, closeTo(0.9, 1e-3));
+        expect(g.wavesFetchedAt.isBefore(g.fetchedAt), isTrue);
+
+        // Con más de 12 h, ya no: error claro.
+        now = now.add(const Duration(hours: 13));
+        await expectLater(
+          cache.fetchGrid(
+            box: box,
+            from: from,
+            to: to,
+            model: WeatherModel.iconEu,
+          ),
+          throwsA(predicate((e) => '$e'.contains('Sin ola guardada'))),
+        );
+      },
+    );
   });
 }
 

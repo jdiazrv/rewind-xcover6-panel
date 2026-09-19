@@ -26,9 +26,14 @@ const kMinGridStep = 0.1;
 /// Posiciones por petición: mantiene la URL en ~3 KB.
 const _kPointsPerRequest = 300;
 
-/// Paso de rejilla para cubrir [box] sin pasar de [maxPoints].
-double gridStepFor(GeoBox box, {int maxPoints = kMaxGridPoints}) {
-  var step = kMinGridStep;
+/// Paso de rejilla para cubrir [box] sin pasar de [maxPoints], nunca más
+/// fino que [minStep] (la resolución real del modelo).
+double gridStepFor(
+  GeoBox box, {
+  int maxPoints = kMaxGridPoints,
+  double minStep = kMinGridStep,
+}) {
+  var step = math.max(kMinGridStep, minStep);
   while (true) {
     final nLat = ((box.north - box.south) / step).ceil() + 1;
     final nLon = ((box.east - box.west) / step).ceil() + 1;
@@ -66,16 +71,134 @@ DateTime _ceilHour(DateTime t) {
   return f.isBefore(t.toUtc()) ? f.add(const Duration(hours: 1)) : f;
 }
 
+/// Límites del plan gratuito de Open-Meteo (open-meteo.com/en/pricing).
+/// Cada POSICIÓN de una petición cuenta como una llamada: peso =
+/// posiciones × días/14 × variables/10, con 1 como mínimo por posición.
+/// Una rejilla de 600 puntos (viento + ola) eran 1200 llamadas: por encima
+/// del límite por minuto (la ola, que va después, recibía HTTP 429 y se
+/// quedaba sin datos) y 8 descargas agotaban el día.
+const kOpenMeteoPerMinute = 600;
+const kOpenMeteoPerHour = 5000;
+const kOpenMeteoPerDay = 10000;
+
+/// Lo gastado de la cuota de Open-Meteo, por minuto, hora y día (ventanas
+/// móviles), para no pasarse: se espera si el minuto está lleno, y se
+/// avisa ANTES de gastar si no queda para la hora o el día. Se guarda
+/// entre sesiones con [load]/[save] (inyectados: aquí no hay Flutter).
+class OpenMeteoQuota {
+  OpenMeteoQuota({
+    DateTime Function()? now,
+    this.save,
+    Future<void> Function(Duration)? sleep,
+  }) : _now = now ?? DateTime.now,
+       _sleep = sleep ?? Future<void>.delayed;
+
+  final DateTime Function() _now;
+  final Future<void> Function(Duration) _sleep;
+  final void Function(String json)? save;
+
+  /// (ms, peso) de cada petición de las últimas 24 h.
+  final List<(int, double)> _log = [];
+
+  void load(String? json) {
+    if (json == null) return;
+    try {
+      final list = jsonDecode(json) as List;
+      _log
+        ..clear()
+        ..addAll([
+          for (final e in list)
+            ((e[0] as num).toInt(), (e[1] as num).toDouble()),
+        ]);
+      _trim();
+    } catch (_) {}
+  }
+
+  void _trim() {
+    final cutoff = _now().millisecondsSinceEpoch - 24 * 3600 * 1000;
+    _log.removeWhere((e) => e.$1 < cutoff);
+  }
+
+  double _usedSince(Duration d) {
+    final from = _now().millisecondsSinceEpoch - d.inMilliseconds;
+    var sum = 0.0;
+    for (final e in _log) {
+      if (e.$1 >= from) sum += e.$2;
+    }
+    return sum;
+  }
+
+  double get usedLastMinute => _usedSince(const Duration(minutes: 1));
+  double get usedLastHour => _usedSince(const Duration(hours: 1));
+  double get usedToday {
+    _trim();
+    return _usedSince(const Duration(hours: 24));
+  }
+
+  /// Aparta [weight] llamadas: espera lo necesario si el minuto está
+  /// lleno; lanza [WeatherFetchException] si no queda para la hora o el
+  /// día (mejor decirlo antes que gastar y recibir un 429).
+  Future<void> reserve(double weight) async {
+    _trim();
+    if (usedToday + weight > kOpenMeteoPerDay) {
+      throw WeatherFetchException(
+        'Open-Meteo: esta descarga (${weight.round()} llamadas) pasaría la '
+        'cuota del día (${usedToday.round()} de $kOpenMeteoPerDay usadas en '
+        '24 h). Acorta la ruta o espera.',
+      );
+    }
+    if (usedLastHour + weight > kOpenMeteoPerHour) {
+      throw WeatherFetchException(
+        'Open-Meteo: esta descarga pasaría la cuota de la hora '
+        '(${usedLastHour.round()} de $kOpenMeteoPerHour). Espera un rato.',
+      );
+    }
+    // Minuto: hasta 3 esperas de lo que falte para liberar sitio.
+    for (
+      var i = 0;
+      i < 3 && usedLastMinute + weight > kOpenMeteoPerMinute;
+      i++
+    ) {
+      final nowMs = _now().millisecondsSinceEpoch;
+      final inWindow = _log.where((e) => e.$1 >= nowMs - 60000).toList()
+        ..sort((a, b) => a.$1.compareTo(b.$1));
+      final oldest = inWindow.isEmpty ? nowMs : inWindow.first.$1;
+      await _sleep(Duration(milliseconds: oldest + 60000 - nowMs + 500));
+    }
+    _log.add((_now().millisecondsSinceEpoch, weight));
+    save?.call(
+      jsonEncode([
+        for (final e in _log) [e.$1, e.$2],
+      ]),
+    );
+  }
+}
+
 class OpenMeteoWeatherProvider implements WeatherProvider {
-  OpenMeteoWeatherProvider({http.Client? client, DateTime Function()? now})
-    : _client = client ?? http.Client(),
-      _now = now ?? DateTime.now;
+  OpenMeteoWeatherProvider({
+    http.Client? client,
+    DateTime Function()? now,
+    OpenMeteoQuota? quota,
+  }) : _client = client ?? http.Client(),
+       _now = now ?? DateTime.now,
+       quota = quota ?? OpenMeteoQuota(now: now);
 
   final http.Client _client;
   final DateTime Function() _now;
+  final OpenMeteoQuota quota;
 
   @override
   String get name => 'Open-Meteo';
+
+  /// Peso de una petición según la fórmula de Open-Meteo.
+  static double requestWeight({
+    required int locations,
+    required int variables,
+    required Duration span,
+  }) {
+    final days = span.inHours / 24;
+    return locations * math.max(1.0, days / 14) * math.max(1.0, variables / 10);
+  }
 
   @override
   Future<WeatherGrid> fetchGrid({
@@ -84,7 +207,7 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
     required DateTime to,
     required WeatherModel model,
   }) async {
-    final step = gridStepFor(box);
+    final step = gridStepFor(box, minStep: model.gridStepDeg);
     final g = gridLayout(box, step);
     final lats = <double>[];
     final lons = <double>[];
@@ -96,16 +219,25 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
     }
     final start = _floorHour(from);
     final end = _ceilHour(to);
+    final span = end.difference(start);
     final models = model == WeatherModel.mean ? WeatherModel.singles : [model];
 
+    // Primero el viento, entero; la ola después. Por separado y en serie
+    // (antes iban en paralelo): así la cuota por minuto se puede respetar
+    // esperando, y un fallo de la ola no se lleva el viento por delante.
     final wind = <Map<String, dynamic>>[];
-    final marine = <Map<String, dynamic>>[];
     for (var off = 0; off < lats.length; off += _kPointsPerRequest) {
       final end0 = math.min(off + _kPointsPerRequest, lats.length);
-      final la = lats.sublist(off, end0);
-      final lo = lons.sublist(off, end0);
-      final results = await Future.wait([
-        _get(
+      final la = lats.sublist(off, end0), lo = lons.sublist(off, end0);
+      await quota.reserve(
+        requestWeight(
+          locations: la.length,
+          variables: 3 * models.length,
+          span: span,
+        ),
+      );
+      wind.addAll(
+        await _get(
           Uri.https('api.open-meteo.com', '/v1/forecast', {
             ..._positionParams(la, lo),
             'hourly': 'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
@@ -116,39 +248,71 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
             'end_hour': _hourParam(end),
           }),
         ),
-        _get(
-          Uri.https('marine-api.open-meteo.com', '/v1/marine', {
-            ..._positionParams(la, lo),
-            'hourly': 'wave_height,wave_direction,wave_period',
-            'timezone': 'GMT',
-            'start_hour': _hourParam(start),
-            'end_hour': _hourParam(end),
-          }),
-          optional: true,
-        ),
-      ]);
-      wind.addAll(results[0]!);
-      final m = results[1];
-      if (m == null) {
-        // Sin oleaje en este trozo: se rellena de "sin dato" posición a
-        // posición, para no descuadrar la rejilla.
-        marine.addAll(List.filled(la.length, const <String, dynamic>{}));
-      } else {
-        marine.addAll(m);
-      }
+      );
     }
 
-    return buildOpenMeteoGrid(
+    final marine = <Map<String, dynamic>>[];
+    WeatherFetchException? waveError;
+    try {
+      for (var off = 0; off < lats.length; off += _kPointsPerRequest) {
+        final end0 = math.min(off + _kPointsPerRequest, lats.length);
+        final la = lats.sublist(off, end0), lo = lons.sublist(off, end0);
+        final uri = Uri.https('marine-api.open-meteo.com', '/v1/marine', {
+          ..._positionParams(la, lo),
+          'hourly': 'wave_height,wave_direction,wave_period',
+          'timezone': 'GMT',
+          'start_hour': _hourParam(start),
+          'end_hour': _hourParam(end),
+        });
+        final weight = requestWeight(
+          locations: la.length,
+          variables: 3,
+          span: span,
+        );
+        await quota.reserve(weight);
+        List<Map<String, dynamic>> m;
+        try {
+          m = await _get(uri);
+        } on WeatherFetchException catch (e) {
+          // Límite por MINUTO: basta esperar uno y reintentar una vez.
+          if (!e.message.toLowerCase().contains('minut')) rethrow;
+          await quota.reserve(weight);
+          m = await _get(uri);
+        }
+        if (m.length != la.length) {
+          throw WeatherFetchException(
+            'Open-Meteo Marine devolvió ${m.length} posiciones de ${la.length}',
+          );
+        }
+        marine.addAll(m);
+      }
+    } on WeatherFetchException catch (e) {
+      waveError = e;
+    }
+
+    final grid = buildOpenMeteoGrid(
       lat0: g.lat0,
       lon0: g.lon0,
       step: step,
       nLat: g.nLat,
       nLon: g.nLon,
       windPoints: wind,
-      marinePoints: marine,
+      marinePoints: waveError == null
+          ? marine
+          : List.filled(lats.length, const <String, dynamic>{}),
       model: model,
       fetchedAt: _now(),
     );
+    if (waveError != null) {
+      throw WaveUnavailableException(waveError.message, grid);
+    }
+    if (!grid.hasWaveData) {
+      throw WaveUnavailableException(
+        'Open-Meteo Marine no devolvió datos de ola en esta zona y periodo',
+        grid,
+      );
+    }
+    return grid;
   }
 
   Map<String, String> _positionParams(List<double> la, List<double> lo) => {
@@ -157,12 +321,9 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
   };
 
   /// Descarga y devuelve la lista de posiciones (Open-Meteo devuelve un
-  /// objeto suelto si solo hay una). Con [optional], un fallo da null en
-  /// vez de excepción: sin oleaje se puede seguir; sin viento no.
-  Future<List<Map<String, dynamic>>?> _get(
-    Uri uri, {
-    bool optional = false,
-  }) async {
+  /// objeto suelto si solo hay una). Un error marino debe llegar a la UI:
+  /// ocultarlo genera una rejilla que parece válida pero no tiene olas.
+  Future<List<Map<String, dynamic>>> _get(Uri uri) async {
     try {
       final res = await _client.get(uri).timeout(const Duration(seconds: 30));
       if (res.statusCode != 200) {
@@ -173,6 +334,11 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
             reason = '${body['reason']}';
           }
         } catch (_) {}
+        if (res.statusCode == 429) {
+          throw WeatherFetchException(
+            '${uri.host}: cuota de consultas agotada (HTTP 429: $reason).',
+          );
+        }
         throw WeatherFetchException('${uri.host}: $reason');
       }
       final body = jsonDecode(res.body);
@@ -180,7 +346,6 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
       if (body is Map<String, dynamic>) return [body];
       throw WeatherFetchException('${uri.host}: respuesta inesperada');
     } catch (e) {
-      if (optional) return null;
       if (e is WeatherFetchException) rethrow;
       throw WeatherFetchException('${uri.host}: $e');
     }

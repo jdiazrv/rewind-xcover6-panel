@@ -64,16 +64,23 @@ class GeoBox {
 /// los que tengan dato (ICON-EU acaba a los ~5 días; a partir de ahí la
 /// media es de GFS y ECMWF).
 enum WeatherModel {
-  gfs('gfs_seamless', 'GFS'),
-  ecmwf('ecmwf_ifs025', 'ECMWF'),
-  iconEu('icon_eu', 'ICON-EU'),
-  mean(null, 'Media');
+  gfs('gfs_seamless', 'GFS', 0.125),
+  ecmwf('ecmwf_ifs025', 'ECMWF', 0.25),
+  iconEu('icon_eu', 'ICON-EU', 0.1),
+  mean(null, 'Media', 0.125);
 
-  const WeatherModel(this.apiName, this.label);
+  const WeatherModel(this.apiName, this.label, this.gridStepDeg);
 
   /// Nombre del modelo en la API de Open-Meteo; null para la media.
   final String? apiName;
   final String label;
+
+  /// Paso de rejilla que se pide: la resolución real del modelo (ECMWF
+  /// 0,25°, GFS ~0,13°; ICON-EU es 0,0625° pero se queda en 0,1° por
+  /// cuota). Pedir puntos más juntos que el propio modelo no añade
+  /// información (Open-Meteo interpola entre SUS puntos) y cada punto
+  /// cuenta como una llamada de la cuota gratuita.
+  final double gridStepDeg;
 
   static const singles = [gfs, ecmwf, iconEu];
 
@@ -139,7 +146,9 @@ class WeatherGrid {
     required this.source,
     required this.fetchedAt,
     this.gust,
-  }) : assert(times.isNotEmpty),
+    DateTime? wavesFetchedAt,
+  }) : wavesFetchedAt = wavesFetchedAt ?? fetchedAt,
+       assert(times.isNotEmpty),
        assert(windU.length == times.length * nLat * nLon);
 
   /// Esquina SW y paso (grados) de la rejilla.
@@ -166,6 +175,40 @@ class WeatherGrid {
   final String source;
   final DateTime fetchedAt;
 
+  /// Cuándo se bajó la OLA de esta rejilla: la misma hora que el viento,
+  /// salvo si la ola vino de respaldo (una descarga anterior) porque la
+  /// del momento falló. Así un respaldo no se encadena con otro cada vez
+  /// más viejo.
+  final DateTime wavesFetchedAt;
+
+  /// La misma rejilla de viento con otra ola (y otra etiqueta de origen).
+  WeatherGrid withWaves({
+    required Float32List waveH,
+    required Float32List waveDirU,
+    required Float32List waveDirV,
+    required Float32List waveT,
+    required DateTime wavesFetchedAt,
+    required String source,
+  }) => WeatherGrid(
+    lat0: lat0,
+    lon0: lon0,
+    step: step,
+    nLat: nLat,
+    nLon: nLon,
+    times: times,
+    windU: windU,
+    windV: windV,
+    waveH: waveH,
+    waveDirU: waveDirU,
+    waveDirV: waveDirV,
+    waveT: waveT,
+    model: model,
+    source: source,
+    fetchedAt: fetchedAt,
+    gust: gust,
+    wavesFetchedAt: wavesFetchedAt,
+  );
+
   double get lat1 => lat0 + (nLat - 1) * step;
   double get lon1 => lon0 + (nLon - 1) * step;
   DateTime get start => times.first;
@@ -173,6 +216,10 @@ class WeatherGrid {
   GeoBox get box => GeoBox(south: lat0, west: lon0, north: lat1, east: lon1);
 
   int get pointCount => nLat * nLon;
+
+  /// Detecta rejillas antiguas guardadas cuando un fallo del servicio
+  /// marino se convertía silenciosamente en una capa entera de NaN.
+  late final bool hasWaveData = waveH.any((height) => !height.isNaN);
 
   int _idx(int t, int i, int j) => (t * nLat + i) * nLon + j;
 
@@ -200,6 +247,7 @@ class WeatherGrid {
     'model': model.name,
     'source': source,
     'fetchedAt': fetchedAt.toUtc().millisecondsSinceEpoch,
+    'wavesFetchedAt': wavesFetchedAt.toUtc().millisecondsSinceEpoch,
   };
 
   static WeatherGrid? fromJson(Map<String, dynamic> j) {
@@ -232,6 +280,12 @@ class WeatherGrid {
           (j['fetchedAt'] as num).toInt(),
           isUtc: true,
         ),
+        wavesFetchedAt: j['wavesFetchedAt'] is num
+            ? DateTime.fromMillisecondsSinceEpoch(
+                (j['wavesFetchedAt'] as num).toInt(),
+                isUtc: true,
+              )
+            : null,
       );
     } catch (_) {
       return null;
@@ -364,6 +418,17 @@ double _bearingOf(double east, double north) {
   return (u: math.sin(r), v: math.cos(r));
 }
 
+/// El viento se bajó pero la ola no (cuota, servicio caído…): [windOnly]
+/// trae el viento con la ola vacía, para que [CachedWeatherProvider] pueda
+/// completarla con una ola guardada reciente en vez de fallar entera.
+class WaveUnavailableException implements Exception {
+  WaveUnavailableException(this.message, this.windOnly);
+  final String message;
+  final WeatherGrid windOnly;
+  @override
+  String toString() => message;
+}
+
 /// Quien da tiempo al router. Una sola descarga por zona y hora: el router
 /// nunca llama a la red por nodo.
 abstract class WeatherProvider {
@@ -416,7 +481,9 @@ class CachedWeatherProvider implements WeatherProvider {
     required WeatherModel model,
   }) async {
     final now = _now();
-    _grids.removeWhere((g) => now.difference(g.fetchedAt) > maxAge);
+    _grids.removeWhere(
+      (g) => now.difference(g.fetchedAt) > maxAge || !g.hasWaveData,
+    );
     for (final g in _grids) {
       if (g.model == model && g.covers(box, from, to)) return g;
     }
@@ -424,14 +491,36 @@ class CachedWeatherProvider implements WeatherProvider {
       final disk = await loadPersisted!(model);
       if (disk != null &&
           now.difference(disk.fetchedAt) <= maxAge &&
+          disk.hasWaveData &&
           disk.covers(box, from, to)) {
         _grids.add(disk);
         return disk;
       }
     }
-    final g = await inner.fetchGrid(box: box, from: from, to: to, model: model);
+    WeatherGrid g;
+    try {
+      g = await inner.fetchGrid(box: box, from: from, to: to, model: model);
+    } on WaveUnavailableException catch (e) {
+      final merged = await _withFallbackWaves(e.windOnly, box);
+      if (merged == null) {
+        throw WaveUnavailableException(
+          '${e.message}. Sin ola guardada de las últimas '
+          '${kWaveFallbackMaxAge.inHours} h para esta zona.',
+          e.windOnly,
+        );
+      }
+      g = merged;
+    }
     downloads++;
     _grids.add(g);
+    if (g.hasWaveData) {
+      _waveSources
+        ..remove(g)
+        ..add(g);
+      while (_waveSources.length > 4) {
+        _waveSources.removeAt(0);
+      }
+    }
     // Solo unas pocas: cada una son cientos de KB.
     while (_grids.length > 6) {
       _grids.removeAt(0);
@@ -441,4 +530,77 @@ class CachedWeatherProvider implements WeatherProvider {
   }
 
   void clear() => _grids.clear();
+
+  /// Rejillas con ola bajadas en esta sesión, aunque ya no valgan para el
+  /// viento (más de [maxAge]): sirven de respaldo de ola.
+  final List<WeatherGrid> _waveSources = [];
+
+  /// Completa [wind] con la ola más reciente guardada (de cualquier modelo:
+  /// la ola no depende del modelo de viento) que cubra [box] y no tenga más
+  /// de [kWaveFallbackMaxAge]. null si no hay ninguna.
+  Future<WeatherGrid?> _withFallbackWaves(WeatherGrid wind, GeoBox box) async {
+    final now = _now();
+    final candidates = <WeatherGrid>[..._waveSources, ..._grids];
+    if (loadPersisted != null) {
+      for (final m in WeatherModel.values) {
+        final d = await loadPersisted!(m);
+        if (d != null) candidates.add(d);
+      }
+    }
+    WeatherGrid? best;
+    for (final c in candidates) {
+      if (!c.hasWaveData) continue;
+      if (now.difference(c.wavesFetchedAt) > kWaveFallbackMaxAge) continue;
+      if (!c.box.containsBox(box)) continue;
+      if (best == null || c.wavesFetchedAt.isAfter(best.wavesFetchedAt)) {
+        best = c;
+      }
+    }
+    if (best == null) return null;
+
+    final n = wind.times.length * wind.nLat * wind.nLon;
+    Float32List nan() => Float32List(n)..fillRange(0, n, double.nan);
+    final h = nan(), du = nan(), dv = nan(), per = nan();
+    for (var t = 0; t < wind.times.length; t++) {
+      final ms = wind.times[t].millisecondsSinceEpoch;
+      for (var i = 0; i < wind.nLat; i++) {
+        for (var j = 0; j < wind.nLon; j++) {
+          final s = best.sampleMs(wind.latAt(i), wind.lonAt(j), ms);
+          final hs = s?.waveHeightM;
+          if (hs == null) continue;
+          final k = (t * wind.nLat + i) * wind.nLon + j;
+          h[k] = hs;
+          final dir = s!.waveDirDeg;
+          if (dir != null) {
+            final uv = unitVector(dir);
+            du[k] = uv.u;
+            dv[k] = uv.v;
+          }
+          final p = s.wavePeriodS;
+          if (p != null) per[k] = p;
+        }
+      }
+    }
+    final merged = wind.withWaves(
+      waveH: h,
+      waveDirU: du,
+      waveDirV: dv,
+      waveT: per,
+      wavesFetchedAt: best.wavesFetchedAt,
+      source:
+          '${wind.source} · ola de respaldo de las '
+          '${_hhmm(best.wavesFetchedAt)}',
+    );
+    return merged.hasWaveData ? merged : null;
+  }
+
+  static String _hhmm(DateTime t) {
+    final l = t.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(l.hour)}:${two(l.minute)}';
+  }
 }
+
+/// Ola de respaldo: como mucho así de vieja. El oleaje cambia despacio;
+/// más allá, mejor decir que no hay ola que usar una engañosa.
+const kWaveFallbackMaxAge = Duration(hours: 12);

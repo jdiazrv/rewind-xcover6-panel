@@ -5484,8 +5484,26 @@ class _DashboardState extends State<Dashboard> {
   // vez agotaba la cuota gratuita enseguida. 3 h porque los modelos no
   // cambian mucho más rápido que eso.
   final _weatherDiskCache = const WeatherDiskCache();
+  // Cuota de Open-Meteo gastada (por minuto, hora y día), recordada entre
+  // sesiones: cada punto de la rejilla cuenta como una llamada.
+  static const _kOpenMeteoQuotaPref = 'routing.openMeteoQuota';
+  late final OpenMeteoQuota _openMeteoQuota = () {
+    final q = OpenMeteoQuota(
+      save: (json) => unawaited(
+        SharedPreferences.getInstance().then(
+          (p) => p.setString(_kOpenMeteoQuotaPref, json),
+        ),
+      ),
+    );
+    unawaited(
+      SharedPreferences.getInstance()
+          .then((p) => q.load(p.getString(_kOpenMeteoQuotaPref)))
+          .catchError((_) {}),
+    );
+    return q;
+  }();
   late final WeatherProvider _routingWeather = CachedWeatherProvider(
-    OpenMeteoWeatherProvider(),
+    OpenMeteoWeatherProvider(quota: _openMeteoQuota),
     maxAge: const Duration(hours: 3),
     loadPersisted: _weatherDiskCache.load,
     savePersisted: (g) => unawaited(_weatherDiskCache.save(g)),

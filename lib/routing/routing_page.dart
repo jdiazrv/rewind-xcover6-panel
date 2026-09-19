@@ -21,6 +21,7 @@ import '../polars.dart';
 import '../theme.dart';
 import 'geo.dart';
 import 'land_mask.dart';
+import 'open_meteo_weather.dart';
 import 'routing_engine.dart';
 import 'sailing_calc.dart';
 import 'weather.dart';
@@ -686,6 +687,16 @@ class _RoutingPageState extends State<RoutingPage> {
     final legs = _vias.length + 1;
     return 'salida + ${_durationText(d)}'
         '${legs > 1 ? ' · tramo ${leg + 1}/$legs' : ''}';
+  }
+
+  /// Lo gastado hoy de la cuota gratuita de Open-Meteo (cada punto de la
+  /// rejilla cuenta como una llamada).
+  String? get _quotaText {
+    var w = widget.weather;
+    if (w is CachedWeatherProvider) w = w.inner;
+    if (w is! OpenMeteoWeatherProvider) return null;
+    final used = w.quota.usedToday.round();
+    return 'cuota Open-Meteo 24 h: $used / $kOpenMeteoPerDay';
   }
 
   /// Hay algo que calcular: enciende el botón Recalcular (en color), sin
@@ -2219,6 +2230,17 @@ class _RoutingPageState extends State<RoutingPage> {
                 if (_grid != null)
                   Text(
                     '${_grid!.source} · ${_ageText(_grid!.fetchedAt)}',
+                    style: TextStyle(
+                      // Ola de respaldo: en naranja, que se vea.
+                      color: _grid!.source.contains('respaldo')
+                          ? cOrange
+                          : cMuted,
+                      fontSize: 9.5,
+                    ),
+                  ),
+                if (_quotaText != null)
+                  Text(
+                    _quotaText!,
                     style: const TextStyle(color: cMuted, fontSize: 9.5),
                   ),
               ],
