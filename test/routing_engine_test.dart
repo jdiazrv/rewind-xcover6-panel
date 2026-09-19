@@ -797,7 +797,7 @@ void main() {
   });
 
   group('llegada o salida en puerto', () {
-    test('llegada dentro de tierra: aproxima sin declarar llegada', () {
+    test('llegada en un puerto "en tierra": llega, sin tramos en tierra', () {
       // Cabo de tierra cuyo borde toca justo la llegada (como un puerto que
       // en la costa 1:50M cae dentro de tierra).
       final land = LandMask([
@@ -820,10 +820,11 @@ void main() {
           land: land,
         ),
       );
-      expect(r.complete, isFalse);
-      expect(r.segments, isNotEmpty);
-      expect(r.warning, contains('llegada'));
-      for (final s in r.segments) {
+      // Los puertos caen a menudo "en tierra" en la costa aproximada: la
+      // ruta tiene que llegar (antes se quedaba sin llegada o rondándola:
+      // Kea → Nea Makri, 2026-09-19). Ningún tramo intermedio en tierra.
+      expect(r.complete, isTrue, reason: r.warning);
+      for (final s in r.segments.take(r.segments.length - 1)) {
         expect(land.isLand(s.endLat, s.endLon), isFalse);
       }
       expect(r.totalDuration.inHours, lessThan(4));
@@ -858,6 +859,91 @@ void main() {
       expect(r.warning, anyOf(contains('atascado'), contains('costa')));
       // No sigue horas y horas rondando.
       expect(r.totalDuration.inHours, lessThan(4));
+    });
+  });
+
+  group('puertos en tierra y ola junto a la costa (Kea → Nea Makri)', () {
+    // Isla cuadrada; la salida, un "puerto" 0,6 M tierra adentro de su
+    // costa norte (la costa aproximada deja muchos puertos en tierra).
+    final island = LandPolygon(
+      [(24.3, 37.5), (24.5, 37.5), (24.5, 37.7), (24.3, 37.7)],
+      const [],
+      (24.3, 37.5, 24.5, 37.7),
+    );
+    // Tierra firme al oeste; la llegada, otro puerto en tierra.
+    final mainland = LandPolygon(
+      [(23.6, 37.9), (24.1, 37.9), (24.1, 38.3), (23.6, 38.3)],
+      const [],
+      (23.6, 37.9, 24.1, 38.3),
+    );
+
+    test('sale de un puerto en tierra y entra en otro', () {
+      final grid = flatGrid(twsKn: 12, twdDeg: 0, hours: 30);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.69, lon: 24.40), (lat: 38.0, lon: 24.09)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          land: LandMask([island, mainland]),
+        ),
+      );
+      expect(r.complete, isTrue, reason: r.warning);
+      final last = r.segments.last;
+      expect(distanceNm(last.endLat, last.endLon, 38.0, 24.09), lessThan(0.05));
+      // Ningún tramo termina en tierra salvo la llegada.
+      final mask = LandMask([island, mainland]);
+      for (final seg in r.segments.take(r.segments.length - 1)) {
+        expect(mask.isLand(seg.endLat, seg.endLon), isFalse);
+      }
+    });
+
+    test('la ola que falta junto a la costa se rellena desde el mar', () {
+      // 5 × 5 celdas de 0,25°: la última columna sin dato (celdas de
+      // tierra del modelo de ola); la penúltima con 0,8 m.
+      const n = 5;
+      final times = [DateTime.utc(2026, 9, 19), DateTime.utc(2026, 9, 19, 1)];
+      final size = times.length * n * n;
+      Float32List filled(double v) => Float32List(size)..fillRange(0, size, v);
+      final h = filled(0.5), du = filled(0), dv = filled(1), per = filled(4);
+      for (var t = 0; t < 2; t++) {
+        for (var i = 0; i < n; i++) {
+          h[(t * n + i) * n + 3] = 0.8;
+          h[(t * n + i) * n + 4] = double.nan;
+          du[(t * n + i) * n + 4] = double.nan;
+          dv[(t * n + i) * n + 4] = double.nan;
+          per[(t * n + i) * n + 4] = double.nan;
+        }
+      }
+      final g = WeatherGrid(
+        lat0: 37,
+        lon0: 24,
+        step: 0.25,
+        nLat: n,
+        nLon: n,
+        times: times,
+        windU: filled(0),
+        windV: filled(-10),
+        waveH: h,
+        waveDirU: du,
+        waveDirV: dv,
+        waveT: per,
+        gust: filled(15),
+        model: WeatherModel.ecmwf,
+        source: 'test',
+        fetchedAt: DateTime.utc(2026, 9, 19),
+      );
+      // Pegado al borde "de tierra" no había ola…
+      expect(g.sample(37.5, 25.0, DateTime.utc(2026, 9, 19))!.waveHeightM, isNull);
+      final f = fillCoastalWaveGaps(g);
+      final s = f.sample(37.5, 25.0, DateTime.utc(2026, 9, 19))!;
+      // …y ahora la de las celdas de mar vecinas.
+      expect(s.waveHeightM, closeTo(0.8, 1e-3));
+      expect(s.wavePeriodS, closeTo(4, 1e-3));
+      expect(s.waveDirDeg! % 360, closeTo(0, 1e-3));
     });
   });
 

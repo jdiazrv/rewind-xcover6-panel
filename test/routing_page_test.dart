@@ -1,7 +1,9 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart' show kLongPressTimeout;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rewind_xcover6_panel/polars.dart';
@@ -89,6 +91,13 @@ void main() {
   setUp(() {
     SharedPreferences.setMockInitialValues({});
     resetRoutingSessionForTest();
+    // La caché de teselas del mapa pide una carpeta al sistema; en los
+    // tests no hay plugin nativo: se le da una temporal.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          (call) async => Directory.systemTemp.path,
+        );
   });
 
   Future<void> pump(

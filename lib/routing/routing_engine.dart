@@ -918,9 +918,9 @@ Iterable<_LegResult?> _routeLegSteps({
     ctx.startNearLand =
         land.isLand(start.lat, start.lon) ||
         land.nearLand(start.lat, start.lon, m);
+    ctx.targetOnLand = land.isLand(target.lat, target.lon);
     ctx.targetNearLand =
-        land.isLand(target.lat, target.lon) ||
-        land.nearLand(target.lat, target.lon, m);
+        ctx.targetOnLand || land.nearLand(target.lat, target.lon, m);
   }
 
   // El nodo de salida "lleva" el último tramo de la pierna anterior (para
@@ -1095,6 +1095,10 @@ Iterable<_LegResult?> _routeLegSteps({
         reason =
             'haría falta más de ${_minutesText(ctx.maxMinutesAbovePreferred!)} '
             'con ola por encima de la cómoda (ajústalo o usa Rápido)';
+      } else if (ctx.rejectedGust + ctx.rejectedWave + ctx.rejectedAws > 0) {
+        // Un límite (rachas, ola, viento) es la causa real aunque la salida
+        // esté cerca de la costa.
+        reason = _limitReason(ctx);
       } else if (stuckOnCoast) {
         reason = 'rodeado de costa, sin paso navegable';
       } else {
@@ -1265,7 +1269,7 @@ class _LegContext {
   late final GeoAnchor startAnchor = GeoAnchor(start.lat, start.lon);
   late final GeoAnchor targetAnchor = GeoAnchor(target.lat, target.lon);
   final GeoBox legBox;
-  bool startNearLand = false, targetNearLand = false;
+  bool startNearLand = false, targetNearLand = false, targetOnLand = false;
 
   /// Costa de la pierna indexada para la comprobación exacta de tramos.
   LandSegmentIndex? landIndex;
@@ -1308,8 +1312,45 @@ bool _landBlocked(
   if (idx == null) return false;
   final startInZone = _inPortZone(ctx, lat, lon);
   if (startInZone && _inPortZone(ctx, end.lat, end.lon)) {
-    return ctx.legLand!.isLand(end.lat, end.lon) ||
-        idx.segmentBlocked(lat, lon, end.lat, end.lon, clearanceNm: 0);
+    // Dentro de la zona de puerto: la costa de escala media deja a menudo
+    // el puerto "en tierra". Se puede cruzar ese borde solo para SALIR de
+    // una salida en tierra o para ENTRAR a la llegada; nunca acabar un
+    // tramo en tierra (salvo la propia llegada) ni cruzar tierra entre dos
+    // puntos de agua. Sin esto, un puerto en tierra dejaba la ruta sin
+    // salida o rondando la llegada (Kea → Nea Makri, 2026-09-19).
+    final isFinish =
+        distanceNm(end.lat, end.lon, ctx.target.lat, ctx.target.lon) < 0.02;
+    if (!isFinish && ctx.legLand!.isLand(end.lat, end.lon)) return true;
+    // Cruzar el borde solo hacia una llegada que ESTÉ en tierra, o desde
+    // una salida en tierra; hacia una llegada en el agua, nunca (se
+    // atravesaría un islote).
+    if ((isFinish && ctx.targetOnLand) || ctx.legLand!.isLand(lat, lon)) {
+      return false;
+    }
+    return idx.segmentBlocked(lat, lon, end.lat, end.lon, clearanceNm: 0);
+  }
+  final endInZone = _inPortZone(ctx, end.lat, end.lon);
+  if (startInZone || endInZone) {
+    // Saliendo o entrando en la zona de puerto: sin cruzar tierra (salvo
+    // al salir de una salida en tierra) y con el margen de costa en el
+    // extremo que queda FUERA de la zona. Exigir el margen en todo el
+    // tramo dejaba la ruta encerrada: el borde de la zona queda a menudo a
+    // menos del margen de la costa y ningún tramo podía salir.
+    final isFinish =
+        distanceNm(end.lat, end.lon, ctx.target.lat, ctx.target.lon) < 0.02;
+    if (!isFinish && ctx.legLand!.isLand(end.lat, end.lon)) return true;
+    final fromLand = startInZone && ctx.legLand!.isLand(lat, lon);
+    if (!fromLand &&
+        !(isFinish && ctx.targetOnLand) &&
+        idx.segmentBlocked(lat, lon, end.lat, end.lon, clearanceNm: 0)) {
+      return true;
+    }
+    final outside = startInZone ? end : (lat: lat, lon: lon);
+    return ctx.legLand!.nearLand(
+      outside.lat,
+      outside.lon,
+      ctx.req.constraints.minimumCoastDistanceNm,
+    );
   }
   if (idx.segmentBlocked(lat, lon, end.lat, end.lon)) return true;
   if (startInZone && ctx.legLand!.isLand(end.lat, end.lon)) return true;

@@ -544,8 +544,9 @@ class CachedWeatherProvider implements WeatherProvider {
           disk.hasWaveData &&
           _originFits(disk) &&
           disk.covers(box, from, to)) {
-        _grids.add(disk);
-        return disk;
+        final filled = fillCoastalWaveGaps(disk);
+        _grids.add(filled);
+        return filled;
       }
     }
     WeatherGrid g;
@@ -584,6 +585,7 @@ class CachedWeatherProvider implements WeatherProvider {
       }
       g = merged;
     }
+    g = fillCoastalWaveGaps(g);
     downloads++;
     _grids.add(g);
     if (g.hasWaveData) {
@@ -689,6 +691,85 @@ WeatherGrid mergeWaves(
     wavesFetchedAt: wavesFetchedAt,
     source: source,
     waveOrigin: origin,
+  );
+}
+
+/// Los modelos de ola no tienen dato en las celdas que tocan tierra, y la
+/// costa real (y los puertos) caen justo ahí: sin esto la ruta no podía
+/// acercarse a la costa ni llegar a puerto con "exigir tiempo completo"
+/// (zigzags, rodeos y "faltan datos de ola" en Kea → Nea Makri,
+/// 2026-09-19). Se rellenan esas celdas con la media de sus vecinas de mar
+/// (la dirección como vector), hasta ~15 M de la última celda con dato —
+/// lo que hacen los programas de routing con los GRIB de ola. Tierra
+/// adentro sigue sin dato.
+WeatherGrid fillCoastalWaveGaps(WeatherGrid g) {
+  if (!g.hasWaveData) return g;
+  final passes = math.max(1, (0.25 / g.step).round()).clamp(1, 3);
+  final nLat = g.nLat, nLon = g.nLon, cells = nLat * nLon;
+  final h = Float32List.fromList(g.waveH);
+  final du = Float32List.fromList(g.waveDirU);
+  final dv = Float32List.fromList(g.waveDirV);
+  final per = Float32List.fromList(g.waveT);
+  var filledAny = false;
+  for (var t = 0; t < g.times.length; t++) {
+    final base = t * cells;
+    for (var pass = 0; pass < passes; pass++) {
+      final prev = Float32List.sublistView(h, base, base + cells);
+      final snapshot = Float32List.fromList(prev);
+      final fills = <int, (double, double, double, double)>{};
+      for (var i = 0; i < nLat; i++) {
+        for (var j = 0; j < nLon; j++) {
+          final c = i * nLon + j;
+          if (!snapshot[c].isNaN) continue;
+          var n = 0, sh = 0.0, su = 0.0, sv = 0.0, st = 0.0, nt = 0;
+          for (var di = -1; di <= 1; di++) {
+            for (var dj = -1; dj <= 1; dj++) {
+              if (di == 0 && dj == 0) continue;
+              final ii = i + di, jj = j + dj;
+              if (ii < 0 || jj < 0 || ii >= nLat || jj >= nLon) continue;
+              final k = ii * nLon + jj;
+              final v = snapshot[k];
+              if (v.isNaN) continue;
+              n++;
+              sh += v;
+              final u = du[base + k], w = dv[base + k];
+              if (!u.isNaN && !w.isNaN) {
+                su += u;
+                sv += w;
+              }
+              final p = per[base + k];
+              if (!p.isNaN) {
+                st += p;
+                nt++;
+              }
+            }
+          }
+          if (n == 0) continue;
+          fills[c] = (sh / n, su, sv, nt == 0 ? double.nan : st / nt);
+        }
+      }
+      if (fills.isEmpty) break;
+      filledAny = true;
+      fills.forEach((c, f) {
+        h[base + c] = f.$1;
+        final len = math.sqrt(f.$2 * f.$2 + f.$3 * f.$3);
+        if (len > 1e-6) {
+          du[base + c] = f.$2 / len;
+          dv[base + c] = f.$3 / len;
+        }
+        per[base + c] = f.$4;
+      });
+    }
+  }
+  if (!filledAny) return g;
+  return g.withWaves(
+    waveH: h,
+    waveDirU: du,
+    waveDirV: dv,
+    waveT: per,
+    wavesFetchedAt: g.wavesFetchedAt,
+    source: g.source,
+    waveOrigin: g.waveOrigin,
   );
 }
 

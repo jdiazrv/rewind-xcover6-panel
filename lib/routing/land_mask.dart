@@ -1,8 +1,11 @@
 // Máscara de costa para el routing: polígonos de tierra reales (Natural
-// Earth, dominio público, 1:50 M), recortados al Mediterráneo y el mar
-// Negro y simplificados (assets/land/land_med.json, ~50 KB, 74 polígonos).
-// No sustituye a una carta náutica: sirve para que el motor no trace
-// rutas que crucen tierra, no para navegar pegado a la costa.
+// Earth 1:10M + islas menores, dominio público), recortados al Mediterráneo
+// y el mar Negro y simplificados a ~100 m (assets/land/land_med.json,
+// ~0,36 MB, ~20 000 vértices). Antes era 1:50M (2 800 vértices): ponía mar
+// en tierra y tierra en mar a escala de millas (frente a Nea Makri, en
+// pleno mar, "tierra"), y la ruta rodeaba costas que no existen. Sigue sin
+// sustituir a una carta náutica: los puertos caen a menudo "en tierra" (ver
+// la zona de puerto del motor) y la aproximación se confirma en la carta.
 //
 // Dart puro, sin Flutter: se lee una vez y se pasa al isolate del motor
 // como datos planos (List<LandPolygon>), igual que la rejilla de tiempo.
