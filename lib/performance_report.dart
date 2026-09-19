@@ -235,16 +235,55 @@ Duration reportEngineRunningDuration(List<GraphPoint> rpm, Duration expectedStep
   return Duration(seconds: seconds.round());
 }
 
+/// Ralentí de ESTE barco, sacado de sus propios datos: las revoluciones
+/// (en tramos de 50 rpm) en las que el motor pasa más tiempo en marcha por
+/// debajo de 1100 rpm — calentando, en puerto, maniobrando. Cada motor
+/// tiene el suyo (700, 850, 950…). Sin al menos 2 min de datos ahí, se
+/// supone [fallback].
+double reportEstimateIdleRpm(
+  List<GraphPoint> rpm,
+  Duration expectedStep, {
+  double fallback = 850,
+}) {
+  final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
+    ..sort((a, b) => a.time.compareTo(b.time));
+  final maxGap = expectedStep * 4 > const Duration(minutes: 10)
+      ? expectedStep * 4
+      : const Duration(minutes: 10);
+  final secondsByBin = <int, double>{};
+  for (var i = 1; i < points.length; i++) {
+    final dt = points[i].time.difference(points[i - 1].time);
+    if (dt <= Duration.zero || dt > maxGap) continue;
+    final v = (points[i - 1].value + points[i].value) / 2;
+    if (v < 400 || v >= 1100) continue;
+    final bin = (v / 50).floor();
+    secondsByBin[bin] = (secondsByBin[bin] ?? 0) + dt.inMilliseconds / 1000;
+  }
+  if (secondsByBin.isEmpty) return fallback;
+  final best = secondsByBin.entries.reduce((a, b) => a.value >= b.value ? a : b);
+  if (best.value < 120) return fallback;
+  return best.key * 50 + 25.0;
+}
+
+/// Nombre de la franja de ralentí, con el ralentí de este barco.
+String reportIdleBandName(double idleRpm) =>
+    'ralenti ~${(idleRpm / 50).round() * 50}';
+
 Map<String, Duration> reportEngineRpmBands(
   List<GraphPoint> rpm,
   Duration expectedStep,
 ) {
-  // La primera franja recoge el motor en marcha a pocas vueltas (ralentí,
-  // maniobras de puerto): sin ella, ese tiempo contaba en "Tiempo a motor"
-  // pero en ninguna franja, y la suma no cuadraba con el total (31 min de
-  // motor frente a 8 min por régimen en REWIND, 2026-09-19). Mismo umbral
-  // de "en marcha" (200 rpm) que [reportEngineRunningDuration].
-  const names = ['menos de 1600', '1600 a 1800', '1800 a 2000', '2000 a 2200', '2200 a 2400', 'mas de 2400'];
+  // Ralentí propio del barco + 150 rpm (sin pasar de 1100): por debajo,
+  // "ralentí"; de ahí a 1600, motor a pocas vueltas; luego las de crucero.
+  // Todas empiezan en el mismo umbral de "en marcha" (200 rpm) que
+  // [reportEngineRunningDuration], así la suma cuadra con el total (antes
+  // la primera franja empezaba en 1600 y en REWIND salían 31 min de motor
+  // frente a 8 min por régimen, 2026-09-19).
+  final idle = reportEstimateIdleRpm(rpm, expectedStep);
+  final idleTop = math.min(1100, ((idle + 150) / 50).round() * 50);
+  final idleName = reportIdleBandName(idle);
+  final lowName = '$idleTop a 1600';
+  final names = [idleName, lowName, '1600 a 1800', '1800 a 2000', '2000 a 2200', '2200 a 2400', 'mas de 2400'];
   final out = {for (final name in names) name: Duration.zero};
   if (rpm.length < 2) return out;
   final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
@@ -257,7 +296,7 @@ Map<String, Duration> reportEngineRpmBands(
     final dt = points[i].time.difference(points[i - 1].time);
     if (dt <= Duration.zero || dt > maxGap) continue;
     final value = (points[i - 1].value + points[i].value) / 2;
-    final name = value >= 2400 ? 'mas de 2400' : value >= 2200 ? '2200 a 2400' : value >= 2000 ? '2000 a 2200' : value >= 1800 ? '1800 a 2000' : value >= 1600 ? '1600 a 1800' : value >= 200 ? 'menos de 1600' : null;
+    final name = value >= 2400 ? 'mas de 2400' : value >= 2200 ? '2200 a 2400' : value >= 2000 ? '2000 a 2200' : value >= 1800 ? '1800 a 2000' : value >= 1600 ? '1600 a 1800' : value >= idleTop ? lowName : value >= 200 ? idleName : null;
     if (name != null) seconds[name] = seconds[name]! + dt.inMilliseconds / 1000;
   }
   return {for (final name in names) name: Duration(seconds: seconds[name]!.round())};

@@ -17,7 +17,12 @@ void main() {
     }
 
     for (var m = 0; m <= 360; m++) {
-      rpm.add(GraphPoint(time: t0.add(Duration(minutes: m)), value: rpmAt(m)));
+      rpm.add(
+        GraphPoint(
+          time: t0.add(Duration(minutes: m)),
+          value: rpmAt(m),
+        ),
+      );
     }
     const step = Duration(minutes: 1);
     final total = reportEngineRunningDuration(rpm, step);
@@ -25,6 +30,22 @@ void main() {
     final sum = bands.values.fold(Duration.zero, (a, b) => a + b);
     expect(total.inMinutes, closeTo(32, 2));
     expect(sum, total);
-    expect(bands['menos de 1600']!.inMinutes, closeTo(24, 2));
+    // Ralentí de este barco: 850 (donde más rato pasa por debajo de 1100).
+    expect(reportEstimateIdleRpm(rpm, step), closeTo(850, 30));
+    final keys = bands.keys.toList();
+    expect(keys.first, startsWith('ralenti ~'));
+    expect(bands[keys[0]]!.inMinutes, closeTo(20, 2)); // ralentí
+    expect(bands[keys[1]]!.inMinutes, closeTo(4, 1)); // pocas vueltas
+  });
+
+  test('cada barco tiene su ralentí; sin datos, 850', () {
+    final t0 = DateTime.utc(2026, 9, 19);
+    final rpm = [
+      for (var m = 0; m <= 30; m++)
+        GraphPoint(time: t0.add(Duration(minutes: m)), value: 720),
+    ];
+    const step = Duration(minutes: 1);
+    expect(reportEstimateIdleRpm(rpm, step), closeTo(720, 30));
+    expect(reportEstimateIdleRpm(const [], step), 850);
   });
 }
