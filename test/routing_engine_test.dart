@@ -947,6 +947,77 @@ void main() {
     });
   });
 
+  group('comprobación final de la ruta', () {
+    test('pasarse de un límite por el camino avisa, no corta la ruta', () {
+      // Viento del N que rola 40° a lo largo de la travesía: la búsqueda
+      // mira el viento al principio de cada tramo, la comprobación final a
+      // mitad y al final. Antes se cortaba la ruta ("Ruta detenida antes
+      // del tramo N"); ahora queda entera con un aviso.
+      const n = 6;
+      final times = [
+        for (var h = 0; h <= 30; h++)
+          DateTime.utc(2026, 9, 19).add(Duration(hours: h)),
+      ];
+      final size = times.length * n * n;
+      final u = Float32List(size), v = Float32List(size);
+      for (var t = 0; t < times.length; t++) {
+        final wc = windComponents(14, (t * 4.0) % 360);
+        for (var k = 0; k < n * n; k++) {
+          u[t * n * n + k] = wc.u;
+          v[t * n * n + k] = wc.v;
+        }
+      }
+      Float32List filled(double x) => Float32List(size)..fillRange(0, size, x);
+      final grid = WeatherGrid(
+        lat0: 36.5,
+        lon0: 23.5,
+        step: 2.0,
+        nLat: n,
+        nLon: n,
+        times: times,
+        windU: u,
+        windV: v,
+        waveH: filled(0.4),
+        waveDirU: filled(0),
+        waveDirV: filled(1),
+        waveT: filled(4),
+        gust: filled(18),
+        model: WeatherModel.ecmwf,
+        source: 'test',
+        fetchedAt: DateTime.utc(2026, 9, 18),
+      );
+      final dest = destinationNm(37.4, 24.0, 20, 25);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(minimumTwaDeg: 40),
+          objective: RoutingObjective.fast,
+          requireCompleteWeather: true,
+        ),
+      );
+      expect(r.complete, isTrue, reason: r.warning);
+      if (r.warning != null) expect(r.warning, startsWith('Aviso:'));
+    });
+
+    test('"Evitar proa" que impide avanzar lo dice', () {
+      final grid = flatGrid(twsKn: 12, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 20); // justo a barlovento
+      final r = computeRoute(
+        request(
+          grid,
+          (lat: dest.lat, lon: dest.lon),
+          constraints: const RoutingConstraints(minimumTwaDeg: 90),
+        ),
+      );
+      expect(r.complete, isFalse);
+      expect(r.warning, contains('Evitar proa'));
+    });
+  });
+
   group('freno de cordura', () {
     test('si la media hacia el destino es ridícula, para y lo explica', () {
       // Barco "cansadísimo" (10 % de la polar), sin motor, 30 M: a menos

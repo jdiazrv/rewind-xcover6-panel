@@ -510,13 +510,40 @@ Iterable<Object?> _routeSteps(
     reachedIndex = leg + 1;
   }
 
-  // Segunda comprobación solo de la ruta elegida: evita aceptar un tramo
-  // que entre en otra celda/hora con peor tiempo sin multiplicar el coste
-  // por todos los rumbos explorados.
+  // Segunda comprobación solo de la ruta elegida, a mitad y al final de
+  // cada tramo (la búsqueda mira el tiempo al PRINCIPIO del tramo). Antes
+  // cortaba la ruta en el primer tramo que se pasaba de un límite aunque
+  // fuera por poco — rutas buenas acababan "detenidas antes del tramo 63"
+  // (Kea → Nea Makri, 2026-09-19). Ahora solo se corta si falta la
+  // previsión; pasarse de un límite por el camino se AVISA, con el peor
+  // valor, en cuántos tramos y desde qué hora, y la ruta queda entera.
   if (req.requireCompleteWeather) {
+    final c = req.constraints;
+    final over = <String, ({int count, double worst, DateTime first})>{};
+    void note(
+      String key,
+      double value,
+      DateTime at, {
+      bool higherIsWorse = true,
+    }) {
+      final prev = over[key];
+      if (prev == null) {
+        over[key] = (count: 1, worst: value, first: at);
+      } else {
+        over[key] = (
+          count: prev.count + 1,
+          worst: higherIsWorse
+              ? math.max(prev.worst, value)
+              : math.min(prev.worst, value),
+          first: prev.first,
+        );
+      }
+    }
+
     for (var i = 0; i < segments.length; i++) {
       final s = segments[i];
-      String? issue;
+      String? missing;
+      final flagged = <String>{};
       for (final fraction in const [0.5, 1.0]) {
         final p = s.positionAt(fraction);
         final t = s.startTime.add(
@@ -526,33 +553,73 @@ Iterable<Object?> _routeSteps(
         );
         final wx = req.grid.sample(p.lat, p.lon, t);
         if (wx == null) {
-          issue = 'falta previsión dentro del tramo';
-        } else if (wx.waveHeightM == null || wx.gustKn == null) {
-          issue = 'faltan datos de ola o rachas dentro del tramo';
-        } else if (wx.waveHeightM! > req.constraints.absoluteMaxWaveM) {
-          issue = 'la ola supera el máximo dentro del tramo';
-        } else if (wx.gustKn! > req.constraints.maxGustKn) {
-          issue = 'las rachas superan el máximo dentro del tramo';
-        } else if (trueWindAngle(s.headingDeg, wx.twdDeg) <
-            req.constraints.minimumTwaDeg) {
-          issue = 'el viento queda demasiado de proa dentro del tramo';
-        } else if (apparentWind(
-              twsKn: wx.twsKn,
-              twdDeg: wx.twdDeg,
-              headingDeg: s.headingDeg,
-              stwKn: s.stwKn,
-            ).awsKn >
-            req.constraints.maxAwsKn) {
-          issue = 'el viento aparente supera el máximo dentro del tramo';
+          missing = 'falta previsión dentro del tramo';
+          break;
         }
-        if (issue != null) break;
+        void flag(String key, double v, {bool higherIsWorse = true}) {
+          if (flagged.add(key)) {
+            note(key, v, s.startTime, higherIsWorse: higherIsWorse);
+          } else {
+            final prev = over[key]!;
+            over[key] = (
+              count: prev.count,
+              worst: higherIsWorse
+                  ? math.max(prev.worst, v)
+                  : math.min(prev.worst, v),
+              first: prev.first,
+            );
+          }
+        }
+
+        if (wx.waveHeightM == null) flag('noWave', 0);
+        if (wx.gustKn == null) flag('noGust', 0);
+        if (wx.waveHeightM != null && wx.waveHeightM! > c.absoluteMaxWaveM) {
+          flag('wave', wx.waveHeightM!);
+        }
+        if (wx.gustKn != null && wx.gustKn! > c.maxGustKn) {
+          flag('gust', wx.gustKn!);
+        }
+        final twa = trueWindAngle(s.headingDeg, wx.twdDeg);
+        if (twa < c.minimumTwaDeg) flag('twa', twa, higherIsWorse: false);
+        final aws = apparentWind(
+          twsKn: wx.twsKn,
+          twdDeg: wx.twdDeg,
+          headingDeg: s.headingDeg,
+          stwKn: s.stwKn,
+        ).awsKn;
+        if (aws > c.maxAwsKn) flag('aws', aws);
       }
-      if (issue != null) {
+      if (missing != null) {
         reachedIndex = math.min(reachedIndex, s.waypointIndex);
         segments.removeRange(i, segments.length);
-        warning = 'Ruta detenida antes del tramo ${i + 1}: $issue.';
+        warning = 'Ruta detenida antes del tramo ${i + 1}: $missing.';
         break;
       }
+    }
+    if (warning == null && over.isNotEmpty) {
+      String hhmm(DateTime t) {
+        final l = t.toLocal();
+        return '${l.hour.toString().padLeft(2, '0')}:'
+            '${l.minute.toString().padLeft(2, '0')}';
+      }
+
+      String where(({int count, double worst, DateTime first}) o) =>
+          'en ${o.count} tramo${o.count == 1 ? '' : 's'} desde las ${hhmm(o.first)}';
+      final parts = <String>[
+        if (over['aws'] case final o?)
+          'aparente de hasta ${o.worst.round()} kn (máx. ${c.maxAwsKn.round()}) ${where(o)}',
+        if (over['gust'] case final o?)
+          'rachas de hasta ${o.worst.round()} kn (máx. ${c.maxGustKn.round()}) ${where(o)}',
+        if (over['wave'] case final o?)
+          'ola de hasta ${o.worst.toStringAsFixed(1)} m (máx. ${c.absoluteMaxWaveM.toStringAsFixed(1)}) ${where(o)}',
+        if (over['twa'] case final o?)
+          'viento a ${o.worst.round()}° de proa ("evitar proa" ${c.minimumTwaDeg.round()}°) ${where(o)}',
+        if (over['noWave'] case final o?) 'sin dato de ola ${where(o)}',
+        if (over['noGust'] case final o?) 'sin dato de rachas ${where(o)}',
+      ];
+      warning =
+          'Aviso: por el camino el tiempo cambia y se pasa de tus '
+          'límites: ${parts.join('; ')}.';
     }
   }
   if (onProgress != null && shown < 1) onProgress(1.0);
@@ -1095,7 +1162,11 @@ Iterable<_LegResult?> _routeLegSteps({
         reason =
             'haría falta más de ${_minutesText(ctx.maxMinutesAbovePreferred!)} '
             'con ola por encima de la cómoda (ajústalo o usa Rápido)';
-      } else if (ctx.rejectedGust + ctx.rejectedWave + ctx.rejectedAws > 0) {
+      } else if (ctx.rejectedGust +
+              ctx.rejectedWave +
+              ctx.rejectedAws +
+              ctx.rejectedTwa >
+          0) {
         // Un límite (rachas, ola, viento) es la causa real aunque la salida
         // esté cerca de la costa.
         reason = _limitReason(ctx);
@@ -1150,7 +1221,7 @@ Iterable<_LegResult?> _routeLegSteps({
                   'pegada a la costa, ponla en agua libre, fuera de la bocana '
                   '(la costa del cálculo es aproximada)'
             : 'sin acercarse al destino en ${_minutesText(stalled * kIsochroneStepMinutes)}: '
-                  'no encuentra paso (costa, límites o calma)',
+                  '${ctx.rejectedTwa > 0 ? '"Evitar proa" (${req.constraints.minimumTwaDeg.round()}°) no deja avanzar contra el viento: bájalo en Ajustes' : 'no encuentra paso (costa, límites o calma)'}',
       );
       return;
     }
@@ -1234,6 +1305,12 @@ String _limitReason(_LegContext ctx) {
       'viento aparente por encima de tu máximo (${c.maxAwsKn.round()} kn) en '
           'todos los rumbos posibles',
     ),
+    (
+      ctx.rejectedTwa,
+      'el viento queda demasiado de proa para "Evitar proa" '
+          '(${c.minimumTwaDeg.round()}°) en todos los rumbos posibles: '
+          'bájalo en Ajustes',
+    ),
   ]..sort((a, b) => b.$1.compareTo(a.$1));
   if (causes.first.$1 > 0) return causes.first.$2;
   return c.allowMotor
@@ -1285,7 +1362,7 @@ class _LegContext {
 
   /// Por qué se descartan nodos y rumbos, para explicar una pierna que no
   /// se completa con la causa real (no un "sin rumbo navegable" genérico).
-  int rejectedGust = 0, rejectedWave = 0, rejectedAws = 0;
+  int rejectedGust = 0, rejectedWave = 0, rejectedAws = 0, rejectedTwa = 0;
   double maxGustSeen = 0, maxWaveSeen = 0;
 }
 
@@ -1373,7 +1450,10 @@ _Node? _headingCandidate(
   final sample = wx.sample;
   final c = ctx.req.constraints;
   final twa = trueWindAngle(headingDeg, sample.twdDeg);
-  if (twa < c.minimumTwaDeg) return null;
+  if (twa < c.minimumTwaDeg) {
+    ctx.rejectedTwa++;
+    return null;
+  }
   final sailStw = PolarTable.speedAtCurve(wx.curve, twa);
   final sailSpeed = sailStw == null ? null : sailStw * wx.factor;
 
