@@ -4,7 +4,10 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:rewind_xcover6_panel/polars.dart';
+import 'dart:io';
+
 import 'package:rewind_xcover6_panel/routing/geo.dart';
+import 'package:rewind_xcover6_panel/routing/land_mask.dart';
 import 'package:rewind_xcover6_panel/routing/routing_engine.dart';
 import 'package:rewind_xcover6_panel/routing/weather.dart';
 
@@ -62,10 +65,26 @@ WeatherGrid grid() {
 
 // ignore_for_file: avoid_print
 
+RouteResult run(String name, RouteRequest req, {int reps = 3}) {
+  computeRoute(req); // calentamiento
+  final sw = Stopwatch()..start();
+  late RouteResult r;
+  var isos = 0;
+  for (var i = 0; i < reps; i++) {
+    isos = 0;
+    r = computeRoute(req, onIsochrone: (_) => isos++);
+  }
+  final ms = sw.elapsedMilliseconds / reps;
+  print('$name: ${r.totalNm.toStringAsFixed(2)} M, ${r.totalDuration.inMinutes} min, '
+      '${r.complete ? 'completa' : 'INCOMPLETA ${r.warning}'}, $isos isócronas, '
+      '${ms.toStringAsFixed(0)} ms');
+  return r;
+}
+
 void main() {
   final g = grid();
   final dest = destinationNm(36.5, 23.4, 20, 100); // 100 M ciñendo
-  final req = RouteRequest(
+  run('mar abierto 100 M ceñida', RouteRequest(
     waypoints: [(lat: 36.5, lon: 23.4), (lat: dest.lat, lon: dest.lon)],
     departure: DateTime.utc(2026, 9, 19, 2),
     grid: g,
@@ -73,11 +92,60 @@ void main() {
     polarFactorPercent: 100,
     constraints: const RoutingConstraints(allowMotor: false),
     objective: RoutingObjective.fast,
+  ));
+  final land = LandMask.fromJson(File('assets/land/land_med.json').readAsStringSync());
+  // Egeo: de Syros (Ermoupoli) a Paros (Parikia), entre islas.
+  run('costa Syros→Paros', RouteRequest(
+    waypoints: [(lat: 37.44, lon: 24.96), (lat: 37.09, lon: 25.13)],
+    departure: DateTime.utc(2026, 9, 19, 2),
+    grid: g2(),
+    polar: polar,
+    polarFactorPercent: 100,
+    constraints: const RoutingConstraints(),
+    objective: RoutingObjective.fast,
+    land: land,
+  ));
+  // Lavrio → Mykonos, 60 M con islas de por medio, confort.
+  run('costa Lavrio→Mykonos confort', RouteRequest(
+    waypoints: [(lat: 37.71, lon: 24.07), (lat: 37.45, lon: 25.32)],
+    departure: DateTime.utc(2026, 9, 19, 2),
+    grid: g2(),
+    polar: polar,
+    polarFactorPercent: 100,
+    constraints: const RoutingConstraints(),
+    objective: RoutingObjective.comfort,
+    land: land,
+  ));
+}
+
+WeatherGrid g2() {
+  const nLat = 20, nLon = 20;
+  final times = [
+    for (var h = 0; h <= 60; h++) DateTime.utc(2026, 9, 19).add(Duration(hours: h)),
+  ];
+  final n = times.length * nLat * nLon;
+  final u = Float32List(n), v = Float32List(n), h = Float32List(n);
+  final du = Float32List(n), dv = Float32List(n), per = Float32List(n), gu = Float32List(n);
+  for (var t = 0; t < times.length; t++) {
+    for (var i = 0; i < nLat; i++) {
+      for (var j = 0; j < nLon; j++) {
+        final k = (t * nLat + i) * nLon + j;
+        final dir = 0.0 + 20 * math.sin(t / 8 + j / 6); // meltemi N
+        final c = windComponents(14 + 6 * math.sin(i / 5 + t / 10), dir);
+        u[k] = c.u;
+        v[k] = c.v;
+        h[k] = 0.6 + 0.5 * math.sin(j / 4 + i / 7);
+        final w = unitVector(dir);
+        du[k] = w.u;
+        dv[k] = w.v;
+        per[k] = 5;
+        gu[k] = 20 + 6 * math.sin(i / 5 + t / 10);
+      }
+    }
+  }
+  return WeatherGrid(
+    lat0: 36.5, lon0: 23.5, step: 0.1, nLat: nLat, nLon: nLon, times: times,
+    windU: u, windV: v, waveH: h, waveDirU: du, waveDirV: dv, waveT: per, gust: gu,
+    model: WeatherModel.ecmwf, source: 'bench', fetchedAt: DateTime.utc(2026, 9, 19),
   );
-  computeRoute(req); // calentamiento
-  final sw = Stopwatch()..start();
-  var isos = 0;
-  final r = computeRoute(req, onIsochrone: (_) => isos++);
-  print('ruta ${r.totalNm.toStringAsFixed(1)} M, ${r.complete ? 'completa' : 'incompleta'}, '
-      '$isos isócronas, ${sw.elapsedMilliseconds} ms');
 }

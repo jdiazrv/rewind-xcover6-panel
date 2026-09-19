@@ -3781,7 +3781,8 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
   /// "No se pudo completar el tramo 1 de 1: rachas de…" → "Rachas de…".
   static String _planReason(String warning) {
     var w = warning;
-    final m = RegExp(r'^No se pudo completar el tramo \d+ de \d+: ').firstMatch(w);
+    final m = RegExp(r'^No se pudo completar el tramo \d+ de \d+: ')
+        .firstMatch(w);
     if (m != null) {
       final tramo = RegExp(r'tramo (\d+) de (\d+)').firstMatch(w)!;
       w = w.substring(m.end);

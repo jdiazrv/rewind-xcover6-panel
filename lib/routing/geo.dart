@@ -13,9 +13,8 @@ double _deg(double r) => r * 180 / math.pi;
 double distanceNm(double lat1, double lon1, double lat2, double lon2) {
   final p1 = _rad(lat1), p2 = _rad(lat2);
   final dp = p2 - p1, dl = _rad(lon2 - lon1);
-  final a =
-      math.pow(math.sin(dp / 2), 2) +
-      math.cos(p1) * math.cos(p2) * math.pow(math.sin(dl / 2), 2);
+  final sdp = math.sin(dp / 2), sdl = math.sin(dl / 2);
+  final a = sdp * sdp + math.cos(p1) * math.cos(p2) * sdl * sdl;
   return 2 * kEarthRadiusNm * math.asin(math.min(1, math.sqrt(a)));
 }
 
@@ -73,4 +72,37 @@ String formatLatLon(double lat, double lon) {
   }
 
   return '${part(lat, 'N', 'S')} ${part(lon, 'E', 'W')}';
+}
+
+/// Un punto fijo (la salida o la llegada de una pierna) con sus términos
+/// trigonométricos guardados, para medir contra él miles de puntos: mismas
+/// fórmulas que [distanceNm] y [bearingDeg], sin repetir el seno y el
+/// coseno de su latitud en cada consulta.
+class GeoAnchor {
+  GeoAnchor(this.lat, this.lon)
+    : _p = lat * math.pi / 180,
+      _sin = math.sin(lat * math.pi / 180),
+      _cos = math.cos(lat * math.pi / 180);
+  final double lat, lon;
+  final double _p, _sin, _cos;
+}
+
+/// Distancia y rumbos entre un [GeoAnchor] y un punto, compartiendo el
+/// seno y coseno de la latitud del punto ([sinP], [cosP], [p] en radianes).
+/// [bearingFrom] es el rumbo DESDE el ancla hasta el punto.
+({double distNm, double bearingFrom}) anchorDistanceBearing(
+  GeoAnchor a,
+  double p,
+  double sinP,
+  double cosP,
+  double lon,
+) {
+  final dp = p - a._p, dl = (lon - a.lon) * math.pi / 180;
+  final sdp = math.sin(dp / 2), sdl = math.sin(dl / 2);
+  final h = sdp * sdp + a._cos * cosP * sdl * sdl;
+  final dist = 2 * kEarthRadiusNm * math.asin(math.min(1, math.sqrt(h)));
+  final y = math.sin(dl) * cosP;
+  final x = a._cos * sinP - a._sin * cosP * math.cos(dl);
+  final brg = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+  return (distNm: dist, bearingFrom: brg);
 }

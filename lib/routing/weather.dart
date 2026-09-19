@@ -247,7 +247,12 @@ class WeatherGrid {
   /// El tiempo interpolado en (lat, lon, hora). null fuera de la rejilla o
   /// fuera del intervalo de horas, o si el viento no tiene dato: el router
   /// debe tratarlo como "no se sabe", no como calma.
-  WeatherSample? sample(double lat, double lon, DateTime time) {
+  WeatherSample? sample(double lat, double lon, DateTime time) =>
+      sampleMs(lat, lon, time.toUtc().millisecondsSinceEpoch);
+
+  /// Igual que [sample], con la hora en ms desde epoch (UTC): el motor la
+  /// lleva así para no crear un DateTime por cada candidato.
+  WeatherSample? sampleMs(double lat, double lon, int ms) {
     // Tolerancia para los bordes: (24.1 − 24.0) / 0.1 no da 1 exacto.
     const eps = 1e-6;
     var fi = (lat - lat0) / step;
@@ -257,7 +262,6 @@ class WeatherGrid {
     }
     fi = fi.clamp(0.0, nLat - 1.0);
     fj = fj.clamp(0.0, nLon - 1.0);
-    final ms = time.toUtc().millisecondsSinceEpoch;
     final t0ms = start.millisecondsSinceEpoch;
     final t1ms = end.millisecondsSinceEpoch;
     if (ms < t0ms || ms > t1ms) return null;

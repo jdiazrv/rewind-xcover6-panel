@@ -9,6 +9,7 @@
 
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 /// Un polígono de tierra con sus huecos (mares interiores, lagos grandes
 /// que Natural Earth ya recorta como agujero del propio polígono).
@@ -216,4 +217,228 @@ class LandMask {
     }
     return false;
   }
+}
+
+/// Índice espacial de la costa para UNA pierna, con la comprobación de
+/// tramo EXACTA: distancia real del tramo a cada borde de costa (y cruce),
+/// no unos puntos muestreados. Más precisa que [LandMask.segmentBlocked]
+/// (el muestreo podía saltarse una punta de tierra estrecha entre dos
+/// muestras si el tramo era largo) y muchísimo más rápida: cada tramo solo
+/// mira los bordes de las celdas que toca, y en mar abierta ninguno.
+///
+/// Misma métrica que [LandMask.nearLand]: grados con la longitud corregida
+/// por el coseno de la latitud del punto consultado, × 60 = millas.
+class LandSegmentIndex {
+  LandSegmentIndex._(
+    this._south,
+    this._west,
+    this._cell,
+    this._nLat,
+    this._nLon,
+    this._cells,
+    this._ax,
+    this._ay,
+    this._bx,
+    this._by,
+    this.marginNm,
+    this._lonPadDeg,
+    this._latPadDeg,
+  ) : _stamp = Int32List(_ax.length);
+
+  /// Índice de los bordes de [mask] dentro de la caja (con [marginNm] de
+  /// margen para no perder bordes justo fuera de ella).
+  factory LandSegmentIndex.build(
+    LandMask mask, {
+    required double south,
+    required double west,
+    required double north,
+    required double east,
+    required double marginNm,
+  }) {
+    // Relleno en grados del margen, con el coseno más pequeño de la caja
+    // (el caso más ancho en longitud): así ninguna celda se queda sin un
+    // borde que de verdad esté a menos del margen.
+    final maxAbsLat = math.max(south.abs(), north.abs()).clamp(0.0, 85.0);
+    final minCos = math.cos(maxAbsLat * math.pi / 180).clamp(0.05, 1.0);
+    final latPad = marginNm / 60 + 1e-9;
+    final lonPad = marginNm / (60 * minCos) + 1e-9;
+    final s = south - latPad, w = west - lonPad;
+    final n = north + latPad, e = east + lonPad;
+    // Celdas de ~0,02° como poco (1,2 M), y como mucho ~40 000 celdas.
+    final area = (n - s) * (e - w);
+    final cell = math.max(0.02, math.sqrt(area / 40000));
+    final nLat = math.max(1, ((n - s) / cell).ceil());
+    final nLon = math.max(1, ((e - w) / cell).ceil());
+
+    final ax = <double>[], ay = <double>[], bx = <double>[], by = <double>[];
+    final lists = List<List<int>?>.filled(nLat * nLon, null);
+    void addRing(List<(double, double)> ring) {
+      final len = ring.length;
+      for (var i = 0; i < len; i++) {
+        final (x1, y1) = ring[i];
+        final (x2, y2) = ring[(i + 1) % len];
+        final minX = math.min(x1, x2) - lonPad,
+            maxX = math.max(x1, x2) + lonPad;
+        final minY = math.min(y1, y2) - latPad,
+            maxY = math.max(y1, y2) + latPad;
+        if (maxX < w || minX > e || maxY < s || minY > n) continue;
+        final id = ax.length;
+        ax.add(x1);
+        ay.add(y1);
+        bx.add(x2);
+        by.add(y2);
+        final i0 = ((minY - s) / cell).floor().clamp(0, nLat - 1);
+        final i1 = ((maxY - s) / cell).floor().clamp(0, nLat - 1);
+        final j0 = ((minX - w) / cell).floor().clamp(0, nLon - 1);
+        final j1 = ((maxX - w) / cell).floor().clamp(0, nLon - 1);
+        for (var ci = i0; ci <= i1; ci++) {
+          for (var cj = j0; cj <= j1; cj++) {
+            (lists[ci * nLon + cj] ??= <int>[]).add(id);
+          }
+        }
+      }
+    }
+
+    for (final p in mask.polygons) {
+      if (p.bbox.$3 < w || p.bbox.$1 > e || p.bbox.$4 < s || p.bbox.$2 > n) {
+        continue;
+      }
+      addRing(p.ring);
+      for (final h in p.holes) {
+        addRing(h);
+      }
+    }
+    return LandSegmentIndex._(
+      s,
+      w,
+      cell,
+      nLat,
+      nLon,
+      [for (final l in lists) l == null ? null : Int32List.fromList(l)],
+      Float64List.fromList(ax),
+      Float64List.fromList(ay),
+      Float64List.fromList(bx),
+      Float64List.fromList(by),
+      marginNm,
+      lonPad,
+      latPad,
+    );
+  }
+
+  final double _south, _west, _cell;
+  final int _nLat, _nLon;
+  final List<Int32List?> _cells;
+  final Float64List _ax, _ay, _bx, _by;
+  final double marginNm;
+  final double _lonPadDeg, _latPadDeg;
+  final Int32List _stamp;
+  int _query = 0;
+
+  bool get isEmpty => _ax.isEmpty;
+
+  /// ¿El tramo cruza la costa o pasa a menos de [marginNm] de ella? No
+  /// comprueba si el tramo entero cae DENTRO de tierra sin tocar su borde:
+  /// el motor solo sale de puntos de agua (o de la zona de puerto, que no
+  /// se comprueba), y un tramo que empieza en el agua y no toca ningún
+  /// borde sigue en el agua.
+  bool segmentBlocked(double lat1, double lon1, double lat2, double lon2) {
+    if (_ax.isEmpty) return false;
+    final minY = math.min(lat1, lat2) - _latPadDeg;
+    final maxY = math.max(lat1, lat2) + _latPadDeg;
+    final minX = math.min(lon1, lon2) - _lonPadDeg;
+    final maxX = math.max(lon1, lon2) + _lonPadDeg;
+    final i0 = ((minY - _south) / _cell).floor();
+    final i1 = ((maxY - _south) / _cell).floor();
+    final j0 = ((minX - _west) / _cell).floor();
+    final j1 = ((maxX - _west) / _cell).floor();
+    if (i1 < 0 || j1 < 0 || i0 >= _nLat || j0 >= _nLon) return false;
+    // Métrica local del tramo: longitud × cos(lat), como nearLand.
+    final cosLat = math
+        .cos((lat1 + lat2) / 2 * math.pi / 180)
+        .abs()
+        .clamp(0.15, 1.0);
+    final px1 = lon1 * cosLat, px2 = lon2 * cosLat;
+    final marginDeg = marginNm / 60;
+    final q = ++_query;
+    if (q == 0x7fffffff) {
+      _stamp.fillRange(0, _stamp.length, 0);
+      _query = 1;
+    }
+    for (var ci = math.max(0, i0); ci <= math.min(_nLat - 1, i1); ci++) {
+      for (var cj = math.max(0, j0); cj <= math.min(_nLon - 1, j1); cj++) {
+        final ids = _cells[ci * _nLon + cj];
+        if (ids == null) continue;
+        for (final id in ids) {
+          if (_stamp[id] == _query) continue;
+          _stamp[id] = _query;
+          final d = _segSegDist(
+            px1,
+            lat1,
+            px2,
+            lat2,
+            _ax[id] * cosLat,
+            _ay[id],
+            _bx[id] * cosLat,
+            _by[id],
+          );
+          if (d <= marginDeg) return true;
+        }
+      }
+    }
+    return false;
+  }
+}
+
+/// Distancia mínima entre dos segmentos del plano (0 si se cruzan).
+double _segSegDist(
+  double x1,
+  double y1,
+  double x2,
+  double y2,
+  double x3,
+  double y3,
+  double x4,
+  double y4,
+) {
+  if (_segmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4)) return 0;
+  return math.min(
+    math.min(
+      _pointToSegmentDeg(x1, y1, x3, y3, x4, y4),
+      _pointToSegmentDeg(x2, y2, x3, y3, x4, y4),
+    ),
+    math.min(
+      _pointToSegmentDeg(x3, y3, x1, y1, x2, y2),
+      _pointToSegmentDeg(x4, y4, x1, y1, x2, y2),
+    ),
+  );
+}
+
+bool _segmentsIntersect(
+  double x1,
+  double y1,
+  double x2,
+  double y2,
+  double x3,
+  double y3,
+  double x4,
+  double y4,
+) {
+  double orient(
+    double ax,
+    double ay,
+    double bx,
+    double by,
+    double cx,
+    double cy,
+  ) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  final d1 = orient(x3, y3, x4, y4, x1, y1);
+  final d2 = orient(x3, y3, x4, y4, x2, y2);
+  final d3 = orient(x1, y1, x2, y2, x3, y3);
+  final d4 = orient(x1, y1, x2, y2, x4, y4);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+      ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return true;
+  }
+  // Casos colineales/tocando: los cubre la distancia punto–segmento (0).
+  return false;
 }

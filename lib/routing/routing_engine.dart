@@ -598,34 +598,132 @@ class _LegResult {
 /// camino por encima de la ola cómoda (para el tope de Confort) y la
 /// penalización de confort ACUMULADA por el camino.
 class _Node {
-  _Node(
-    this.lat,
-    this.lon,
-    this.time,
-    this.parent,
-    this.arrivingSegment,
-    this.minutesAbovePreferred, {
-    this.comfortPenaltyNm = 0,
-    this.minutesSinceManeuver = 0,
+  /// Nodo de salida de una pierna. Hereda del último tramo de la pierna
+  /// anterior lo necesario para contar como maniobra virar justo en la vía.
+  _Node.root(this.lat, this.lon, this.timeMs, RouteSegment? previous)
+    : parent = null,
+      minutesAbovePreferred = 0,
+      comfortPenaltyNm = 0,
+      minutesSinceManeuver = kManeuverReferenceMinutes,
+      legIndex = previous?.waypointIndex ?? 0,
+      headingDeg = previous?.headingDeg ?? 0,
+      twdDeg = previous?.twdDeg ?? 0,
+      mode = previous?.mode,
+      noForecast = previous?.noForecast ?? false,
+      maneuver = null,
+      stwKn = 0,
+      stepH = 0,
+      distNm = 0,
+      sample = null,
+      awsKn = 0,
+      awaDeg = 0,
+      twaDeg = 0;
+
+  _Node.step({
+    required this.lat,
+    required this.lon,
+    required this.timeMs,
+    required _Node this.parent,
+    required this.minutesAbovePreferred,
+    required this.comfortPenaltyNm,
+    required this.minutesSinceManeuver,
+    required this.legIndex,
+    required this.headingDeg,
+    required this.twdDeg,
+    required PropulsionMode this.mode,
+    required this.noForecast,
+    required this.maneuver,
+    required this.stwKn,
+    required this.stepH,
+    required this.distNm,
+    required this.sample,
+    required this.awsKn,
+    required this.awaDeg,
+    required this.twaDeg,
   });
+
   final double lat, lon;
-  final DateTime time;
+
+  /// Hora del nodo, en ms desde epoch (UTC): sin crear un DateTime por
+  /// cada uno de los miles de candidatos que la poda va a descartar.
+  final int timeMs;
   final _Node? parent;
-  final RouteSegment? arrivingSegment;
   final int minutesAbovePreferred;
   final double comfortPenaltyNm;
-
-  /// Distancia real que falta al destino de la pierna.
-  double remainingNm = 0;
-
-  /// Lo que se compara en la poda: [remainingNm] más las penalizaciones.
-  double score = 0;
 
   /// Cuánto lleva el camino en el mismo bordo y modo (vela/motor) sin
   /// virar/trasluchar ni arrancar/parar el motor.
   final double minutesSinceManeuver;
 
-  bool get justManeuvered => arrivingSegment?.maneuver != null;
+  // ── El tramo que llega a este nodo, en bruto. El RouteSegment completo
+  // (con la ola encontrada) solo se construye para los nodos que acaban
+  // en la ruta, no para cada candidato.
+  final int legIndex;
+  final double headingDeg, twdDeg, stwKn, stepH, distNm;
+  final PropulsionMode? mode;
+  final bool noForecast;
+  final ManeuverKind? maneuver;
+  final WeatherSample? sample;
+  final double awsKn, awaDeg, twaDeg;
+
+  /// Distancia real que falta al destino de la pierna.
+  double remainingNm = 0;
+
+  /// Puntuaciones de la poda (menor es mejor): en el abanico visto desde
+  /// la salida, y en los sectores vistos desde la llegada.
+  double fanScore = 0, approachScore = 0;
+
+  bool get justManeuvered => maneuver != null;
+
+  DateTime get time => DateTime.fromMillisecondsSinceEpoch(timeMs, isUtc: true);
+
+  RouteSegment? _segment;
+
+  /// El tramo que llega aquí, completo (solo para nodos que no son la
+  /// salida de la pierna).
+  RouteSegment get arrivingSegment => _segment ??= _buildSegment();
+
+  RouteSegment _buildSegment() {
+    final p = parent!;
+    final wx = sample;
+    double? encAngle, encPeriod;
+    if (wx?.waveDirDeg != null && wx?.wavePeriodS != null) {
+      final enc = waveEncounter(
+        headingDeg: headingDeg,
+        stwKn: stwKn,
+        waveFromDeg: wx!.waveDirDeg!,
+        wavePeriodS: wx.wavePeriodS!,
+      );
+      encAngle = enc.angleDeg;
+      encPeriod = enc.periodS;
+    }
+    return RouteSegment(
+      waypointIndex: legIndex,
+      startLat: p.lat,
+      startLon: p.lon,
+      endLat: lat,
+      endLon: lon,
+      startTime: p.time,
+      endTime: time,
+      headingDeg: headingDeg,
+      distanceNm: distNm,
+      mode: mode!,
+      stwKn: stwKn,
+      twsKn: wx?.twsKn ?? 0,
+      twdDeg: twdDeg,
+      twaDeg: twaDeg,
+      awsKn: awsKn,
+      awaDeg: awaDeg,
+      waveHeightM: wx?.waveHeightM,
+      waveDirDeg: wx?.waveDirDeg,
+      wavePeriodS: wx?.wavePeriodS,
+      waveEncounterAngleDeg: encAngle,
+      waveEncounterPeriodS: encPeriod,
+      gustKn: wx?.gustKn,
+      maneuver: maneuver,
+      noForecast: noForecast,
+    );
+  }
 }
 
 /// Sesgo de búsqueda contra maniobrar seguido (no un tiempo físico: ese
@@ -642,14 +740,15 @@ const kManeuverReferenceMinutes = 60.0;
 /// trasluchada) o cambiar de vela a motor. A motor cruzar el eje del
 /// viento no es ninguna maniobra.
 ManeuverKind? _maneuverBetween(
-  RouteSegment? prev,
+  _Node prev,
   double headingDeg,
   double twdDeg,
   PropulsionMode mode,
 ) {
-  if (prev == null) return null; // primer paso: no hay maniobra que contar
+  final prevMode = prev.mode;
+  if (prevMode == null) return null; // primer paso: no hay maniobra que contar
   if (prev.noForecast) return null;
-  if (prev.mode != mode) return ManeuverKind.modeChange;
+  if (prevMode != mode) return ManeuverKind.modeChange;
   if (mode == PropulsionMode.motor) return null;
   final prevSide = normalizeRelativeAngle(prev.headingDeg - prev.twdDeg);
   final newSide = normalizeRelativeAngle(headingDeg - twdDeg);
@@ -745,6 +844,17 @@ Iterable<_LegResult?> _routeLegSteps({
         : null,
   );
   final ctx = ctx0;
+  final factor = (req.polarFactorPercent / 100).clamp(0.1, 1.5);
+  if (legLand != null && !legLand.isEmpty) {
+    ctx.landIndex = LandSegmentIndex.build(
+      legLand,
+      south: legBox.south,
+      west: legBox.west,
+      north: legBox.north,
+      east: legBox.east,
+      marginNm: req.constraints.minimumCoastDistanceNm,
+    );
+  }
   if (land != null && !land.isEmpty) {
     final m = req.constraints.minimumCoastDistanceNm;
     ctx.startNearLand =
@@ -757,18 +867,12 @@ Iterable<_LegResult?> _routeLegSteps({
 
   // El nodo de salida "lleva" el último tramo de la pierna anterior (para
   // contar como maniobra el virar justo en la vía) y un bordo neutro.
-  final root =
-      _Node(
-          start.lat,
-          start.lon,
-          startTime,
-          null,
-          previous,
-          0,
-          minutesSinceManeuver: kManeuverReferenceMinutes,
-        )
-        ..remainingNm = directNm
-        ..score = directNm;
+  final root = _Node.root(
+    start.lat,
+    start.lon,
+    startTime.toUtc().millisecondsSinceEpoch,
+    previous,
+  )..remainingNm = directNm;
   var frontier = <_Node>[root];
   _Node best = root;
   // Para detectar una búsqueda atascada: cuándo mejoró por última vez la
@@ -787,7 +891,7 @@ Iterable<_LegResult?> _routeLegSteps({
     // caso: la barra se arrastraba y luego saltaba al 100 %.
     onProgress?.call((1 - best.remainingNm / directNm).clamp(0.0, 0.99));
     if (step > 0) yield null;
-    final next = <int, _Node>{}; // clave = sector de poda
+    final next = _Pruner();
     // Llegada exacta: si desde algún nodo el destino se alcanza DENTRO de
     // este paso a un rumbo navegable, se llega justo ahí con un paso
     // parcial. Antes solo contaba como llegada caer a menos de 0,35 M, y
@@ -799,7 +903,7 @@ Iterable<_LegResult?> _routeLegSteps({
         yield _LegResult(_backtrack(node), true, null);
         return;
       }
-      final sample = req.grid.sample(node.lat, node.lon, node.time);
+      final sample = req.grid.sampleMs(node.lat, node.lon, node.timeMs);
       if (sample == null) {
         // Fuera de la zona o de las horas del tiempo descargado. Antes se
         // motoraba en silencio; ahora se marca el tramo como "sin
@@ -818,27 +922,27 @@ Iterable<_LegResult?> _routeLegSteps({
               ? toTarget / req.constraints.motorSpeedKn
               : stepH;
           final runNm = req.constraints.motorSpeedKn * h;
-          if (!_checkLand(ctx, node.lat, node.lon, bearing, runNm) ||
-              !_blockedByLand(
-                legLand,
-                node.lat,
-                node.lon,
-                bearing,
-                runNm,
-                req.constraints.minimumCoastDistanceNm,
-              )) {
+          final end = destinationNm(node.lat, node.lon, bearing, runNm);
+          if (!_landBlocked(ctx, node.lat, node.lon, end)) {
+            final motorKn = req.constraints.motorSpeedKn;
             final child = _stepNode(
               ctx,
               node,
-              bearing,
-              req.constraints.motorSpeedKn,
-              PropulsionMode.motor,
-              h,
+              headingDeg: bearing,
+              stwKn: motorKn,
+              mode: PropulsionMode.motor,
+              stepH: h,
+              distNm: runNm,
+              end: end,
               sample: null,
               maneuver: null,
+              // Sin viento conocido: el aparente es el de la marcha.
+              awsKn: motorKn,
+              awaDeg: 0,
+              twaDeg: 0,
             );
             if (toTarget <= reach) {
-              if (finish == null || child.time.isBefore(finish.time)) {
+              if (finish == null || child.timeMs < finish.timeMs) {
                 finish = child;
               }
             } else {
@@ -864,25 +968,36 @@ Iterable<_LegResult?> _routeLegSteps({
       }
       // La curva de la polar solo depende del TWS de este nodo, no del
       // rumbo: se construye UNA vez y se reutiliza en los 72 candidatos.
-      final curve = req.polar.curveFor(sample.twsKn);
+      final wx = _NodeWx(
+        node,
+        sample,
+        req.polar.curveFor(sample.twsKn),
+        factor,
+      );
+      final toTargetDeg = bearingDeg(
+        node.lat,
+        node.lon,
+        target.lat,
+        target.lon,
+      );
       final fin = _headingCandidate(
         ctx,
-        node: node,
-        headingDeg: bearingDeg(node.lat, node.lon, target.lat, target.lon),
-        sample: sample,
-        curve: curve,
+        wx,
+        headingDeg: toTargetDeg,
+        sinH: math.sin(toTargetDeg * math.pi / 180),
+        cosH: math.cos(toTargetDeg * math.pi / 180),
         finishDistNm: node.remainingNm,
       );
-      if (fin != null && (finish == null || fin.time.isBefore(finish.time))) {
+      if (fin != null && (finish == null || fin.timeMs < finish.timeMs)) {
         finish = fin;
       }
-      for (var h = 0.0; h < 360; h += kHeadingStepDeg) {
+      for (var k = 0; k < _candidateHeadings.length; k++) {
         final child = _headingCandidate(
           ctx,
-          node: node,
-          headingDeg: h,
-          sample: sample,
-          curve: curve,
+          wx,
+          headingDeg: _candidateHeadings[k],
+          sinH: _headingSin[k],
+          cosH: _headingCos[k],
         );
         if (child == null) continue;
         _offerCandidate(ctx, next, child);
@@ -922,7 +1037,7 @@ Iterable<_LegResult?> _routeLegSteps({
       yield _LegResult(_backtrack(closest), false, reason);
       return;
     }
-    frontier = next.values.toList();
+    frontier = next.frontier();
     for (final n in frontier) {
       if (n.remainingNm < best.remainingNm) best = n;
     }
@@ -985,14 +1100,14 @@ Iterable<_LegResult?> _routeLegSteps({
       }
     }
     if (onIsochrone != null) {
-      final keys = next.keys.toList()..sort();
+      final keys = next.fan.keys.toList()..sort();
       onIsochrone(
         RouteIsochrone(
           legIndex: legIndex,
           step: step,
           time: frontier.first.time,
           latLon: [
-            for (final k in keys) ...[next[k]!.lat, next[k]!.lon],
+            for (final k in keys) ...[next.fan[k]!.lat, next.fan[k]!.lon],
           ],
         ),
       );
@@ -1060,8 +1175,13 @@ class _LegContext {
   final LandMask? legLand;
   final double stepH;
   final ({double lat, double lon}) start;
+  late final GeoAnchor startAnchor = GeoAnchor(start.lat, start.lon);
+  late final GeoAnchor targetAnchor = GeoAnchor(target.lat, target.lon);
   final GeoBox legBox;
   bool startNearLand = false, targetNearLand = false;
+
+  /// Costa de la pierna indexada para la comprobación exacta de tramos.
+  LandSegmentIndex? landIndex;
   final ({double lat, double lon}) target;
   final double targetBearing;
   final double comfortWeight;
@@ -1089,31 +1209,26 @@ bool _inPortZone(_LegContext ctx, double lat, double lon) =>
         distanceNm(lat, lon, ctx.target.lat, ctx.target.lon) <=
             kPortApproachNm);
 
-/// ¿Hay que mirar la costa en este tramo? No si va entero dentro de la
-/// zona de puerto de una salida o llegada pegada a tierra.
-bool _checkLand(
+/// ¿El tramo de ([lat], [lon]) a [end] cruza la costa o pasa a menos del
+/// margen? Comprobación exacta con el índice de la pierna. No se mira si
+/// el tramo va entero dentro de la zona de puerto de una salida o llegada
+/// pegada a tierra; al SALIR de esa zona el punto de partida puede estar
+/// "en tierra" (costa aproximada), así que además el final no puede estar
+/// en tierra. Sin máscara nunca bloquea: la ruta se calcula igual, solo
+/// sin evitar la costa.
+bool _landBlocked(
   _LegContext ctx,
   double lat,
   double lon,
-  double headingDeg,
-  double distNm,
+  ({double lat, double lon}) end,
 ) {
-  if (!_inPortZone(ctx, lat, lon)) return true;
-  final end = destinationNm(lat, lon, headingDeg, distNm);
-  return !_inPortZone(ctx, end.lat, end.lon);
-}
-
-bool _blockedByLand(
-  LandMask? land,
-  double startLat,
-  double startLon,
-  double headingDeg,
-  double distNm,
-  double marginNm,
-) {
-  if (land == null || land.isEmpty) return false;
-  final dest = destinationNm(startLat, startLon, headingDeg, distNm);
-  return land.segmentBlocked(startLat, startLon, dest.lat, dest.lon, marginNm);
+  final idx = ctx.landIndex;
+  if (idx == null) return false;
+  final startInZone = _inPortZone(ctx, lat, lon);
+  if (startInZone && _inPortZone(ctx, end.lat, end.lon)) return false;
+  if (idx.segmentBlocked(lat, lon, end.lat, end.lon)) return true;
+  if (startInZone && ctx.legLand!.isLand(end.lat, end.lon)) return true;
+  return false;
 }
 
 /// Evalúa un rumbo candidato: decide vela/motor, aplica los límites de
@@ -1121,19 +1236,19 @@ bool _blockedByLand(
 /// nodo resultante (o null si el rumbo no es utilizable). Con
 /// [finishDistNm], solo vale si llega a esa distancia dentro del paso.
 _Node? _headingCandidate(
-  _LegContext ctx, {
-  required _Node node,
+  _LegContext ctx,
+  _NodeWx wx, {
   required double headingDeg,
-  required WeatherSample sample,
-  required List<(double, double)> curve,
+  required double sinH,
+  required double cosH,
   double? finishDistNm,
 }) {
-  final req = ctx.req;
-  final c = req.constraints;
+  final node = wx.node;
+  final sample = wx.sample;
+  final c = ctx.req.constraints;
   final twa = trueWindAngle(headingDeg, sample.twdDeg);
-  final factor = (req.polarFactorPercent / 100).clamp(0.1, 1.5);
-  final sailStw = PolarTable.speedAtCurve(curve, twa);
-  final sailSpeed = sailStw == null ? null : sailStw * factor;
+  final sailStw = PolarTable.speedAtCurve(wx.curve, twa);
+  final sailSpeed = sailStw == null ? null : sailStw * wx.factor;
 
   // El ángulo de ceñida de la polar (beatAngle) es el óptimo del VPP en
   // banco de pruebas; a velocidad real, el aparente que le corresponde
@@ -1143,12 +1258,7 @@ _Node? _headingCandidate(
   ({double awsKn, double awaDeg})? sailAw;
   var sailPhysicallyValid = false;
   if (sailSpeed != null) {
-    sailAw = apparentWind(
-      twsKn: sample.twsKn,
-      twdDeg: sample.twdDeg,
-      headingDeg: headingDeg,
-      stwKn: sailSpeed,
-    );
+    sailAw = _apparent(wx.wu, wx.wv, sinH, cosH, headingDeg, sailSpeed);
     sailPhysicallyValid = sailAw.awaDeg.abs() >= c.minimumAwaDeg;
   }
 
@@ -1162,12 +1272,7 @@ _Node? _headingCandidate(
   } else if (c.allowMotor) {
     stw = c.motorSpeedKn;
     mode = PropulsionMode.motor;
-    aw = apparentWind(
-      twsKn: sample.twsKn,
-      twdDeg: sample.twdDeg,
-      headingDeg: headingDeg,
-      stwKn: stw,
-    );
+    aw = _apparent(wx.wu, wx.wv, sinH, cosH, headingDeg, stw);
   } else if (sailPhysicallyValid && sailSpeed! > 0) {
     stw = sailSpeed;
     mode = PropulsionMode.sailing;
@@ -1182,16 +1287,7 @@ _Node? _headingCandidate(
     return null;
   }
 
-  if (sample.waveHeightM != null && sample.waveHeightM! > c.absoluteMaxWaveM) {
-    return null; // tope duro: nunca se cruza (ya filtrado por nodo)
-  }
-
-  final maneuver = _maneuverBetween(
-    node.arrivingSegment,
-    headingDeg,
-    sample.twdDeg,
-    mode,
-  );
+  final maneuver = _maneuverBetween(node, headingDeg, sample.twdDeg, mode);
   final lossH = (maneuver?.lossSeconds ?? 0) / 3600.0;
 
   // Tramo final: llegar justo al destino con un paso parcial, si da tiempo
@@ -1205,101 +1301,105 @@ _Node? _headingCandidate(
   }
 
   final runNm = stw * math.max(0, thisStepH - lossH);
-  if (_checkLand(ctx, node.lat, node.lon, headingDeg, runNm) &&
-      _blockedByLand(
-        ctx.legLand,
-        node.lat,
-        node.lon,
-        headingDeg,
-        runNm,
-        c.minimumCoastDistanceNm,
-      )) {
-    return null;
-  }
+  final end = _destination(wx.sinLat, wx.cosLat, wx.lonRad, sinH, cosH, runNm);
+  if (_landBlocked(ctx, node.lat, node.lon, end)) return null;
 
   return _stepNode(
     ctx,
     node,
-    headingDeg,
-    stw,
-    mode,
-    thisStepH,
+    headingDeg: headingDeg,
+    stwKn: stw,
+    mode: mode,
+    stepH: thisStepH,
+    distNm: runNm,
+    end: end,
     sample: sample,
     maneuver: maneuver,
-    precomputedAws: aw,
-    precomputedTwa: twa,
+    awsKn: aw.awsKn,
+    awaDeg: aw.awaDeg,
+    twaDeg: twa,
   );
+}
+
+/// Lo que de un nodo no depende del rumbo, calculado una vez para sus 72
+/// candidatos: el tiempo en su punto y hora, la curva de la polar a ese
+/// viento, el viento en componentes y los términos trigonométricos de su
+/// posición. Mismas fórmulas que [apparentWind] y [destinationNm], con los
+/// términos repetidos guardados: el resultado es idéntico.
+class _NodeWx {
+  _NodeWx(this.node, this.sample, this.curve, this.factor)
+    : sinLat = math.sin(node.lat * math.pi / 180),
+      cosLat = math.cos(node.lat * math.pi / 180),
+      lonRad = node.lon * math.pi / 180,
+      wu = -sample.twsKn * math.sin(sample.twdDeg * math.pi / 180),
+      wv = -sample.twsKn * math.cos(sample.twdDeg * math.pi / 180);
+  final _Node node;
+  final WeatherSample sample;
+  final List<(double, double)> curve;
+  final double factor;
+  final double sinLat, cosLat, lonRad;
+
+  /// Viento verdadero hacia donde sopla (este, norte).
+  final double wu, wv;
+}
+
+/// Senos y cosenos de los rumbos candidatos (0, 5, … 355°), una sola vez.
+final _candidateHeadings = [for (var h = 0.0; h < 360; h += kHeadingStepDeg) h];
+final _headingSin = [
+  for (final h in _candidateHeadings) math.sin(h * math.pi / 180),
+];
+final _headingCos = [
+  for (final h in _candidateHeadings) math.cos(h * math.pi / 180),
+];
+
+/// [apparentWind] con el viento ya en componentes y el rumbo ya en
+/// seno/coseno.
+({double awsKn, double awaDeg}) _apparent(
+  double wu,
+  double wv,
+  double sinH,
+  double cosH,
+  double headingDeg,
+  double stwKn,
+) {
+  final au = wu - stwKn * sinH, av = wv - stwKn * cosH;
+  final aws = math.sqrt(au * au + av * av);
+  final awFromDeg = (math.atan2(-au, -av) * 180 / math.pi + 360) % 360;
+  return (awsKn: aws, awaDeg: normalizeRelativeAngle(awFromDeg - headingDeg));
+}
+
+/// [destinationNm] con la latitud de salida y el rumbo ya en seno/coseno.
+({double lat, double lon}) _destination(
+  double sinP1,
+  double cosP1,
+  double lonRad,
+  double sinB,
+  double cosB,
+  double distNm,
+) {
+  final d = distNm / kEarthRadiusNm;
+  final sinD = math.sin(d), cosD = math.cos(d);
+  final p2 = math.asin(sinP1 * cosD + cosP1 * sinD * cosB);
+  final l2 =
+      lonRad + math.atan2(sinB * sinD * cosP1, cosD - sinP1 * math.sin(p2));
+  return (lat: p2 * 180 / math.pi, lon: (l2 * 180 / math.pi + 540) % 360 - 180);
 }
 
 _Node _stepNode(
   _LegContext ctx,
-  _Node node,
-  double headingDeg,
-  double stwKn,
-  PropulsionMode mode,
-  double stepH, {
+  _Node node, {
+  required double headingDeg,
+  required double stwKn,
+  required PropulsionMode mode,
+  required double stepH,
+  required double distNm,
+  required ({double lat, double lon}) end,
   required WeatherSample? sample,
   required ManeuverKind? maneuver,
-  ({double awsKn, double awaDeg})? precomputedAws,
-  double? precomputedTwa,
+  required double awsKn,
+  required double awaDeg,
+  required double twaDeg,
 }) {
-  final twsKn = sample?.twsKn ?? 0;
-  final twdDeg = sample?.twdDeg ?? headingDeg;
-  // El tiempo de la maniobra se pierde parado (a efectos de avance): el
-  // tramo dura lo mismo pero recorre menos.
-  final lossH = (maneuver?.lossSeconds ?? 0) / 3600.0;
-  final distNm = stwKn * math.max(0, stepH - lossH);
-  final dest = destinationNm(node.lat, node.lon, headingDeg, distNm);
-  final endTime = node.time.add(Duration(seconds: (stepH * 3600).round()));
-  final aw =
-      precomputedAws ??
-      apparentWind(
-        twsKn: twsKn,
-        twdDeg: twdDeg,
-        headingDeg: headingDeg,
-        stwKn: stwKn,
-      );
-  final twa = precomputedTwa ?? trueWindAngle(headingDeg, twdDeg);
-
-  double? encAngle, encPeriod;
-  if (sample?.waveDirDeg != null && sample?.wavePeriodS != null) {
-    final enc = waveEncounter(
-      headingDeg: headingDeg,
-      stwKn: stwKn,
-      waveFromDeg: sample!.waveDirDeg!,
-      wavePeriodS: sample.wavePeriodS!,
-    );
-    encAngle = enc.angleDeg;
-    encPeriod = enc.periodS;
-  }
-
-  final seg = RouteSegment(
-    waypointIndex: ctx.legIndex,
-    startLat: node.lat,
-    startLon: node.lon,
-    endLat: dest.lat,
-    endLon: dest.lon,
-    startTime: node.time,
-    endTime: endTime,
-    headingDeg: headingDeg,
-    distanceNm: distNm,
-    mode: mode,
-    stwKn: stwKn,
-    twsKn: twsKn,
-    twdDeg: twdDeg,
-    twaDeg: twa,
-    awsKn: aw.awsKn,
-    awaDeg: aw.awaDeg,
-    waveHeightM: sample?.waveHeightM,
-    waveDirDeg: sample?.waveDirDeg,
-    wavePeriodS: sample?.wavePeriodS,
-    waveEncounterAngleDeg: encAngle,
-    waveEncounterPeriodS: encPeriod,
-    gustKn: sample?.gustKn,
-    maneuver: maneuver,
-    noForecast: sample == null,
-  );
-
   final minutes = (stepH * 60).round();
   final c = ctx.req.constraints;
   final excessM = sample?.waveHeightM == null
@@ -1312,37 +1412,76 @@ _Node _stepNode(
   // misma Hs recibida de proa es mucho más dura.
   var comfortPenalty = node.comfortPenaltyNm;
   if (ctx.comfortWeight > 0 && excessM > 0) {
-    final enc = encAngle?.abs();
+    final waveFrom = sample?.waveDirDeg;
+    final enc = waveFrom == null
+        ? null
+        : normalizeRelativeAngle(headingDeg - waveFrom).abs();
     final headFactor = enc == null
         ? 1.0
         : (enc < 60 ? 1.5 : (enc > 120 ? 0.6 : 1.0));
     comfortPenalty += ctx.comfortWeight * excessM * headFactor * stepH;
   }
 
-  return _Node(
-    dest.lat,
-    dest.lon,
-    endTime,
-    node,
-    seg,
-    minutesAbove,
+  return _Node.step(
+    lat: end.lat,
+    lon: end.lon,
+    timeMs: node.timeMs + (stepH * 3600).round() * 1000,
+    parent: node,
+    minutesAbovePreferred: minutesAbove,
     comfortPenaltyNm: comfortPenalty,
     minutesSinceManeuver: maneuver == null
         ? node.minutesSinceManeuver + minutes
         : minutes.toDouble(),
+    legIndex: ctx.legIndex,
+    headingDeg: headingDeg,
+    twdDeg: sample?.twdDeg ?? headingDeg,
+    mode: mode,
+    noForecast: sample == null,
+    maneuver: maneuver,
+    stwKn: stwKn,
+    stepH: stepH,
+    distNm: distNm,
+    sample: sample,
+    awsKn: awsKn,
+    awaDeg: awaDeg,
+    twaDeg: twaDeg,
   );
 }
 
-/// Poda por isócronas, método clásico: para cada sector angular visto
-/// desde la salida de la pierna se queda el punto que MÁS LEJOS ha llegado
-/// (menos la penalización de confort acumulada y un sesgo contra virar
-/// seguido). Así la isócrona es un abanico y puede rodear lo que esté en
-/// medio. Antes los sectores se medían desde el destino quedándose el más
-/// cercano: lejos del destino eso dejaba 2–3 puntos pegados a la línea
-/// recta y la ruta no podía desviarse (una franja de rachas o de ola
-/// cruzada bloqueaba la pierna entera). En Confort/Personalizado se
-/// descarta además el que ya agotó su tiempo con ola incómoda.
-void _offerCandidate(_LegContext ctx, Map<int, _Node> next, _Node candidate) {
+/// Sectores vistos desde la llegada, para la poda de aproximación.
+const kApproachSectorDeg = 5.0;
+
+/// Poda de la isócrona: la unión de dos, cada una con sus sectores.
+/// - Abanico (visto desde la SALIDA, [kPruneSectorDeg]): en cada sector el
+///   punto que más lejos ha llegado. Es el método clásico: la isócrona se
+///   abre y puede rodear lo que haya en medio.
+/// - Aproximación (vista desde la LLEGADA, [kApproachSectorDeg]): en cada
+///   sector el punto más cercano a la llegada. El abanico solo no ve lo
+///   que queda a la sombra de un obstáculo visto desde la salida (una
+///   llegada justo detrás de un istmo: los puntos que remontan hacia ella
+///   pierden frente a los que siguen corriendo más lejos).
+/// La unión nunca pierde un camino que encontrara cualquiera de las dos.
+class _Pruner {
+  final fan = <int, _Node>{};
+  final approach = <int, _Node>{};
+
+  bool get isEmpty => fan.isEmpty && approach.isEmpty;
+
+  List<_Node> frontier() {
+    final out = <_Node>[...fan.values];
+    final seen = Set<_Node>.identity()..addAll(out);
+    for (final n in approach.values) {
+      if (seen.add(n)) out.add(n);
+    }
+    return out;
+  }
+}
+
+/// Ofrece un candidato a la poda (ver [_Pruner]). Las penalizaciones de
+/// confort (acumulada) y el sesgo contra virar seguido cuentan en las dos.
+/// En Confort/Personalizado se descarta además el que ya agotó su tiempo
+/// con ola incómoda.
+void _offerCandidate(_LegContext ctx, _Pruner next, _Node candidate) {
   final maxAbove = ctx.maxMinutesAbovePreferred;
   if (maxAbove != null && candidate.minutesAbovePreferred > maxAbove) {
     ctx.droppedForTimeAbovePreferred = true;
@@ -1353,28 +1492,18 @@ void _offerCandidate(_LegContext ctx, Map<int, _Node> next, _Node candidate) {
   if (!ctx.legBox.contains(candidate.lat, candidate.lon)) return;
   if (!ctx.req.grid.box.contains(candidate.lat, candidate.lon)) return;
 
-  final start = ctx.start;
-  final fromStartNm = distanceNm(
-    start.lat,
-    start.lon,
-    candidate.lat,
+  // Seno y coseno de la latitud del candidato, una vez para las cuatro
+  // medidas (distancia y rumbo a la llegada y a la salida).
+  final p = candidate.lat * math.pi / 180;
+  final sinP = math.sin(p), cosP = math.cos(p);
+  final toTarget = anchorDistanceBearing(
+    ctx.targetAnchor,
+    p,
+    sinP,
+    cosP,
     candidate.lon,
   );
-  final rel = fromStartNm < 1e-6
-      ? 0.0
-      : normalizeRelativeAngle(
-          bearingDeg(start.lat, start.lon, candidate.lat, candidate.lon) -
-              ctx.targetBearing,
-        );
-  if (rel.abs() > kFanHalfDeg) return;
-
-  final target = ctx.target;
-  final remaining = distanceNm(
-    candidate.lat,
-    candidate.lon,
-    target.lat,
-    target.lon,
-  );
+  final remaining = toTarget.distNm;
   // El bordo previo a ESTA maniobra es el que se mantuvo antes de virar
   // (minutesSinceManeuver del padre), no el de este nodo.
   final heldBeforeThis =
@@ -1384,15 +1513,39 @@ void _offerCandidate(_LegContext ctx, Map<int, _Node> next, _Node candidate) {
             (kManeuverReferenceMinutes /
                 math.max(kIsochroneStepMinutes.toDouble(), heldBeforeThis))
       : 0.0;
-  candidate
-    ..remainingNm = remaining
-    // Menor es mejor: lo más lejos posible de la salida en su sector.
-    ..score = -fromStartNm + candidate.comfortPenaltyNm + maneuverBias;
+  final penalty = candidate.comfortPenaltyNm + maneuverBias;
+  candidate.remainingNm = remaining;
 
+  // Aproximación: sectores vistos desde la llegada, el más cercano.
+  candidate.approachScore = remaining + penalty;
+  final aSector = remaining < 1e-6
+      ? 0
+      : (normalizeRelativeAngle(toTarget.bearingFrom - ctx.targetBearing) /
+                kApproachSectorDeg)
+            .round();
+  final a = next.approach[aSector];
+  if (a == null || candidate.approachScore < a.approachScore) {
+    next.approach[aSector] = candidate;
+  }
+
+  // Abanico: sectores vistos desde la salida, el más lejano.
+  final fromStart = anchorDistanceBearing(
+    ctx.startAnchor,
+    p,
+    sinP,
+    cosP,
+    candidate.lon,
+  );
+  final fromStartNm = fromStart.distNm;
+  final rel = fromStartNm < 1e-6
+      ? 0.0
+      : normalizeRelativeAngle(fromStart.bearingFrom - ctx.targetBearing);
+  if (rel.abs() > kFanHalfDeg) return;
+  candidate.fanScore = -fromStartNm + penalty;
   final sector = (rel / kPruneSectorDeg).round();
-  final existing = next[sector];
-  if (existing == null || candidate.score < existing.score) {
-    next[sector] = candidate;
+  final f = next.fan[sector];
+  if (f == null || candidate.fanScore < f.fanScore) {
+    next.fan[sector] = candidate;
   }
 }
 
@@ -1400,7 +1553,7 @@ List<RouteSegment> _backtrack(_Node node) {
   final segs = <RouteSegment>[];
   var n = node;
   while (n.parent != null) {
-    segs.add(n.arrivingSegment!);
+    segs.add(n.arrivingSegment);
     n = n.parent!;
   }
   return segs.reversed.toList();
