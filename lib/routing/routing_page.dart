@@ -120,7 +120,7 @@ class _RoutingPageState extends State<RoutingPage> {
 
   /// Isócronas del último cálculo (en vivo mientras calcula).
   final List<RouteIsochrone> _isochrones = [];
-  bool _showIsochrones = false;
+  bool _showIsochrones = true;
   bool _showSummary = false;
 
   bool _showWind = true;
@@ -176,7 +176,10 @@ class _RoutingPageState extends State<RoutingPage> {
   static const _kPrefCoastNm = 'routing.coastNm';
   static const _kPrefMaxAboveMin = 'routing.maxAboveMin';
   static const _kPrefComfortWeight = 'routing.comfortWeight';
-  static const _kPrefIsochrones = 'routing.isochrones';
+  // Clave nueva: con la anterior ya quedó guardado "apagado" en todas las
+  // instalaciones (se guardaba al abrir la pantalla); por defecto, ahora
+  // encendido.
+  static const _kPrefIsochrones = 'routing.isochronesOn';
 
   Future<void> _restore() async {
     try {
@@ -227,7 +230,7 @@ class _RoutingPageState extends State<RoutingPage> {
           comfortWeight:
               p.getDouble(_kPrefComfortWeight) ?? kComfortWeightDefault,
         );
-        _showIsochrones = p.getBool(_kPrefIsochrones) ?? false;
+        _showIsochrones = p.getBool(_kPrefIsochrones) ?? true;
         _objective = RoutingObjective.values.firstWhere(
           (o) => o.name == p.getString(_kPrefObjective),
           orElse: () => RoutingObjective.fast,
@@ -1893,11 +1896,6 @@ class _RoutingPageState extends State<RoutingPage> {
                 _layerToggle('Viento', _showWind, (v) => _showWind = v),
                 const SizedBox(width: 4),
                 _layerToggle('Olas', _showWaves, (v) => _showWaves = v),
-                const SizedBox(width: 4),
-                _layerToggle('Isócronas', _showIsochrones, (v) {
-                  _showIsochrones = v;
-                  unawaited(_persist());
-                }),
               ],
             ),
           ),
@@ -2684,8 +2682,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
           view: true,
         ),
         const Text(
-          'Una línea por hora; la que se está calculando, en amarillo. '
-          'También en el botón Isócronas de la barra de abajo.',
+          'Una línea por hora; la que se está calculando, en amarillo.',
           style: TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
         ),
       ],

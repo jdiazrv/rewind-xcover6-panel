@@ -275,20 +275,19 @@ void main() {
       });
     }
 
-    testWidgets('isócronas: el interruptor las pinta tras calcular', (t) async {
+    testWidgets('isócronas: encendidas por defecto y sin botón abajo', (t) async {
       final p = _FlatProvider();
       await pump(t, p, const Size(1280, 800), polar: polar);
       await placeDestination(t);
-      await t.tap(find.text('Recalcular'));
+      await t.tap(find.byTooltip('Recalcular'));
       await t.pump();
       await waitRoute(t);
       int polylines() => t
           .widgetList<fm.PolylineLayer>(find.byType(fm.PolylineLayer))
           .fold(0, (a, l) => a + l.polylines.length);
-      final before = polylines();
-      await t.tap(find.text('Isócronas'));
-      await t.pump();
-      expect(polylines(), greaterThan(before));
+      // Ruta + isócronas horarias: más de una línea.
+      expect(polylines(), greaterThan(2));
+      expect(find.text('Isócronas'), findsNothing);
       expect(t.takeException(), isNull);
     });
 
@@ -311,7 +310,7 @@ void main() {
       await t.tap(find.text('Aplicar'));
       await t.pumpAndSettle();
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getBool('routing.isochrones'), isTrue);
+      expect(prefs.getBool('routing.isochronesOn'), isFalse);
       expect(t.takeException(), isNull);
     });
 
