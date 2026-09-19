@@ -7,6 +7,7 @@
 // ruta ya trazada.
 
 import 'dart:async';
+import 'dart:convert' show utf8;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -180,6 +181,7 @@ class _RoutingPageState extends State<RoutingPage> {
   ll.LatLng? _inspectAt;
 
   LandMask? _land;
+  bool _routePendingForLand = false;
 
   @override
   void initState() {
@@ -227,6 +229,17 @@ class _RoutingPageState extends State<RoutingPage> {
     } else {
       _routeStale = s.origin != null && s.destination != null;
     }
+    if (_grid != null &&
+        DateTime.now().toUtc().difference(_grid!.fetchedAt) >
+            const Duration(hours: 1)) {
+      _grid = null;
+      _route = null;
+      _isochrones.clear();
+      _showSummary = false;
+      _routeStale = _origin != null && _destination != null;
+      _routeError =
+          'La previsión anterior ha caducado. Descarga el tiempo y recalcula.';
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final vt = _viewTime;
@@ -251,16 +264,29 @@ class _RoutingPageState extends State<RoutingPage> {
       '${widget.polar?.id}|${widget.polar?.name}|${widget.polarFactorPercent}';
 
   /// Costa del Mediterráneo y el mar Negro (Natural Earth 1:50 M,
-  /// recortada y simplificada, ~50 KB). Sin ella la ruta se calcula
-  /// igual, solo sin evitar tierra — por eso los fallos aquí no se
-  /// enseñan. No lanza el cálculo: la ruta solo se calcula al pulsar
-  /// Recalcular.
+  /// recortada y simplificada, ~50 KB). El cálculo espera a que esté lista.
   Future<void> _loadLand() async {
     try {
-      final raw = await rootBundle.loadString('assets/land/land_med.json');
+      final bytes = await rootBundle.load('assets/land/land_med.json');
       if (!mounted) return;
-      setState(() => _land = LandMask.fromJson(raw));
-    } catch (_) {}
+      final mask = LandMask.fromJson(utf8.decode(bytes.buffer.asUint8List()));
+      if (mask.isEmpty) throw const FormatException('máscara de costa vacía');
+      setState(() => _land = mask);
+      if (_routePendingForLand) {
+        _routePendingForLand = false;
+        unawaited(_computeRoute());
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _land = null;
+        _routePendingForLand = false;
+        _route = null;
+        _isochrones.clear();
+        _routeError =
+            'No se pudo cargar la costa. No se puede calcular una ruta segura.';
+      });
+    }
   }
 
   @override
@@ -311,6 +337,7 @@ class _RoutingPageState extends State<RoutingPage> {
   static const _kPrefAbsWave = 'routing.absWave';
   static const _kPrefObjective = 'routing.objective';
   static const _kPrefMinAwa = 'routing.minAwa';
+  static const _kPrefMinTwa = 'routing.minTwa';
   static const _kPrefCoastNm = 'routing.coastNm';
   static const _kPrefMaxAboveMin = 'routing.maxAboveMin';
   static const _kPrefComfortWeight = 'routing.comfortWeight';
@@ -362,6 +389,7 @@ class _RoutingPageState extends State<RoutingPage> {
                   ? polarTypicalBeatAwaDeg(widget.polar!)
                   : null) ??
               30,
+          minimumTwaDeg: p.getDouble(_kPrefMinTwa) ?? 0,
           minimumCoastDistanceNm: p.getDouble(_kPrefCoastNm) ?? 0.5,
           maxTimeAbovePreferred: Duration(
             minutes: p.getInt(_kPrefMaxAboveMin) ?? 60,
@@ -406,6 +434,7 @@ class _RoutingPageState extends State<RoutingPage> {
       await p.setDouble(_kPrefPrefWave, _constraints.preferredMaxWaveM);
       await p.setDouble(_kPrefAbsWave, _constraints.absoluteMaxWaveM);
       await p.setDouble(_kPrefMinAwa, _constraints.minimumAwaDeg);
+      await p.setDouble(_kPrefMinTwa, _constraints.minimumTwaDeg);
       await p.setDouble(_kPrefCoastNm, _constraints.minimumCoastDistanceNm);
       await p.setInt(
         _kPrefMaxAboveMin,
@@ -528,6 +557,11 @@ class _RoutingPageState extends State<RoutingPage> {
       if (_route != null) setState(() => _route = null);
       return;
     }
+    if (_land == null || _land!.isEmpty) {
+      _routePendingForLand = true;
+      setState(() => _routeError = 'Cargando la costa antes de calcular…');
+      return;
+    }
     final serial = ++_routeSerial;
     setState(() {
       _routing = true;
@@ -553,6 +587,7 @@ class _RoutingPageState extends State<RoutingPage> {
           constraints: _constraints,
           objective: _objective,
           land: _land,
+          requireCompleteWeather: true,
         ),
         (f) {
           if (serial != _routeSerial) return;
@@ -563,6 +598,13 @@ class _RoutingPageState extends State<RoutingPage> {
         // las enseña sin volver a calcular.
         onIsochrone: (iso) {
           if (serial != _routeSerial) return;
+          // Solo se conservan las líneas horarias y la última en vivo.
+          // Los otros tres pasos de cada hora se sustituyen entre sí.
+          if (_isochrones.isNotEmpty &&
+              _isochrones.last.legIndex == iso.legIndex &&
+              _isochrones.last.step % 4 != 3) {
+            _isochrones.removeLast();
+          }
           _isochrones.add(iso);
           _scheduleLiveRepaint();
         },
@@ -650,7 +692,12 @@ class _RoutingPageState extends State<RoutingPage> {
   /// lanzar nada.
   void _markStale() {
     if (_origin != null && _destination != null && widget.polar != null) {
-      setState(() => _routeStale = true);
+      setState(() {
+        _routeStale = true;
+        _route = null;
+        _isochrones.clear();
+        _showSummary = false;
+      });
     }
   }
 
@@ -683,6 +730,7 @@ class _RoutingPageState extends State<RoutingPage> {
   /// El botón de borrar ruta: vuelve a la guía discontinua sin más.
   void _clearRoute() {
     _debounce?.cancel();
+    _routePendingForLand = false;
     setState(() {
       _route = null;
       _routeStale = false;
@@ -698,6 +746,7 @@ class _RoutingPageState extends State<RoutingPage> {
   /// borrar el routing y borrar la ruta").
   void _clearPoints() {
     _debounce?.cancel();
+    _routePendingForLand = false;
     setState(() {
       _origin = null;
       _destination = null;
@@ -866,6 +915,7 @@ class _RoutingPageState extends State<RoutingPage> {
     // pulse. Si cambió el modelo, se baja ya su tiempo (eso sí hace falta
     // para las capas).
     if (modelChanged) {
+      _markStale();
       unawaited(_recompute());
     } else {
       _markStale();
@@ -882,6 +932,13 @@ class _RoutingPageState extends State<RoutingPage> {
         polar = widget.polar,
         box = _weatherBox;
     if (o == null || d == null || polar == null || box == null) return;
+    if (_land == null || _land!.isEmpty) {
+      setState(
+        () => _routeError =
+            'La costa aún no está disponible para planificar salidas.',
+      );
+      return;
+    }
     final waypoints = [
       (lat: o.latitude, lon: o.longitude),
       for (final v in _vias) (lat: v.latitude, lon: v.longitude),
@@ -909,6 +966,7 @@ class _RoutingPageState extends State<RoutingPage> {
             constraints: _constraints,
             objective: _objective,
             land: _land,
+            requireCompleteWeather: true,
           ),
           onProgress,
         ),
@@ -1348,18 +1406,31 @@ class _RoutingPageState extends State<RoutingPage> {
       final iso = _isochrones[i];
       final last = _routing && i == _isochrones.length - 1;
       if (!last && iso.step % 4 != 3) continue;
-      final pts = <ll.LatLng>[
-        for (var k = 0; k + 1 < iso.latLon.length; k += 2)
-          ll.LatLng(iso.latLon[k], iso.latLon[k + 1]),
-      ];
-      if (pts.length < 2) continue;
-      lines.add(
-        fm.Polyline(
-          points: pts,
-          color: last ? cYellow : Colors.white.withValues(alpha: 0.45),
-          strokeWidth: last ? 2 : 1,
-        ),
-      );
+      var pts = <ll.LatLng>[];
+      var breakCursor = 0;
+      void flush() {
+        if (pts.length >= 2) {
+          lines.add(
+            fm.Polyline(
+              points: pts,
+              color: last ? cYellow : Colors.white.withValues(alpha: 0.45),
+              strokeWidth: last ? 2 : 1,
+            ),
+          );
+        }
+        pts = <ll.LatLng>[];
+      }
+
+      for (var k = 0; k + 1 < iso.latLon.length; k += 2) {
+        pts.add(ll.LatLng(iso.latLon[k], iso.latLon[k + 1]));
+        final pointIndex = k ~/ 2;
+        if (breakCursor < iso.breakAfter.length &&
+            iso.breakAfter[breakCursor] == pointIndex) {
+          flush();
+          breakCursor++;
+        }
+      }
+      flush();
     }
     return lines;
   }
@@ -1472,6 +1543,7 @@ class _RoutingPageState extends State<RoutingPage> {
                   row(
                     'Viento',
                     'máx ${s.maxTwsKn.round()} kn'
+                        ' real · aparente ${s.maxAwsKn.round()} kn'
                         '${gust == null ? '' : ' · racha ${gust.round()} kn'}',
                     // La ruta ya no pasa por rachas por encima del máximo;
                     // en amarillo si se queda a menos de 3 kn de él.
@@ -1505,6 +1577,10 @@ class _RoutingPageState extends State<RoutingPage> {
                       cOrange,
                     ),
                   if (s.warning != null) _summaryNote(s.warning!, cOrange),
+                  _summaryNote(
+                    'Costa aproximada: confirma el acceso a puerto en una carta náutica.',
+                    cMuted,
+                  ),
                 ],
               ),
             ),
@@ -2818,6 +2894,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
   late double prefWave = widget.constraints.preferredMaxWaveM;
   late double absWave = widget.constraints.absoluteMaxWaveM;
   late double minAwa = widget.constraints.minimumAwaDeg;
+  late double minTwa = widget.constraints.minimumTwaDeg;
   late double coastNm = widget.constraints.minimumCoastDistanceNm;
   late double maxAboveMin = widget.constraints.maxTimeAbovePreferred.inMinutes
       .toDouble();
@@ -2838,6 +2915,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
     preferredMaxWaveM: prefWave,
     absoluteMaxWaveM: absWave,
     minimumAwaDeg: minAwa,
+    minimumTwaDeg: minTwa,
     minimumCoastDistanceNm: coastNm,
     maxTimeAbovePreferred: Duration(minutes: maxAboveMin.round()),
     comfortWeight: comfortWeight,
@@ -2965,7 +3043,20 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
         const SizedBox(height: 6),
         _groupTitle('LÍMITES'),
         _row(
-          'Viento máx.',
+          'Evitar proa',
+          minTwa,
+          0,
+          90,
+          5,
+          (v) => minTwa = v,
+          minTwa == 0 ? 'No' : '${minTwa.round()}°',
+        ),
+        const Text(
+          '0° no limita; 90° exige viento de través o popa, también a motor.',
+          style: TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
+        ),
+        _row(
+          'Aparente máx.',
           maxAws,
           15,
           40,

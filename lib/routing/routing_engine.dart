@@ -28,11 +28,8 @@ const kHeadingStepDeg = 5.0;
 const kSanityAfterHours = 2.0;
 const kMinUsefulVmgKn = 1.0;
 
-/// Zona de puerto: a menos de esto de una salida o llegada pegada a tierra
-/// (un puerto, una cala), no se aplica la máscara de costa. Es de escala
-/// media (1:50M): un puerto cae a menudo "en tierra" o dentro del margen,
-/// y sin esto la ruta no podía salir o se quedaba rondando la llegada sin
-/// poder terminar (atascada horas al final). Reportado en vivo 2026-09-19.
+/// Zona de puerto: se relaja el margen de costa, pero nunca se permite
+/// cruzar el borde de tierra ni terminar dentro de un polígono.
 const kPortApproachNm = 1.5;
 
 /// Poda clásica de isócronas: sectores de este ancho vistos DESDE LA
@@ -94,6 +91,7 @@ class RoutingConstraints {
     this.maxTimeAbovePreferred = const Duration(minutes: 60),
     this.minimumCoastDistanceNm = 0.5,
     this.minimumAwaDeg = 30,
+    this.minimumTwaDeg = 0,
     this.comfortWeight = kComfortWeightDefault,
     this.maxGustKn = 30,
   });
@@ -115,6 +113,10 @@ class RoutingConstraints {
   /// verdad. Por debajo de este AWA, ese rumbo no es una opción a vela
   /// aunque la polar tenga dato ahí. 30° por defecto.
   final double minimumAwaDeg;
+
+  /// Ángulo mínimo al viento verdadero para cualquier modo, incluido motor.
+  /// Cero deja el comportamiento anterior; 90 evita navegar contra viento.
+  final double minimumTwaDeg;
 
   /// Margen a la costa (máscara de tierra de Natural Earth 1:50 M): ningún
   /// tramo pasa a menos de esto de tierra. La máscara es de escala media,
@@ -140,6 +142,7 @@ class RoutingConstraints {
     Duration? maxTimeAbovePreferred,
     double? minimumCoastDistanceNm,
     double? minimumAwaDeg,
+    double? minimumTwaDeg,
     double? comfortWeight,
     double? maxGustKn,
   }) => RoutingConstraints(
@@ -153,6 +156,7 @@ class RoutingConstraints {
     minimumCoastDistanceNm:
         minimumCoastDistanceNm ?? this.minimumCoastDistanceNm,
     minimumAwaDeg: minimumAwaDeg ?? this.minimumAwaDeg,
+    minimumTwaDeg: minimumTwaDeg ?? this.minimumTwaDeg,
     comfortWeight: comfortWeight ?? this.comfortWeight,
     maxGustKn: maxGustKn ?? this.maxGustKn,
   );
@@ -316,6 +320,7 @@ class RouteRequest {
     required this.constraints,
     required this.objective,
     this.land,
+    this.requireCompleteWeather = false,
   });
 
   final List<({double lat, double lon})> waypoints;
@@ -329,6 +334,10 @@ class RouteRequest {
   /// null o vacía = sin máscara de costa (la ruta se calcula igual, solo
   /// sin evitar tierra).
   final LandMask? land;
+
+  /// La pantalla de producción exige viento, rachas y ola para todos los
+  /// tramos. El valor por defecto conserva los usos históricos del motor.
+  final bool requireCompleteWeather;
 }
 
 /// Una isócrona: los puntos alcanzables a una misma hora, ordenados por
@@ -340,6 +349,7 @@ class RouteIsochrone {
     required this.step,
     required this.time,
     required this.latLon,
+    this.breakAfter = const [],
   });
   final int legIndex;
 
@@ -347,6 +357,9 @@ class RouteIsochrone {
   final int step;
   final DateTime time;
   final List<double> latLon;
+
+  /// Índices tras los que no hay conexión navegable con el siguiente punto.
+  final List<int> breakAfter;
 }
 
 /// Cálculo síncrono completo. Función de nivel superior para poder
@@ -497,6 +510,51 @@ Iterable<Object?> _routeSteps(
     reachedIndex = leg + 1;
   }
 
+  // Segunda comprobación solo de la ruta elegida: evita aceptar un tramo
+  // que entre en otra celda/hora con peor tiempo sin multiplicar el coste
+  // por todos los rumbos explorados.
+  if (req.requireCompleteWeather) {
+    for (var i = 0; i < segments.length; i++) {
+      final s = segments[i];
+      String? issue;
+      for (final fraction in const [0.5, 1.0]) {
+        final p = s.positionAt(fraction);
+        final t = s.startTime.add(
+          Duration(
+            milliseconds: (s.duration.inMilliseconds * fraction).round(),
+          ),
+        );
+        final wx = req.grid.sample(p.lat, p.lon, t);
+        if (wx == null) {
+          issue = 'falta previsión dentro del tramo';
+        } else if (wx.waveHeightM == null || wx.gustKn == null) {
+          issue = 'faltan datos de ola o rachas dentro del tramo';
+        } else if (wx.waveHeightM! > req.constraints.absoluteMaxWaveM) {
+          issue = 'la ola supera el máximo dentro del tramo';
+        } else if (wx.gustKn! > req.constraints.maxGustKn) {
+          issue = 'las rachas superan el máximo dentro del tramo';
+        } else if (trueWindAngle(s.headingDeg, wx.twdDeg) <
+            req.constraints.minimumTwaDeg) {
+          issue = 'el viento queda demasiado de proa dentro del tramo';
+        } else if (apparentWind(
+              twsKn: wx.twsKn,
+              twdDeg: wx.twdDeg,
+              headingDeg: s.headingDeg,
+              stwKn: s.stwKn,
+            ).awsKn >
+            req.constraints.maxAwsKn) {
+          issue = 'el viento aparente supera el máximo dentro del tramo';
+        }
+        if (issue != null) break;
+      }
+      if (issue != null) {
+        reachedIndex = math.min(reachedIndex, s.waypointIndex);
+        segments.removeRange(i, segments.length);
+        warning = 'Ruta detenida antes del tramo ${i + 1}: $issue.';
+        break;
+      }
+    }
+  }
   if (onProgress != null && shown < 1) onProgress(1.0);
   yield RouteResult(
     segments: segments,
@@ -784,7 +842,8 @@ Iterable<_LegResult?> _routeLegSteps({
   void Function(RouteIsochrone)? onIsochrone,
 }) sync* {
   final directNm = distanceNm(start.lat, start.lon, target.lat, target.lon);
-  if (directNm < 0.05) {
+  // Solo puntos realmente coincidentes: 0,05 M eran casi 100 m sin navegar.
+  if (directNm < 1e-5) {
     yield _LegResult(const [], true, null);
     return;
   }
@@ -803,7 +862,6 @@ Iterable<_LegResult?> _routeLegSteps({
     target.lat,
     target.lon,
   );
-  const arrivalNm = 0.35;
 
   // Solo la costa que de verdad puede tocar esta pierna: en mar abierta,
   // lejos de cualquiera de los polígonos, esto deja la lista vacía y cada
@@ -899,17 +957,13 @@ Iterable<_LegResult?> _routeLegSteps({
     // dentro (la pierna "no se completaba") y la ETA iba de 15 en 15 min.
     _Node? finish;
     for (final node in frontier) {
-      if (node.remainingNm <= arrivalNm) {
-        yield _LegResult(_backtrack(node), true, null);
-        return;
-      }
       final sample = req.grid.sampleMs(node.lat, node.lon, node.timeMs);
       if (sample == null) {
         // Fuera de la zona o de las horas del tiempo descargado. Antes se
         // motoraba en silencio; ahora se marca el tramo como "sin
         // previsión" (la pantalla lo avisa) y, sin motor, el nodo muere.
         ctx.sawNoForecast = true;
-        if (req.constraints.allowMotor) {
+        if (req.constraints.allowMotor && !req.requireCompleteWeather) {
           final toTarget = node.remainingNm;
           final bearing = bearingDeg(
             node.lat,
@@ -955,12 +1009,20 @@ Iterable<_LegResult?> _routeLegSteps({
       if (sample.twsKn > req.constraints.maxAwsKn + 40) continue; // absurdo
       // Límites que no dependen del rumbo: se miran una vez por nodo.
       final gust = sample.gustKn;
+      if (req.requireCompleteWeather && gust == null) {
+        ctx.sawMissingGust = true;
+        continue;
+      }
       if (gust != null && gust > req.constraints.maxGustKn) {
         ctx.rejectedGust++;
         if (gust > ctx.maxGustSeen) ctx.maxGustSeen = gust;
         continue;
       }
       final hs = sample.waveHeightM;
+      if (req.requireCompleteWeather && hs == null) {
+        ctx.sawMissingWave = true;
+        continue;
+      }
       if (hs != null && hs > req.constraints.absoluteMaxWaveM) {
         ctx.rejectedWave++;
         if (hs > ctx.maxWaveSeen) ctx.maxWaveSeen = hs;
@@ -1024,7 +1086,11 @@ Iterable<_LegResult?> _routeLegSteps({
       if (ctx.sawNoForecast) {
         reason =
             'sin previsión más allá (fuera de la zona o de las horas '
-            'descargadas) y sin motor permitido';
+            'descargadas)';
+      } else if (ctx.sawMissingWave || ctx.sawMissingGust) {
+        reason = ctx.sawMissingWave
+            ? 'faltan datos de oleaje para comprobar el límite de ola'
+            : 'faltan datos de rachas para comprobar el límite de viento';
       } else if (ctx.droppedForTimeAbovePreferred) {
         reason =
             'haría falta más de ${_minutesText(ctx.maxMinutesAbovePreferred!)} '
@@ -1101,14 +1167,35 @@ Iterable<_LegResult?> _routeLegSteps({
     }
     if (onIsochrone != null) {
       final keys = next.fan.keys.toList()..sort();
+      final fan = [for (final k in keys) next.fan[k]!];
+      final breaks = <int>[];
+      final cosLat = math.cos(ctx.start.lat * math.pi / 180);
+      const maxGapDeg2 = 0.05 * 0.05; // 3 M, sin trigonometría por par.
+      for (var i = 0; i + 1 < fan.length; i++) {
+        final a = fan[i], b = fan[i + 1];
+        final dLat = a.lat - b.lat;
+        final dLon = (a.lon - b.lon) * cosLat;
+        if (dLat * dLat + dLon * dLon > maxGapDeg2 ||
+            (ctx.landIndex?.segmentBlocked(
+                  a.lat,
+                  a.lon,
+                  b.lat,
+                  b.lon,
+                  clearanceNm: 0,
+                ) ??
+                false)) {
+          breaks.add(i);
+        }
+      }
       onIsochrone(
         RouteIsochrone(
           legIndex: legIndex,
           step: step,
           time: frontier.first.time,
           latLon: [
-            for (final k in keys) ...[next.fan[k]!.lat, next.fan[k]!.lon],
+            for (final node in fan) ...[node.lat, node.lon],
           ],
+          breakAfter: breaks,
         ),
       );
     }
@@ -1189,6 +1276,7 @@ class _LegContext {
 
   /// Para explicar por qué una pierna no se completa.
   bool sawNoForecast = false;
+  bool sawMissingWave = false, sawMissingGust = false;
   bool droppedForTimeAbovePreferred = false;
 
   /// Por qué se descartan nodos y rumbos, para explicar una pierna que no
@@ -1199,8 +1287,7 @@ class _LegContext {
 
 /// ¿El tramo de [startLat]/[startLon] al punto que resulta de navegar
 /// [distNm] millas al rumbo [headingDeg] pisa tierra o se queda a menos
-/// del margen de seguridad? Sin máscara (null o vacía) nunca bloquea:
-/// la ruta se calcula igual, solo sin evitar la costa.
+/// del margen de seguridad?
 bool _inPortZone(_LegContext ctx, double lat, double lon) =>
     (ctx.startNearLand &&
         distanceNm(lat, lon, ctx.start.lat, ctx.start.lon) <=
@@ -1210,12 +1297,7 @@ bool _inPortZone(_LegContext ctx, double lat, double lon) =>
             kPortApproachNm);
 
 /// ¿El tramo de ([lat], [lon]) a [end] cruza la costa o pasa a menos del
-/// margen? Comprobación exacta con el índice de la pierna. No se mira si
-/// el tramo va entero dentro de la zona de puerto de una salida o llegada
-/// pegada a tierra; al SALIR de esa zona el punto de partida puede estar
-/// "en tierra" (costa aproximada), así que además el final no puede estar
-/// en tierra. Sin máscara nunca bloquea: la ruta se calcula igual, solo
-/// sin evitar la costa.
+/// margen? En la zona de puerto se relaja el margen, nunca el cruce real.
 bool _landBlocked(
   _LegContext ctx,
   double lat,
@@ -1225,7 +1307,10 @@ bool _landBlocked(
   final idx = ctx.landIndex;
   if (idx == null) return false;
   final startInZone = _inPortZone(ctx, lat, lon);
-  if (startInZone && _inPortZone(ctx, end.lat, end.lon)) return false;
+  if (startInZone && _inPortZone(ctx, end.lat, end.lon)) {
+    return ctx.legLand!.isLand(end.lat, end.lon) ||
+        idx.segmentBlocked(lat, lon, end.lat, end.lon, clearanceNm: 0);
+  }
   if (idx.segmentBlocked(lat, lon, end.lat, end.lon)) return true;
   if (startInZone && ctx.legLand!.isLand(end.lat, end.lon)) return true;
   return false;
@@ -1247,6 +1332,7 @@ _Node? _headingCandidate(
   final sample = wx.sample;
   final c = ctx.req.constraints;
   final twa = trueWindAngle(headingDeg, sample.twdDeg);
+  if (twa < c.minimumTwaDeg) return null;
   final sailStw = PolarTable.speedAtCurve(wx.curve, twa);
   final sailSpeed = sailStw == null ? null : sailStw * wx.factor;
 

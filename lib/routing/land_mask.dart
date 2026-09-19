@@ -160,7 +160,10 @@ class LandMask {
     final cosLat = math.cos(lat * math.pi / 180).abs().clamp(0.15, 1.0);
     for (final p in polygons) {
       if (!p.bboxContains(lon, lat, marginDeg)) continue;
-      if (_pointInRing(lon, lat, p.ring)) return true;
+      if (_pointInRing(lon, lat, p.ring) &&
+          !p.holes.any((h) => _pointInRing(lon, lat, h))) {
+        return true;
+      }
       final minDeg = _minDistToRingDeg(lon, lat, p.ring, cosLat);
       if (minDeg * 60 <= marginNm) return true;
       for (final h in p.holes) {
@@ -341,7 +344,13 @@ class LandSegmentIndex {
   /// el motor solo sale de puntos de agua (o de la zona de puerto, que no
   /// se comprueba), y un tramo que empieza en el agua y no toca ningún
   /// borde sigue en el agua.
-  bool segmentBlocked(double lat1, double lon1, double lat2, double lon2) {
+  bool segmentBlocked(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2, {
+    double? clearanceNm,
+  }) {
     if (_ax.isEmpty) return false;
     final minY = math.min(lat1, lat2) - _latPadDeg;
     final maxY = math.max(lat1, lat2) + _latPadDeg;
@@ -358,7 +367,7 @@ class LandSegmentIndex {
         .abs()
         .clamp(0.15, 1.0);
     final px1 = lon1 * cosLat, px2 = lon2 * cosLat;
-    final marginDeg = marginNm / 60;
+    final marginDeg = (clearanceNm ?? marginNm) / 60;
     final q = ++_query;
     if (q == 0x7fffffff) {
       _stamp.fillRange(0, _stamp.length, 0);

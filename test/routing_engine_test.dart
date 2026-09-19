@@ -100,6 +100,21 @@ void main() {
   final departure = DateTime.utc(2026, 9, 19, 6);
 
   group('rumbo directo posible', () {
+    test('evitar viento de proa se aplica también al motor', () {
+      final dest = destinationNm(37.4, 24.0, 0, 5);
+      final grid = flatGrid(twsKn: 14, twdDeg: 0);
+      final normal = computeRoute(request(grid, dest));
+      final avoid = computeRoute(
+        request(
+          grid,
+          dest,
+          constraints: const RoutingConstraints(minimumTwaDeg: 90),
+        ),
+      );
+      expect(normal.complete, isTrue);
+      expect(avoid.complete, isFalse);
+    });
+
     test('viento de través: ruta recta, a vela', () {
       // Salida a 37.4N/24.0E, llegada 10 M al Este; viento del N (a
       // través): TWA=90°, sobradamente navegable, sin necesidad de bordo.
@@ -782,35 +797,37 @@ void main() {
   });
 
   group('llegada o salida en puerto', () {
-    test(
-      'llegada "en tierra" en la costa aproximada: termina en la bocana',
-      () {
-        // Cabo de tierra cuyo borde toca justo la llegada (como un puerto que
-        // en la costa 1:50M cae dentro de tierra).
-        final land = LandMask([
-          const LandPolygon(
-            [(24.30, 37.30), (24.50, 37.30), (24.50, 37.50), (24.30, 37.50)],
-            [],
-            (24.30, 37.30, 24.50, 37.50),
-          ),
-        ]);
-        final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 20);
-        final r = computeRoute(
-          RouteRequest(
-            waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.305)],
-            departure: departure,
-            grid: grid,
-            polar: dehler47,
-            polarFactorPercent: 100,
-            constraints: const RoutingConstraints(),
-            objective: RoutingObjective.fast,
-            land: land,
-          ),
-        );
-        expect(r.complete, isTrue, reason: r.warning);
-        expect(r.totalDuration.inHours, lessThan(4));
-      },
-    );
+    test('llegada dentro de tierra: aproxima sin declarar llegada', () {
+      // Cabo de tierra cuyo borde toca justo la llegada (como un puerto que
+      // en la costa 1:50M cae dentro de tierra).
+      final land = LandMask([
+        const LandPolygon(
+          [(24.30, 37.30), (24.50, 37.30), (24.50, 37.50), (24.30, 37.50)],
+          [],
+          (24.30, 37.30, 24.50, 37.50),
+        ),
+      ]);
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 20);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.305)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          land: land,
+        ),
+      );
+      expect(r.complete, isFalse);
+      expect(r.segments, isNotEmpty);
+      expect(r.warning, contains('llegada'));
+      for (final s in r.segments) {
+        expect(land.isLand(s.endLat, s.endLon), isFalse);
+      }
+      expect(r.totalDuration.inHours, lessThan(4));
+    });
 
     test('si de verdad no se puede llegar, para pronto y lo dice', () {
       // Llegada en una laguna cerrada: tierra alrededor a más de la zona
@@ -981,6 +998,126 @@ void main() {
   });
 
   group('máscara de costa', () {
+    test('las isócronas cortan sus conexiones sobre tierra', () {
+      final land = LandMask([
+        const LandPolygon(
+          [(24.05, 37.37), (24.09, 37.37), (24.09, 37.43), (24.05, 37.43)],
+          [],
+          (24.05, 37.37, 24.09, 37.43),
+        ),
+      ]);
+      final index = LandSegmentIndex.build(
+        land,
+        south: 37,
+        west: 23.8,
+        north: 37.8,
+        east: 24.5,
+        marginNm: 0,
+      );
+      var breaks = 0;
+      computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 23.95), (lat: 37.4, lon: 24.20)],
+          departure: departure,
+          grid: flatGrid(twsKn: 14, twdDeg: 0),
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          land: land,
+        ),
+        onIsochrone: (iso) {
+          breaks += iso.breakAfter.length;
+          for (var i = 0; i + 3 < iso.latLon.length; i += 2) {
+            final pointIndex = i ~/ 2;
+            if (iso.breakAfter.contains(pointIndex)) continue;
+            expect(
+              index.segmentBlocked(
+                iso.latLon[i],
+                iso.latLon[i + 1],
+                iso.latLon[i + 2],
+                iso.latLon[i + 3],
+              ),
+              isFalse,
+            );
+          }
+        },
+      );
+      expect(breaks, greaterThan(0));
+    });
+
+    test('zona de puerto relaja margen pero no deja cruzar tierra', () {
+      final land = LandMask([
+        const LandPolygon(
+          [(24.005, 37.38), (24.040, 37.38), (24.040, 37.42), (24.005, 37.42)],
+          [],
+          (24.005, 37.38, 24.040, 37.42),
+        ),
+      ]);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.042)],
+          departure: departure,
+          grid: flatGrid(twsKn: 14, twdDeg: 0),
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          land: land,
+        ),
+      );
+      final index = LandSegmentIndex.build(
+        land,
+        south: 37.2,
+        west: 23.9,
+        north: 37.6,
+        east: 24.2,
+        marginNm: 0,
+      );
+      for (final s in r.segments) {
+        expect(
+          index.segmentBlocked(s.startLat, s.startLon, s.endLat, s.endLon),
+          isFalse,
+        );
+        expect(land.isLand(s.endLat, s.endLon), isFalse);
+      }
+    });
+
+    test('un tramo corto exige llegar exactamente al destino', () {
+      for (final lon in [24.0063, 24.0005]) {
+        final end = (lat: 37.4, lon: lon);
+        final r = computeRoute(request(flatGrid(twsKn: 14, twdDeg: 0), end));
+        expect(r.complete, isTrue, reason: r.warning);
+        expect(r.segments, isNotEmpty);
+        expect(
+          distanceNm(
+            r.segments.last.endLat,
+            r.segments.last.endLon,
+            end.lat,
+            end.lon,
+          ),
+          lessThan(0.01),
+        );
+      }
+    });
+
+    test('sin datos de ola la ruta estricta queda incompleta', () {
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.1)],
+          departure: departure,
+          grid: flatGrid(twsKn: 14, twdDeg: 0, gustKn: 18),
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          requireCompleteWeather: true,
+        ),
+      );
+      expect(r.complete, isFalse);
+      expect(r.warning, contains('oleaje'));
+    });
+
     test('un istmo entre salida y llegada obliga a rodearlo', () {
       // Franja de tierra Norte-Sur cruzando la ruta directa Oeste-Este.
       final land = LandMask([
