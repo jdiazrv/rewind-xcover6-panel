@@ -78,7 +78,12 @@ const DEFAULTS = {
   registerAsHistoryProvider: true,
   retentionHours: 72,
   bucketSeconds: 15,
-  flushMinutes: 60,
+  // Cada 10 min como mucho se pierde si el barco se queda sin corriente de
+  // golpe. Antes 60: en DRAGUEUR se perdieron casi 3 h el 2026-09-19 con
+  // varios reinicios seguidos de Signal K (que no avisa a los plugins al
+  // pararse). Una escritura comprimida cada 10 min sigue siendo nada para
+  // la SD comparado con KIP/QuestDB.
+  flushMinutes: 10,
   maxSeries: 400,
   maxRowsPerQuery: 2000,
   includePaths: DEFAULT_INCLUDE,
@@ -116,7 +121,9 @@ function normalizeOptions(raw) {
     registerAsHistoryProvider: o.registerAsHistoryProvider !== false,
     retentionHours: clampNumber(o.retentionHours, DEFAULTS.retentionHours, 1, 24 * 14),
     bucketSeconds: clampNumber(o.bucketSeconds, DEFAULTS.bucketSeconds, 1, 600),
-    flushMinutes: clampNumber(o.flushMinutes, DEFAULTS.flushMinutes, 5, 24 * 60),
+    // Tope de 15 min aunque la config guardada diga más (las apps hasta la
+    // 1.4.254 guardaban 60 por defecto).
+    flushMinutes: clampNumber(o.flushMinutes, DEFAULTS.flushMinutes, 5, 15),
     maxSeries: clampNumber(o.maxSeries, DEFAULTS.maxSeries, 10, 5000),
     maxRowsPerQuery: clampNumber(o.maxRowsPerQuery, DEFAULTS.maxRowsPerQuery, 50, 100000),
     includePaths: listOption(o.includePaths, DEFAULTS.includePaths),

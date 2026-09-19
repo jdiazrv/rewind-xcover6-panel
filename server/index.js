@@ -242,7 +242,7 @@ module.exports = function (app) {
               'Minutos entre escrituras a disco (lo no escrito se pierde si se corta la corriente de golpe)',
             default: HISTORY_DEFAULTS.flushMinutes,
             minimum: 5,
-            maximum: 1440,
+            maximum: 15,
           },
           maxSeries: {
             type: 'number',
@@ -338,6 +338,8 @@ module.exports = function (app) {
   let recorderFlushTimer = null;
   let recorderDeltaListener = null;
   let recorderProviderRegistered = false;
+  let recorderExitFlush = null;
+  let recorderSignalFlush = null;
 
   function startHistoryRecorder(historyOptions) {
     const dataDir =
@@ -377,6 +379,24 @@ module.exports = function (app) {
       recorder.options.flushMinutes * 60000,
     );
     recorderFlushTimer.unref?.();
+    // Signal K NO llama a plugin.stop() cuando el servicio se reinicia o se
+    // apaga (systemctl restart/stop le manda SIGTERM y el proceso sale): sin
+    // esto se perdía todo lo grabado desde el último volcado. flush() es
+    // síncrono (writeFileSync), así que vale también en 'exit'.
+    recorderExitFlush = () => {
+      try {
+        if (recorder) recorder.flush();
+      } catch (_) {}
+    };
+    recorderSignalFlush = (signal) => {
+      recorderExitFlush();
+      // Si nadie más escucha esta señal, se sale como habría hecho Node
+      // por defecto (escuchar la señal anula la salida por defecto).
+      if (process.listenerCount(signal) <= 1) process.exit(128 + (signal === 'SIGINT' ? 2 : 15));
+    };
+    process.on('exit', recorderExitFlush);
+    process.on('SIGTERM', recorderSignalFlush);
+    process.on('SIGINT', recorderSignalFlush);
     if (
       recorder.options.registerAsHistoryProvider &&
       typeof app.registerHistoryApiProvider === 'function'
@@ -391,6 +411,13 @@ module.exports = function (app) {
 
   function stopHistoryRecorder() {
     if (!recorder) return;
+    if (recorderExitFlush) process.removeListener('exit', recorderExitFlush);
+    if (recorderSignalFlush) {
+      process.removeListener('SIGTERM', recorderSignalFlush);
+      process.removeListener('SIGINT', recorderSignalFlush);
+    }
+    recorderExitFlush = null;
+    recorderSignalFlush = null;
     if (recorderDeltaListener) {
       app.signalk.removeListener('delta', recorderDeltaListener);
     }

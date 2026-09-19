@@ -33,3 +33,58 @@ test('older device revisions cannot overwrite the latest anchor state', () => {
   assert.equal(acceptsRevision(2000, 2001), true);
   assert.equal(acceptsRevision(2000, Number.NaN), false);
 });
+
+test('el histórico se vuelca a disco al terminar el proceso (Signal K no llama a stop)', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { EventEmitter } = require('events');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rewind-hist-'));
+  const app = {
+    selfContext: 'vessels.self',
+    signalk: new EventEmitter(),
+    subscriptionmanager: { subscribe() {} },
+    getDataDirPath: () => dir,
+    getSelfPath: () => undefined,
+    handleMessage() {},
+    setPluginStatus() {},
+    setPluginError() {},
+    debug() {},
+    error() {},
+  };
+  const plugin = require('./index')(app);
+  const before = {
+    exit: process.listeners('exit').slice(),
+    term: process.listeners('SIGTERM').slice(),
+  };
+  plugin.start({
+    history: {
+      enabled: true,
+      includePaths: ['navigation.speedOverGround'],
+      registerAsHistoryProvider: false,
+      flushMinutes: 60, // config vieja: se acota a 15
+    },
+  });
+  try {
+    const exitFlush = process.listeners('exit').find((l) => !before.exit.includes(l));
+    assert.ok(exitFlush, 'escucha la salida del proceso');
+    assert.ok(
+      process.listeners('SIGTERM').some((l) => !before.term.includes(l)),
+      'escucha SIGTERM (systemctl restart)',
+    );
+    app.signalk.emit('delta', {
+      context: 'vessels.self',
+      updates: [{ timestamp: new Date().toISOString(), values: [{ path: 'navigation.speedOverGround', value: 3.1 }] }],
+    });
+    const hoursDir = path.join(dir, 'hours');
+    const files = () => (fs.existsSync(hoursDir) ? fs.readdirSync(hoursDir) : []);
+    assert.equal(files().filter((f) => f.endsWith('.json.gz')).length, 0, 'aún en memoria');
+    exitFlush();
+    assert.equal(files().filter((f) => f.endsWith('.json.gz')).length, 1, 'volcado al salir');
+  } finally {
+    plugin.stop();
+  }
+  assert.deepEqual(process.listeners('exit'), before.exit, 'al parar deja de escuchar');
+  assert.deepEqual(process.listeners('SIGTERM'), before.term);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

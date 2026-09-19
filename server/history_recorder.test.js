@@ -46,6 +46,8 @@ test('las opciones absurdas se acotan para no machacar la SD', () => {
   assert.equal(o.flushMinutes, 5);
   assert.equal(o.bucketSeconds, 1);
   assert.equal(o.retentionHours, 336);
+  assert.equal(normalizeOptions({ flushMinutes: 60 }).flushMinutes, 15, 'volcado cada 15 min como mucho');
+  assert.equal(normalizeOptions({}).flushMinutes, 10);
   assert.equal(normalizeOptions({}).enabled, false, 'apagado salvo que se active');
 });
 
