@@ -323,7 +323,10 @@ void main() {
       double minutesInBadSea(RouteResult r) => r.segments
           .where((s) => (s.waveHeightM ?? 0) > 0.6)
           .fold(0.0, (a, s) => a + s.duration.inMinutes);
-      expect(minutesInBadSea(comfort), lessThanOrEqualTo(minutesInBadSea(fast)));
+      expect(
+        minutesInBadSea(comfort),
+        lessThanOrEqualTo(minutesInBadSea(fast)),
+      );
     });
   });
 
@@ -345,17 +348,16 @@ void main() {
         ),
       );
       expect(result.complete, isTrue);
-      expect(
-        result.segments.map((s) => s.waypointIndex).toSet(),
-        {0, 1, 2, 3},
-      );
+      expect(result.segments.map((s) => s.waypointIndex).toSet(), {0, 1, 2, 3});
     });
 
     test('rechaza más de 10 puntos', () {
       expect(
         () => computeRoute(
           RouteRequest(
-            waypoints: [for (var i = 0; i < 11; i++) (lat: 37.0 + i * 0.01, lon: 24.0)],
+            waypoints: [
+              for (var i = 0; i < 11; i++) (lat: 37.0 + i * 0.01, lon: 24.0),
+            ],
             departure: departure,
             grid: flatGrid(twsKn: 10, twdDeg: 0),
             polar: dehler47,
@@ -370,30 +372,33 @@ void main() {
   });
 
   group('AWA mínimo', () {
-    test('sin motor, abre el bordo: ningún tramo a vela más cerrado que el mínimo', () {
-      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
-      final dest = destinationNm(37.4, 24.0, 0, 12); // a barlovento
-      const minAwa = 32.0;
-      final result = computeRoute(
-        RouteRequest(
-          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
-          departure: departure,
-          grid: grid,
-          polar: dehler47,
-          polarFactorPercent: 100,
-          constraints: const RoutingConstraints(
-            allowMotor: false,
-            minimumAwaDeg: minAwa,
+    test(
+      'sin motor, abre el bordo: ningún tramo a vela más cerrado que el mínimo',
+      () {
+        final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+        final dest = destinationNm(37.4, 24.0, 0, 12); // a barlovento
+        const minAwa = 32.0;
+        final result = computeRoute(
+          RouteRequest(
+            waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+            departure: departure,
+            grid: grid,
+            polar: dehler47,
+            polarFactorPercent: 100,
+            constraints: const RoutingConstraints(
+              allowMotor: false,
+              minimumAwaDeg: minAwa,
+            ),
+            objective: RoutingObjective.fast,
           ),
-          objective: RoutingObjective.fast,
-        ),
-      );
-      expect(result.complete, isTrue); // no se queda parado: abre el bordo
-      for (final s in result.segments) {
-        expect(s.mode, PropulsionMode.sailing);
-        expect(s.awaDeg.abs(), greaterThanOrEqualTo(minAwa - 0.01));
-      }
-    });
+        );
+        expect(result.complete, isTrue); // no se queda parado: abre el bordo
+        for (final s in result.segments) {
+          expect(s.mode, PropulsionMode.sailing);
+          expect(s.awaDeg.abs(), greaterThanOrEqualTo(minAwa - 0.01));
+        }
+      },
+    );
 
     test('con motor, un rumbo más cerrado que el mínimo nunca va a vela', () {
       final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
@@ -411,38 +416,43 @@ void main() {
         ),
       );
       expect(result.complete, isTrue);
-      for (final s in result.segments.where((s) => s.mode == PropulsionMode.sailing)) {
+      for (final s in result.segments.where(
+        (s) => s.mode == PropulsionMode.sailing,
+      )) {
         expect(s.awaDeg.abs(), greaterThanOrEqualTo(minAwa - 0.01));
       }
     });
   });
 
   group('cálculo en isolate', () {
-    test('avisa del progreso real y da el mismo resultado que el síncrono', () async {
-      final grid = flatGrid(twsKn: 14, twdDeg: 0);
-      final dest = destinationNm(37.4, 24.0, 90, 10);
-      final req = RouteRequest(
-        waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
-        departure: departure,
-        grid: grid,
-        polar: dehler47,
-        polarFactorPercent: 100,
-        constraints: const RoutingConstraints(),
-        objective: RoutingObjective.fast,
-      );
-      final progress = <double>[];
-      final result = await computeRouteInIsolate(req, progress.add);
-      expect(result.complete, isTrue);
-      expect(progress, isNotEmpty);
-      // Sube (no baja) y no se sale de 0–1.
-      expect(progress.every((p) => p >= 0 && p <= 1), isTrue);
-      for (var i = 1; i < progress.length; i++) {
-        expect(progress[i], greaterThanOrEqualTo(progress[i - 1]));
-      }
-      final sync = computeRoute(req);
-      expect(result.segments.length, sync.segments.length);
-      expect(result.totalNm, closeTo(sync.totalNm, 0.01));
-    });
+    test(
+      'avisa del progreso real y da el mismo resultado que el síncrono',
+      () async {
+        final grid = flatGrid(twsKn: 14, twdDeg: 0);
+        final dest = destinationNm(37.4, 24.0, 90, 10);
+        final req = RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+        );
+        final progress = <double>[];
+        final result = await computeRouteInIsolate(req, progress.add);
+        expect(result.complete, isTrue);
+        expect(progress, isNotEmpty);
+        // Sube (no baja) y no se sale de 0–1.
+        expect(progress.every((p) => p >= 0 && p <= 1), isTrue);
+        for (var i = 1; i < progress.length; i++) {
+          expect(progress[i], greaterThanOrEqualTo(progress[i - 1]));
+        }
+        final sync = computeRoute(req);
+        expect(result.segments.length, sync.segments.length);
+        expect(result.totalNm, closeTo(sync.totalNm, 0.01));
+      },
+    );
   });
 
   group('maniobras', () {
@@ -592,11 +602,10 @@ void main() {
       final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
       final dest = destinationNm(37.4, 24.0, 0, 18); // a barlovento
       final r = computeRoute(
-        request(
-          grid,
-          (lat: dest.lat, lon: dest.lon),
-          constraints: const RoutingConstraints(allowMotor: false),
-        ),
+        request(grid, (
+          lat: dest.lat,
+          lon: dest.lon,
+        ), constraints: const RoutingConstraints(allowMotor: false)),
       );
       expect(r.complete, isTrue);
       final tacks = r.segments.where((s) => s.maneuver == ManeuverKind.tack);
@@ -657,27 +666,155 @@ void main() {
   });
 
   group('isócronas', () {
-    test('se emiten en orden, con puntos, y también desde el isolate', () async {
-      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
-      final dest = destinationNm(37.4, 24.0, 0, 12);
-      final req = request(
-        grid,
-        (lat: dest.lat, lon: dest.lon),
-        constraints: const RoutingConstraints(allowMotor: false),
-      );
-      final sync = <RouteIsochrone>[];
-      computeRoute(req, onIsochrone: sync.add);
-      expect(sync.length, greaterThan(4));
-      for (var i = 1; i < sync.length; i++) {
-        expect(sync[i].time.isAfter(sync[i - 1].time), isTrue);
-      }
-      expect(sync.every((iso) => iso.latLon.length >= 2), isTrue);
-      expect(sync.every((iso) => iso.latLon.length.isEven), isTrue);
+    test(
+      'se emiten en orden, con puntos, y también desde el isolate',
+      () async {
+        final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+        final dest = destinationNm(37.4, 24.0, 0, 12);
+        final req = request(grid, (
+          lat: dest.lat,
+          lon: dest.lon,
+        ), constraints: const RoutingConstraints(allowMotor: false));
+        final sync = <RouteIsochrone>[];
+        computeRoute(req, onIsochrone: sync.add);
+        expect(sync.length, greaterThan(4));
+        for (var i = 1; i < sync.length; i++) {
+          expect(sync[i].time.isAfter(sync[i - 1].time), isTrue);
+        }
+        expect(sync.every((iso) => iso.latLon.length >= 2), isTrue);
+        expect(sync.every((iso) => iso.latLon.length.isEven), isTrue);
 
-      final live = <RouteIsochrone>[];
-      final r = await computeRouteInIsolate(req, (_) {}, onIsochrone: live.add);
+        final live = <RouteIsochrone>[];
+        final r = await computeRouteInIsolate(
+          req,
+          (_) {},
+          onIsochrone: live.add,
+        );
+        expect(r.complete, isTrue);
+        expect(live.length, sync.length);
+      },
+    );
+  });
+
+  group('sin solución: se dice la causa', () {
+    test('rachas por encima del máximo en toda la zona', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, gustKn: 34);
+      final dest = destinationNm(37.4, 24.0, 90, 10);
+      final r = computeRoute(request(grid, (lat: dest.lat, lon: dest.lon)));
+      expect(r.complete, isFalse);
+      expect(r.warning, contains('rachas de hasta 34 kn'));
+      expect(r.warning, contains('Racha máx.'));
+      // Con un máximo mayor sí hay ruta.
+      final ok = computeRoute(
+        request(grid, (
+          lat: dest.lat,
+          lon: dest.lon,
+        ), constraints: const RoutingConstraints(maxGustKn: 40)),
+      );
+      expect(ok.complete, isTrue);
+    });
+
+    test('ola por encima del máximo: lo dice con sus números', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, waveHeightM: 1.5);
+      final dest = destinationNm(37.4, 24.0, 90, 10);
+      final r = computeRoute(request(grid, (lat: dest.lat, lon: dest.lon)));
+      expect(r.complete, isFalse);
+      expect(r.warning, contains('ola de hasta 1.5 m'));
+    });
+
+    test('la ruta nunca pasa por rachas por encima del máximo', () {
+      // Franja de rachas de 35 kn cruzando la ruta directa por el centro,
+      // pero solo en la mitad sur: hay paso por el norte.
+      const n = 8;
+      const lat0 = 37.0, lon0 = 23.6, step = 0.2;
+      final times = [
+        for (var h = 0; h <= 20; h++)
+          DateTime.utc(2026, 9, 19).add(Duration(hours: h)),
+      ];
+      final size = times.length * n * n;
+      Float32List filled(double v) => Float32List(size)..fillRange(0, size, v);
+      final wc = windComponents(12, 0);
+      final gust = filled(16);
+      for (var t = 0; t < times.length; t++) {
+        for (var i = 0; i < 5; i++) {
+          for (var j = 3; j <= 4; j++) {
+            gust[(t * n + i) * n + j] = 35;
+          }
+        }
+      }
+      final grid = WeatherGrid(
+        lat0: lat0,
+        lon0: lon0,
+        step: step,
+        nLat: n,
+        nLon: n,
+        times: times,
+        windU: filled(wc.u),
+        windV: filled(wc.v),
+        waveH: filled(double.nan),
+        waveDirU: filled(double.nan),
+        waveDirV: filled(double.nan),
+        waveT: filled(double.nan),
+        gust: gust,
+        model: WeatherModel.ecmwf,
+        source: 'test',
+        fetchedAt: DateTime.utc(2026, 9, 18),
+      );
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [
+            (lat: lat0 + 0.7, lon: lon0 + 0.1),
+            (lat: lat0 + 0.7, lon: lon0 + 1.3),
+          ],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+        ),
+      );
+      expect(r.complete, isTrue, reason: r.warning);
+      for (final s in r.segments) {
+        expect(s.gustKn ?? 0, lessThanOrEqualTo(30));
+      }
+    });
+  });
+
+  group('freno de cordura', () {
+    test('si la media hacia el destino es ridícula, para y lo explica', () {
+      // Barco "cansadísimo" (10 % de la polar), sin motor, 30 M: a menos
+      // de 1 kn de media tardaría días. Debe pararse pronto.
+      final grid = flatGrid(twsKn: 6, twdDeg: 0, hours: 60);
+      final dest = destinationNm(37.4, 24.0, 0, 30);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: dest.lat, lon: dest.lon)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 10,
+          constraints: const RoutingConstraints(allowMotor: false),
+          objective: RoutingObjective.fast,
+        ),
+      );
+      expect(r.complete, isFalse);
+      expect(r.warning, contains('resultado absurdo'));
+      expect(r.warning, contains('kn'));
+      // Se para a las ~2 h simuladas, no al techo de pasos.
+      expect(r.totalDuration.inMinutes, lessThanOrEqualTo(130));
+    });
+
+    test('una ceñida lenta pero razonable no se corta', () {
+      final grid = flatGrid(twsKn: 8, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 15);
+      final r = computeRoute(
+        request(grid, (
+          lat: dest.lat,
+          lon: dest.lon,
+        ), constraints: const RoutingConstraints(allowMotor: false)),
+      );
       expect(r.complete, isTrue);
-      expect(live.length, sync.length);
     });
   });
 
@@ -688,11 +825,10 @@ void main() {
         final dest = destinationNm(37.4, 24.0, brg, nm);
         final progress = <double>[];
         computeRoute(
-          request(
-            grid,
-            (lat: dest.lat, lon: dest.lon),
-            constraints: const RoutingConstraints(allowMotor: false),
-          ),
+          request(grid, (
+            lat: dest.lat,
+            lon: dest.lon,
+          ), constraints: const RoutingConstraints(allowMotor: false)),
           onProgress: progress.add,
         );
         expect(progress.last, 1.0);
@@ -734,30 +870,32 @@ void main() {
   });
 
   group('webapp (sin isolates)', () {
-    test('por trozos da lo mismo que el síncrono, con progreso e isócronas', () async {
-      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
-      final dest = destinationNm(37.4, 24.0, 0, 12);
-      final req = request(
-        grid,
-        (lat: dest.lat, lon: dest.lon),
-        constraints: const RoutingConstraints(allowMotor: false),
-      );
-      final progress = <double>[];
-      final isos = <RouteIsochrone>[];
-      // sliceMs 0: cede en cada paso, como haría un móvil lento.
-      final r = await computeRouteChunked(
-        req,
-        progress.add,
-        onIsochrone: isos.add,
-        sliceMs: 0,
-      );
-      final sync = computeRoute(req);
-      expect(r.complete, isTrue);
-      expect(r.segments.length, sync.segments.length);
-      expect(r.totalDuration, sync.totalDuration);
-      expect(progress, isNotEmpty);
-      expect(isos, isNotEmpty);
-    });
+    test(
+      'por trozos da lo mismo que el síncrono, con progreso e isócronas',
+      () async {
+        final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+        final dest = destinationNm(37.4, 24.0, 0, 12);
+        final req = request(grid, (
+          lat: dest.lat,
+          lon: dest.lon,
+        ), constraints: const RoutingConstraints(allowMotor: false));
+        final progress = <double>[];
+        final isos = <RouteIsochrone>[];
+        // sliceMs 0: cede en cada paso, como haría un móvil lento.
+        final r = await computeRouteChunked(
+          req,
+          progress.add,
+          onIsochrone: isos.add,
+          sliceMs: 0,
+        );
+        final sync = computeRoute(req);
+        expect(r.complete, isTrue);
+        expect(r.segments.length, sync.segments.length);
+        expect(r.totalDuration, sync.totalDuration);
+        expect(progress, isNotEmpty);
+        expect(isos, isNotEmpty);
+      },
+    );
 
     test('los errores de validación llegan igual', () async {
       final grid = flatGrid(twsKn: 10, twdDeg: 0);
@@ -810,7 +948,7 @@ void main() {
       final maxLatDrift = result.segments
           .map((s) => (s.endLat - 37.4).abs())
           .fold(0.0, math.max);
-      expect(maxLatDrift, greaterThan(0.05));
+      expect(maxLatDrift, greaterThan(0.05), reason: result.warning);
     });
 
     test('sin máscara, no cambia el comportamiento de antes', () {
@@ -849,11 +987,7 @@ void main() {
 
     test('nearLand respeta el margen', () {
       final land = LandMask([
-        const LandPolygon(
-          [(0, 0), (1, 0), (1, 1), (0, 1)],
-          [],
-          (0, 0, 1, 1),
-        ),
+        const LandPolygon([(0, 0), (1, 0), (1, 1), (0, 1)], [], (0, 0, 1, 1)),
       ]);
       // A 1 minuto (1/60°) de la costa: dentro de un margen de 2 M, fuera de uno de 0.1 M.
       expect(land.nearLand(0.5, 1.0 + 1 / 60, 2.0), isTrue);
@@ -863,12 +997,7 @@ void main() {
 
   group('sailing_calc', () {
     test('viento aparente: proa al viento, mismo AWA que TWA', () {
-      final aw = apparentWind(
-        twsKn: 15,
-        twdDeg: 0,
-        headingDeg: 0,
-        stwKn: 6,
-      );
+      final aw = apparentWind(twsKn: 15, twdDeg: 0, headingDeg: 0, stwKn: 6);
       // Yendo directos al viento, el aparente sigue viniendo de proa y es
       // más fuerte que el verdadero (verdadero + velocidad propia).
       expect(aw.awaDeg.abs(), lessThan(1));
@@ -876,12 +1005,7 @@ void main() {
     });
 
     test('viento aparente: en popa, más flojo que el verdadero', () {
-      final aw = apparentWind(
-        twsKn: 15,
-        twdDeg: 0,
-        headingDeg: 180,
-        stwKn: 6,
-      );
+      final aw = apparentWind(twsKn: 15, twdDeg: 0, headingDeg: 180, stwKn: 6);
       expect(aw.awsKn, closeTo(9, 0.1));
     });
 

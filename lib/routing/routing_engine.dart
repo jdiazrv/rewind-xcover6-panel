@@ -22,8 +22,20 @@ const kIsochroneStepMinutes = 15;
 /// Rumbos candidatos cada 5°.
 const kHeadingStepDeg = 5.0;
 
-/// Isócronas partidas en sectores de este ancho para la poda.
-const kPruneSectorDeg = 5.0;
+/// Freno de cordura: pasadas [kSanityAfterHours] de navegación simulada,
+/// si la media hacia el destino (lo que se ha acercado / tiempo) no llega
+/// a [kMinUsefulVmgKn], el cálculo se para y lo explica.
+const kSanityAfterHours = 2.0;
+const kMinUsefulVmgKn = 1.0;
+
+/// Poda clásica de isócronas: sectores de este ancho vistos DESDE LA
+/// SALIDA de la pierna, quedándose en cada uno con el punto más lejano.
+const kPruneSectorDeg = 2.0;
+
+/// Abanico explorado a cada lado del rumbo directo (visto desde la
+/// salida): suficiente para rodear islas, cabos y zonas de mal tiempo sin
+/// gastar cálculo en ir hacia atrás.
+const kFanHalfDeg = 120.0;
 
 enum PropulsionMode { sailing, motor }
 
@@ -76,6 +88,7 @@ class RoutingConstraints {
     this.minimumCoastDistanceNm = 0.5,
     this.minimumAwaDeg = 30,
     this.comfortWeight = kComfortWeightDefault,
+    this.maxGustKn = 30,
   });
 
   final double minimumSailingSTW;
@@ -106,6 +119,10 @@ class RoutingConstraints {
   /// [kComfortWeightDefault].
   final double comfortWeight;
 
+  /// Racha máxima admitida (verdadera, del modelo): la ruta no pasa por
+  /// donde la supere. Si el modelo no da rachas, no limita.
+  final double maxGustKn;
+
   RoutingConstraints copyWith({
     double? minimumSailingSTW,
     bool? allowMotor,
@@ -117,6 +134,7 @@ class RoutingConstraints {
     double? minimumCoastDistanceNm,
     double? minimumAwaDeg,
     double? comfortWeight,
+    double? maxGustKn,
   }) => RoutingConstraints(
     minimumSailingSTW: minimumSailingSTW ?? this.minimumSailingSTW,
     allowMotor: allowMotor ?? this.allowMotor,
@@ -129,6 +147,7 @@ class RoutingConstraints {
         minimumCoastDistanceNm ?? this.minimumCoastDistanceNm,
     minimumAwaDeg: minimumAwaDeg ?? this.minimumAwaDeg,
     comfortWeight: comfortWeight ?? this.comfortWeight,
+    maxGustKn: maxGustKn ?? this.maxGustKn,
   );
 }
 
@@ -683,21 +702,34 @@ Iterable<_LegResult?> _routeLegSteps({
   // Solo la costa que de verdad puede tocar esta pierna: en mar abierta,
   // lejos de cualquiera de los polígonos, esto deja la lista vacía y cada
   // rumbo se ahorra un escaneo de 74 costas que nunca iban a estar cerca.
+  // Zona que puede explorar esta pierna: la caja salida–llegada con un
+  // margen para desvíos (la mitad de la distancia, 0,5° como poco). La
+  // costa se mira solo dentro, y por eso ningún punto puede salir de ella
+  // (con el abanico, la ruta ya no se pega a la línea recta).
+  final marginDeg = math.max(0.5, directNm / 60 * 0.5);
+  final legBox = GeoBox(
+    south: math.min(start.lat, target.lat) - marginDeg,
+    west: math.min(start.lon, target.lon) - marginDeg,
+    north: math.max(start.lat, target.lat) + marginDeg,
+    east: math.max(start.lon, target.lon) + marginDeg,
+  );
   final land = req.land;
   final legLand = (land == null || land.isEmpty)
       ? null
       : land.restrictedTo(
-          math.min(start.lat, target.lat),
-          math.min(start.lon, target.lon),
-          math.max(start.lat, target.lat),
-          math.max(start.lon, target.lon),
-          math.max(0.35, directNm / 60 * 0.3),
+          legBox.south,
+          legBox.west,
+          legBox.north,
+          legBox.east,
+          0.05,
         );
   final ctx = _LegContext(
     req: req,
     legIndex: legIndex,
     legLand: legLand,
     stepH: stepH,
+    start: start,
+    legBox: legBox,
     target: target,
     targetBearing: targetBearing,
     comfortWeight: _comfortWeightFor(req),
@@ -789,6 +821,19 @@ Iterable<_LegResult?> _routeLegSteps({
         continue;
       }
       if (sample.twsKn > req.constraints.maxAwsKn + 40) continue; // absurdo
+      // Límites que no dependen del rumbo: se miran una vez por nodo.
+      final gust = sample.gustKn;
+      if (gust != null && gust > req.constraints.maxGustKn) {
+        ctx.rejectedGust++;
+        if (gust > ctx.maxGustSeen) ctx.maxGustSeen = gust;
+        continue;
+      }
+      final hs = sample.waveHeightM;
+      if (hs != null && hs > req.constraints.absoluteMaxWaveM) {
+        ctx.rejectedWave++;
+        if (hs > ctx.maxWaveSeen) ctx.maxWaveSeen = hs;
+        continue;
+      }
       // La curva de la polar solo depende del TWS de este nodo, no del
       // rumbo: se construye UNA vez y se reutiliza en los 72 candidatos.
       final curve = req.polar.curveFor(sample.twsKn);
@@ -844,7 +889,7 @@ Iterable<_LegResult?> _routeLegSteps({
       } else if (stuckOnCoast) {
         reason = 'rodeado de costa, sin paso navegable';
       } else {
-        reason = 'sin rumbo navegable (calma o mar por encima del máximo)';
+        reason = _limitReason(ctx);
       }
       yield _LegResult(_backtrack(closest), false, reason);
       return;
@@ -852,6 +897,32 @@ Iterable<_LegResult?> _routeLegSteps({
     frontier = next.values.toList();
     for (final n in frontier) {
       if (n.remainingNm < best.remainingNm) best = n;
+    }
+    // Cordura: si tras un rato la isócrona apenas AVANZA (lo más lejos que
+    // ha llegado desde la salida), el resultado sería absurdo — días para
+    // unas millas —: se para y se explica, en vez de seguir hasta el techo
+    // de pasos. Se mide lo avanzado y no lo acercado al destino: un rodeo
+    // (un istmo, una zona de rachas) pasa horas sin acercarse y es
+    // correcto. Reportado en vivo 2026-09-19.
+    final elapsedH = (step + 1) * stepH;
+    if (elapsedH >= kSanityAfterHours) {
+      var reachNm = directNm - best.remainingNm;
+      for (final n in frontier) {
+        final d = distanceNm(start.lat, start.lon, n.lat, n.lon);
+        if (d > reachNm) reachNm = d;
+      }
+      final avg = reachNm / elapsedH;
+      if (avg < kMinUsefulVmgKn) {
+        yield _LegResult(
+          _backtrack(best),
+          false,
+          'cálculo detenido: resultado absurdo. En ${_minutesText((elapsedH * 60).round())} '
+          'solo avanza ${reachNm.toStringAsFixed(1)} M (media '
+          '${avg.toStringAsFixed(1)} kn). Revisa el viento, la polar o los '
+          'límites (motor, viento máx., ola, AWA)',
+        );
+        return;
+      }
     }
     if (onIsochrone != null) {
       final keys = next.keys.toList()..sort();
@@ -876,6 +947,34 @@ Iterable<_LegResult?> _routeLegSteps({
   return;
 }
 
+/// La causa que más ha bloqueado, dicha con sus números.
+String _limitReason(_LegContext ctx) {
+  final c = ctx.req.constraints;
+  final causes = <(int, String)>[
+    (
+      ctx.rejectedGust,
+      'rachas de hasta ${ctx.maxGustSeen.round()} kn, por encima de tu máximo '
+          '(${c.maxGustKn.round()} kn): no hay paso posible. Sube "Racha máx." '
+          'en Ajustes o prueba otra hora de salida',
+    ),
+    (
+      ctx.rejectedWave,
+      'ola de hasta ${ctx.maxWaveSeen.toStringAsFixed(1)} m, por encima de tu '
+          'máximo (${c.absoluteMaxWaveM.toStringAsFixed(1)} m): no hay paso '
+          'posible. Sube "Ola máxima" o prueba otra hora de salida',
+    ),
+    (
+      ctx.rejectedAws,
+      'viento aparente por encima de tu máximo (${c.maxAwsKn.round()} kn) en '
+          'todos los rumbos posibles',
+    ),
+  ]..sort((a, b) => b.$1.compareTo(a.$1));
+  if (causes.first.$1 > 0) return causes.first.$2;
+  return c.allowMotor
+      ? 'sin rumbo navegable'
+      : 'sin rumbo navegable a vela (calma o ángulo muerto) y sin motor permitido';
+}
+
 String _minutesText(int minutes) {
   final h = minutes ~/ 60, m = minutes % 60;
   if (h == 0) return '$m min';
@@ -889,6 +988,8 @@ class _LegContext {
     required this.legIndex,
     required this.legLand,
     required this.stepH,
+    required this.start,
+    required this.legBox,
     required this.target,
     required this.targetBearing,
     required this.comfortWeight,
@@ -898,6 +999,8 @@ class _LegContext {
   final int legIndex;
   final LandMask? legLand;
   final double stepH;
+  final ({double lat, double lon}) start;
+  final GeoBox legBox;
   final ({double lat, double lon}) target;
   final double targetBearing;
   final double comfortWeight;
@@ -906,6 +1009,11 @@ class _LegContext {
   /// Para explicar por qué una pierna no se completa.
   bool sawNoForecast = false;
   bool droppedForTimeAbovePreferred = false;
+
+  /// Por qué se descartan nodos y rumbos, para explicar una pierna que no
+  /// se completa con la causa real (no un "sin rumbo navegable" genérico).
+  int rejectedGust = 0, rejectedWave = 0, rejectedAws = 0;
+  double maxGustSeen = 0, maxWaveSeen = 0;
 }
 
 /// ¿El tramo de [startLat]/[startLon] al punto que resulta de navegar
@@ -986,10 +1094,13 @@ _Node? _headingCandidate(
     // trimar, y sin motor: rumbo inútil.
     return null;
   }
-  if (aw.awsKn > c.maxAwsKn) return null;
+  if (aw.awsKn > c.maxAwsKn) {
+    ctx.rejectedAws++;
+    return null;
+  }
 
   if (sample.waveHeightM != null && sample.waveHeightM! > c.absoluteMaxWaveM) {
-    return null; // tope duro: nunca se cruza
+    return null; // tope duro: nunca se cruza (ya filtrado por nodo)
   }
 
   final maneuver = _maneuverBetween(
@@ -1137,17 +1248,40 @@ _Node _stepNode(
   );
 }
 
-/// Poda por isócronas: para cada sector angular (visto desde el destino,
-/// respecto al rumbo directo) se queda solo el nodo mejor puntuado: el que
-/// más cerca queda, más la penalización de confort acumulada y un sesgo
-/// contra virar seguido. En Confort/Personalizado se descarta el que ya
-/// agotó su presupuesto de tiempo con ola por encima de la cómoda.
+/// Poda por isócronas, método clásico: para cada sector angular visto
+/// desde la salida de la pierna se queda el punto que MÁS LEJOS ha llegado
+/// (menos la penalización de confort acumulada y un sesgo contra virar
+/// seguido). Así la isócrona es un abanico y puede rodear lo que esté en
+/// medio. Antes los sectores se medían desde el destino quedándose el más
+/// cercano: lejos del destino eso dejaba 2–3 puntos pegados a la línea
+/// recta y la ruta no podía desviarse (una franja de rachas o de ola
+/// cruzada bloqueaba la pierna entera). En Confort/Personalizado se
+/// descarta además el que ya agotó su tiempo con ola incómoda.
 void _offerCandidate(_LegContext ctx, Map<int, _Node> next, _Node candidate) {
   final maxAbove = ctx.maxMinutesAbovePreferred;
   if (maxAbove != null && candidate.minutesAbovePreferred > maxAbove) {
     ctx.droppedForTimeAbovePreferred = true;
     return;
   }
+  // Fuera de la zona de la pierna (costa sin mirar) o del tiempo
+  // descargado: no se explora.
+  if (!ctx.legBox.contains(candidate.lat, candidate.lon)) return;
+  if (!ctx.req.grid.box.contains(candidate.lat, candidate.lon)) return;
+
+  final start = ctx.start;
+  final fromStartNm = distanceNm(
+    start.lat,
+    start.lon,
+    candidate.lat,
+    candidate.lon,
+  );
+  final rel = fromStartNm < 1e-6
+      ? 0.0
+      : normalizeRelativeAngle(
+          bearingDeg(start.lat, start.lon, candidate.lat, candidate.lon) -
+              ctx.targetBearing,
+        );
+  if (rel.abs() > kFanHalfDeg) return;
 
   final target = ctx.target;
   final remaining = distanceNm(
@@ -1167,18 +1301,10 @@ void _offerCandidate(_LegContext ctx, Map<int, _Node> next, _Node candidate) {
       : 0.0;
   candidate
     ..remainingNm = remaining
-    ..score = remaining + candidate.comfortPenaltyNm + maneuverBias;
+    // Menor es mejor: lo más lejos posible de la salida en su sector.
+    ..score = -fromStartNm + candidate.comfortPenaltyNm + maneuverBias;
 
-  final bearingFromTarget = bearingDeg(
-    target.lat,
-    target.lon,
-    candidate.lat,
-    candidate.lon,
-  );
-  final sector =
-      (normalizeRelativeAngle(bearingFromTarget - ctx.targetBearing) /
-              kPruneSectorDeg)
-          .round();
+  final sector = (rel / kPruneSectorDeg).round();
   final existing = next[sector];
   if (existing == null || candidate.score < existing.score) {
     next[sector] = candidate;

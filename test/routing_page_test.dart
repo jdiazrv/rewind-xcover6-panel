@@ -12,6 +12,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Proveedor sin red: viento del N de 12 kn y ola de 0,8 m en toda la zona.
 class _FlatProvider implements WeatherProvider {
+  _FlatProvider({this.gustKn = 17});
+  final double gustKn;
   int calls = 0;
   WeatherModel? lastModel;
 
@@ -48,7 +50,7 @@ class _FlatProvider implements WeatherProvider {
       waveDirU: filled(0),
       waveDirV: filled(1),
       waveT: filled(4),
-      gust: filled(17),
+      gust: filled(gustKn),
       model: model,
       source: 'prueba · ${model.label}',
       fetchedAt: DateTime.now(),
@@ -379,6 +381,30 @@ void main() {
       await t.pumpAndSettle();
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool('routing.isochronesOn'), isFalse);
+      expect(t.takeException(), isNull);
+    });
+
+    testWidgets('planificador: si no llega, dice por qué', (t) async {
+      final p = _FlatProvider(gustKn: 38); // por encima de los 30 kn
+      await pump(t, p, const Size(1280, 800), polar: polar);
+      await placeDestination(t);
+      await t.tap(find.text('Planificar salida'));
+      await t.pump(const Duration(milliseconds: 300));
+      await t.pump(const Duration(milliseconds: 300));
+      await t.tap(find.text('6 h'));
+      await t.tap(find.text('12 h'));
+      await t.pump();
+      await t.tap(find.text('Comparar salidas'));
+      for (var i = 0; i < 60; i++) {
+        await t.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
+        await t.pump();
+        if (find.text('Volver a comparar').evaluate().isNotEmpty) break;
+      }
+      expect(find.text('NO LLEGA'), findsNWidgets(3));
+      expect(find.textContaining('Rachas de hasta 38 kn'), findsNWidgets(3));
+      expect(find.textContaining('No se pudo completar'), findsNothing);
       expect(t.takeException(), isNull);
     });
 

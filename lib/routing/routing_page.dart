@@ -314,6 +314,7 @@ class _RoutingPageState extends State<RoutingPage> {
   static const _kPrefCoastNm = 'routing.coastNm';
   static const _kPrefMaxAboveMin = 'routing.maxAboveMin';
   static const _kPrefComfortWeight = 'routing.comfortWeight';
+  static const _kPrefMaxGust = 'routing.maxGust';
   // Clave nueva: con la anterior ya quedó guardado "apagado" en todas las
   // instalaciones (se guardaba al abrir la pantalla); por defecto, ahora
   // encendido.
@@ -367,6 +368,7 @@ class _RoutingPageState extends State<RoutingPage> {
           ),
           comfortWeight:
               p.getDouble(_kPrefComfortWeight) ?? kComfortWeightDefault,
+          maxGustKn: p.getDouble(_kPrefMaxGust) ?? 30,
         );
         _showIsochrones = p.getBool(_kPrefIsochrones) ?? true;
         _objective = RoutingObjective.values.firstWhere(
@@ -410,6 +412,7 @@ class _RoutingPageState extends State<RoutingPage> {
         _constraints.maxTimeAbovePreferred.inMinutes,
       );
       await p.setDouble(_kPrefComfortWeight, _constraints.comfortWeight);
+      await p.setDouble(_kPrefMaxGust, _constraints.maxGustKn);
       await p.setBool(_kPrefIsochrones, _showIsochrones);
       await p.setString(_kPrefObjective, _objective.name);
     } catch (_) {}
@@ -1470,8 +1473,10 @@ class _RoutingPageState extends State<RoutingPage> {
                     'Viento',
                     'máx ${s.maxTwsKn.round()} kn'
                         '${gust == null ? '' : ' · racha ${gust.round()} kn'}',
-                    color: (gust ?? s.maxTwsKn) > _constraints.maxAwsKn
-                        ? cRed
+                    // La ruta ya no pasa por rachas por encima del máximo;
+                    // en amarillo si se queda a menos de 3 kn de él.
+                    color: gust != null && gust >= _constraints.maxGustKn - 3
+                        ? cYellow
                         : null,
                   ),
                   row(
@@ -1488,11 +1493,11 @@ class _RoutingPageState extends State<RoutingPage> {
                     'Maniobras',
                     maneuvers.isEmpty ? 'ninguna' : maneuvers.join(' · '),
                   ),
-                  if (gust != null && gust > _constraints.maxAwsKn)
+                  if (gust != null && gust >= _constraints.maxGustKn - 3)
                     _summaryNote(
-                      'Rachas de ${gust.round()} kn: por encima de tu viento '
-                      'máximo (${_constraints.maxAwsKn.round()} kn).',
-                      cRed,
+                      'Rachas de hasta ${gust.round()} kn: cerca de tu máximo '
+                      '(${_constraints.maxGustKn.round()} kn).',
+                      cYellow,
                     ),
                   if (s.noForecastFrom != null)
                     _summaryNote(
@@ -2239,7 +2244,9 @@ class _RoutingPageState extends State<RoutingPage> {
                 stat(
                   'Racha',
                   kn(s.gustKn!),
-                  color: s.gustKn! > _constraints.maxAwsKn ? cRed : null,
+                  color: s.gustKn! >= _constraints.maxGustKn - 3
+                      ? cYellow
+                      : null,
                 ),
               stat('TWD', deg(s.twdDeg)),
             ],
@@ -2815,6 +2822,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
   late double maxAboveMin = widget.constraints.maxTimeAbovePreferred.inMinutes
       .toDouble();
   late double comfortWeight = widget.constraints.comfortWeight;
+  late double maxGust = widget.constraints.maxGustKn;
   late RoutingObjective objective = widget.objective;
   late WeatherModel model = widget.model;
   late bool showIsochrones = widget.showIsochrones;
@@ -2833,6 +2841,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
     minimumCoastDistanceNm: coastNm,
     maxTimeAbovePreferred: Duration(minutes: maxAboveMin.round()),
     comfortWeight: comfortWeight,
+    maxGustKn: maxGust,
   );
 
   static const _modeHelp = {
@@ -2963,6 +2972,15 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
           1,
           (v) => maxAws = v,
           '${maxAws.round()} kn',
+        ),
+        _row(
+          'Racha máx.',
+          maxGust,
+          15,
+          50,
+          1,
+          (v) => maxGust = v,
+          '${maxGust.round()} kn',
         ),
         _row(
           'Ola cómoda',
@@ -3723,16 +3741,54 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
             Text(
               details,
               style: TextStyle(
-                color: (s.maxGustKn ?? 0) > widget.constraints.maxAwsKn
+                color: (s.maxGustKn ?? 0) >= widget.constraints.maxGustKn - 3
                     ? cOrange
                     : cMuted,
                 fontSize: 11,
               ),
             ),
+            // El porqué, no solo "NO LLEGA": la causa que dio el motor
+            // (rachas, ola, resultado absurdo, sin previsión…).
+            if (!s.complete && s.warning != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  _planReason(s.warning!),
+                  style: const TextStyle(
+                    color: cRed,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    height: 1.25,
+                  ),
+                ),
+              )
+            else if (s.noForecastFrom != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  'Sin previsión desde '
+                  '${_RoutingPageState._formatLocal(s.noForecastFrom!)}: '
+                  'ese tramo se supone a motor.',
+                  style: const TextStyle(color: cOrange, fontSize: 11),
+                ),
+              ),
           ],
         ),
       ),
     );
+  }
+
+  /// "No se pudo completar el tramo 1 de 1: rachas de…" → "Rachas de…".
+  static String _planReason(String warning) {
+    var w = warning;
+    final m = RegExp(r'^No se pudo completar el tramo \d+ de \d+: ').firstMatch(w);
+    if (m != null) {
+      final tramo = RegExp(r'tramo (\d+) de (\d+)').firstMatch(w)!;
+      w = w.substring(m.end);
+      if (tramo.group(2) != '1') w = 'Tramo ${tramo.group(1)}: $w';
+    }
+    if (w.endsWith('.')) w = w.substring(0, w.length - 1);
+    return w.isEmpty ? w : '${w[0].toUpperCase()}${w.substring(1)}';
   }
 }
 
