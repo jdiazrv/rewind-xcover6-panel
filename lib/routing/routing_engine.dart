@@ -231,10 +231,8 @@ class RouteResult {
 
   bool get complete => reachedIndex == waypoints.length - 1;
 
-  double get totalNm => [for (final s in segments) s.distanceNm].fold(
-    0.0,
-    (a, b) => a + b,
-  );
+  double get totalNm =>
+      [for (final s in segments) s.distanceNm].fold(0.0, (a, b) => a + b);
 
   Duration get totalDuration => segments.isEmpty
       ? Duration.zero
@@ -249,6 +247,7 @@ class RouteResult {
     }
     return null;
   }
+
   DateTime? get eta => segments.isEmpty ? null : segments.last.endTime;
 
   /// El tramo activo en [t], o null si [t] cae fuera de la ruta.
@@ -267,9 +266,7 @@ class RouteResult {
     final s = segmentAt(t);
     if (s == null) return null;
     final total = s.duration.inSeconds;
-    final f = total <= 0
-        ? 1.0
-        : t.difference(s.startTime).inSeconds / total;
+    final f = total <= 0 ? 1.0 : t.difference(s.startTime).inSeconds / total;
     return s.positionAt(f);
   }
 }
@@ -326,13 +323,65 @@ class RouteIsochrone {
   final List<double> latLon;
 }
 
-/// Punto de entrada para `compute()`. Debe ser una función de nivel
-/// superior (no un método) para poder cruzar a otro isolate.
+/// Cálculo síncrono completo. Función de nivel superior para poder
+/// cruzar a otro isolate.
 RouteResult computeRoute(
   RouteRequest req, {
   void Function(double)? onProgress,
   void Function(RouteIsochrone)? onIsochrone,
 }) {
+  Object? last;
+  for (final e in _routeSteps(req, onProgress, onIsochrone)) {
+    last = e;
+  }
+  return last! as RouteResult;
+}
+
+/// ¿Compilado para navegador? Ahí no hay isolates (`Isolate.spawn` da
+/// "Unsupported operation"). Mismo criterio que `kIsWeb` de Flutter, sin
+/// depender de Flutter.
+const bool kRoutingOnWeb =
+    bool.fromEnvironment('dart.library.js_util') ||
+    bool.fromEnvironment('dart.library.js_interop');
+
+/// Calcula sin congelar la pantalla: en su propio isolate en Android y
+/// escritorio; en la webapp, a trozos en el hilo principal, cediendo
+/// al navegador cada pocos milisegundos para que pinte el progreso y
+/// las isócronas.
+Future<RouteResult> computeRouteInBackground(
+  RouteRequest req,
+  void Function(double) onProgress, {
+  void Function(RouteIsochrone)? onIsochrone,
+}) => kRoutingOnWeb
+    ? computeRouteChunked(req, onProgress, onIsochrone: onIsochrone)
+    : computeRouteInIsolate(req, onProgress, onIsochrone: onIsochrone);
+
+/// El mismo cálculo por trozos, en el hilo que llama: cada ~[sliceMs]
+/// cede el control al bucle de eventos.
+Future<RouteResult> computeRouteChunked(
+  RouteRequest req,
+  void Function(double) onProgress, {
+  void Function(RouteIsochrone)? onIsochrone,
+  int sliceMs = 16,
+}) async {
+  final sw = Stopwatch()..start();
+  for (final e in _routeSteps(req, onProgress, onIsochrone)) {
+    if (e is RouteResult) return e;
+    if (sw.elapsedMilliseconds >= sliceMs) {
+      await Future<void>.delayed(Duration.zero);
+      sw.reset();
+    }
+  }
+  throw RoutingException('El cálculo terminó sin resultado');
+}
+
+/// El algoritmo, como generador: da `null` tras cada paso de isócrona
+/// (punto donde se puede ceder el control) y, al final, el RouteResult.
+Iterable<Object?> _routeSteps(
+  RouteRequest req,
+  void Function(double)? onProgress,
+  void Function(RouteIsochrone)? onIsochrone,
+) sync* {
   if (req.waypoints.length < 2) {
     throw RoutingException('Hacen falta salida y llegada');
   }
@@ -353,7 +402,8 @@ RouteResult computeRoute(
 
   for (var leg = 0; leg < totalLegs; leg++) {
     final target = req.waypoints[leg + 1];
-    final result = _routeLeg(
+    _LegResult? legResult;
+    for (final e in _routeLegSteps(
       legIndex: leg,
       start: pos,
       startTime: time,
@@ -364,10 +414,20 @@ RouteResult computeRoute(
           ? null
           : (legFrac) => onProgress((leg + legFrac) / totalLegs),
       onIsochrone: onIsochrone,
-    );
+    )) {
+      if (e == null) {
+        yield null;
+      } else {
+        legResult = e;
+      }
+    }
+    final result = legResult!;
     segments.addAll(result.segments);
     if (result.segments.isNotEmpty) {
-      pos = (lat: result.segments.last.endLat, lon: result.segments.last.endLon);
+      pos = (
+        lat: result.segments.last.endLat,
+        lon: result.segments.last.endLon,
+      );
       time = result.segments.last.endTime;
       carry = result.segments.last;
     }
@@ -380,7 +440,7 @@ RouteResult computeRoute(
     reachedIndex = leg + 1;
   }
 
-  return RouteResult(
+  yield RouteResult(
     segments: segments,
     waypoints: req.waypoints,
     reachedIndex: reachedIndex,
@@ -439,7 +499,9 @@ Future<RouteResult> computeRouteInIsolate(
       if (!completer.isCompleted) completer.complete(message);
       finish();
     } else if (message is String) {
-      if (!completer.isCompleted) completer.completeError(RoutingException(message));
+      if (!completer.isCompleted) {
+        completer.completeError(RoutingException(message));
+      }
       finish();
     }
   });
@@ -552,7 +614,9 @@ double _comfortWeightFor(RouteRequest req) => switch (req.objective) {
 bool _limitTimeAbovePreferred(RouteRequest req) =>
     req.objective != RoutingObjective.fast;
 
-_LegResult _routeLeg({
+/// Una pierna, como generador: `null` tras cada paso y el _LegResult al
+/// final.
+Iterable<_LegResult?> _routeLegSteps({
   required int legIndex,
   required ({double lat, double lon}) start,
   required DateTime startTime,
@@ -561,9 +625,12 @@ _LegResult _routeLeg({
   RouteSegment? previous,
   void Function(double)? onProgress,
   void Function(RouteIsochrone)? onIsochrone,
-}) {
+}) sync* {
   final directNm = distanceNm(start.lat, start.lon, target.lat, target.lon);
-  if (directNm < 0.05) return _LegResult(const [], true, null);
+  if (directNm < 0.05) {
+    yield _LegResult(const [], true, null);
+    return;
+  }
 
   // Techo de pasos: el doble del tiempo que tardaría en línea recta a la
   // velocidad mínima navegable, más un margen generoso para los bordos.
@@ -573,7 +640,12 @@ _LegResult _routeLeg({
     ((directNm / minSpeed) * 60 / kIsochroneStepMinutes * 2.2).ceil() + 8,
   );
   final stepH = kIsochroneStepMinutes / 60.0;
-  final targetBearing = bearingDeg(start.lat, start.lon, target.lat, target.lon);
+  final targetBearing = bearingDeg(
+    start.lat,
+    start.lon,
+    target.lat,
+    target.lon,
+  );
   const arrivalNm = 0.35;
 
   // Solo la costa que de verdad puede tocar esta pierna: en mar abierta,
@@ -604,22 +676,24 @@ _LegResult _routeLeg({
 
   // El nodo de salida "lleva" el último tramo de la pierna anterior (para
   // contar como maniobra el virar justo en la vía) y un bordo neutro.
-  final root = _Node(
-    start.lat,
-    start.lon,
-    startTime,
-    null,
-    previous,
-    0,
-    minutesSinceManeuver: kManeuverReferenceMinutes,
-  )
-    ..remainingNm = directNm
-    ..score = directNm;
+  final root =
+      _Node(
+          start.lat,
+          start.lon,
+          startTime,
+          null,
+          previous,
+          0,
+          minutesSinceManeuver: kManeuverReferenceMinutes,
+        )
+        ..remainingNm = directNm
+        ..score = directNm;
   var frontier = <_Node>[root];
   _Node best = root;
 
   for (var step = 0; step < maxSteps; step++) {
     onProgress?.call(step / maxSteps);
+    if (step > 0) yield null;
     final next = <int, _Node>{}; // clave = sector de poda
     // Llegada exacta: si desde algún nodo el destino se alcanza DENTRO de
     // este paso a un rumbo navegable, se llega justo ahí con un paso
@@ -629,7 +703,8 @@ _LegResult _routeLeg({
     _Node? finish;
     for (final node in frontier) {
       if (node.remainingNm <= arrivalNm) {
-        return _LegResult(_backtrack(node), true, null);
+        yield _LegResult(_backtrack(node), true, null);
+        return;
       }
       final sample = req.grid.sample(node.lat, node.lon, node.time);
       if (sample == null) {
@@ -639,9 +714,16 @@ _LegResult _routeLeg({
         ctx.sawNoForecast = true;
         if (req.constraints.allowMotor) {
           final toTarget = node.remainingNm;
-          final bearing = bearingDeg(node.lat, node.lon, target.lat, target.lon);
+          final bearing = bearingDeg(
+            node.lat,
+            node.lon,
+            target.lat,
+            target.lon,
+          );
           final reach = req.constraints.motorSpeedKn * stepH;
-          final h = toTarget <= reach ? toTarget / req.constraints.motorSpeedKn : stepH;
+          final h = toTarget <= reach
+              ? toTarget / req.constraints.motorSpeedKn
+              : stepH;
           if (!_blockedByLand(
             legLand,
             node.lat,
@@ -661,7 +743,9 @@ _LegResult _routeLeg({
               maneuver: null,
             );
             if (toTarget <= reach) {
-              if (finish == null || child.time.isBefore(finish.time)) finish = child;
+              if (finish == null || child.time.isBefore(finish.time)) {
+                finish = child;
+              }
             } else {
               _offerCandidate(ctx, next, child);
             }
@@ -697,7 +781,8 @@ _LegResult _routeLeg({
       }
     }
     if (finish != null) {
-      return _LegResult(_backtrack(finish), true, null);
+      yield _LegResult(_backtrack(finish), true, null);
+      return;
     }
     if (next.isEmpty) {
       // Nada navegable (calma total sin motor, todo por encima del tope
@@ -726,7 +811,8 @@ _LegResult _routeLeg({
       } else {
         reason = 'sin rumbo navegable (calma o mar por encima del máximo)';
       }
-      return _LegResult(_backtrack(closest), false, reason);
+      yield _LegResult(_backtrack(closest), false, reason);
+      return;
     }
     frontier = next.values.toList();
     for (final n in frontier) {
@@ -747,11 +833,12 @@ _LegResult _routeLeg({
     }
   }
 
-  return _LegResult(
+  yield _LegResult(
     _backtrack(best),
     false,
     'se agotó el tiempo de cálculo antes de llegar',
   );
+  return;
 }
 
 String _minutesText(int minutes) {

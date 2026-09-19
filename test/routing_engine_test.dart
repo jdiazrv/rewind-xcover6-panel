@@ -681,6 +681,52 @@ void main() {
     });
   });
 
+  group('webapp (sin isolates)', () {
+    test('por trozos da lo mismo que el síncrono, con progreso e isócronas', () async {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      final dest = destinationNm(37.4, 24.0, 0, 12);
+      final req = request(
+        grid,
+        (lat: dest.lat, lon: dest.lon),
+        constraints: const RoutingConstraints(allowMotor: false),
+      );
+      final progress = <double>[];
+      final isos = <RouteIsochrone>[];
+      // sliceMs 0: cede en cada paso, como haría un móvil lento.
+      final r = await computeRouteChunked(
+        req,
+        progress.add,
+        onIsochrone: isos.add,
+        sliceMs: 0,
+      );
+      final sync = computeRoute(req);
+      expect(r.complete, isTrue);
+      expect(r.segments.length, sync.segments.length);
+      expect(r.totalDuration, sync.totalDuration);
+      expect(progress, isNotEmpty);
+      expect(isos, isNotEmpty);
+    });
+
+    test('los errores de validación llegan igual', () async {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0);
+      await expectLater(
+        computeRouteChunked(
+          RouteRequest(
+            waypoints: [(lat: 37.4, lon: 24.0)],
+            departure: departure,
+            grid: grid,
+            polar: dehler47,
+            polarFactorPercent: 100,
+            constraints: const RoutingConstraints(),
+            objective: RoutingObjective.fast,
+          ),
+          (_) {},
+        ),
+        throwsA(isA<RoutingException>()),
+      );
+    });
+  });
+
   group('máscara de costa', () {
     test('un istmo entre salida y llegada obliga a rodearlo', () {
       // Franja de tierra Norte-Sur cruzando la ruta directa Oeste-Este.

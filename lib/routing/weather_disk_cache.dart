@@ -33,7 +33,10 @@ class WeatherDiskCache {
   Future<void> save(WeatherGrid grid) async {
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setString('$_prefix${grid.model.name}', jsonEncode(grid.toJson()));
+      await p.setString(
+        '$_prefix${grid.model.name}',
+        jsonEncode(grid.toJson()),
+      );
     } catch (_) {
       /* sin sitio en disco, se sigue igual solo sin persistir */
     }

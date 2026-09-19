@@ -214,7 +214,10 @@ class WeatherGrid {
         nLon: j['nLon'] as int,
         times: [
           for (final t in (j['times'] as List))
-            DateTime.fromMillisecondsSinceEpoch((t as num).toInt(), isUtc: true),
+            DateTime.fromMillisecondsSinceEpoch(
+              (t as num).toInt(),
+              isUtc: true,
+            ),
         ],
         windU: f32('windU'),
         windV: f32('windV'),
@@ -264,7 +267,9 @@ class WeatherGrid {
 
     final i0 = math.min(fi.floor(), nLat - 2).clamp(0, nLat - 1);
     final j0 = math.min(fj.floor(), nLon - 2).clamp(0, nLon - 1);
-    final k0 = math.min(ft.floor(), times.length - 2).clamp(0, times.length - 1);
+    final k0 = math
+        .min(ft.floor(), times.length - 2)
+        .clamp(0, times.length - 1);
     final i1 = math.min(i0 + 1, nLat - 1);
     final j1 = math.min(j0 + 1, nLon - 1);
     final k1 = math.min(k0 + 1, times.length - 1);

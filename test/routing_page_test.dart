@@ -292,6 +292,29 @@ void main() {
       expect(t.takeException(), isNull);
     });
 
+    testWidgets('isócronas también desde Ajustes, sin recalcular', (t) async {
+      final p = _FlatProvider();
+      await pump(t, p, const Size(1280, 800), polar: polar);
+      await t.tap(find.byIcon(Icons.tune));
+      await t.pumpAndSettle();
+      expect(find.text('Ver isócronas al calcular'), findsOneWidget);
+      await t.tap(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Ver isócronas al calcular'),
+            matching: find.byType(Row),
+          ).first,
+          matching: find.byType(Switch),
+        ),
+      );
+      await t.pump();
+      await t.tap(find.text('Aplicar'));
+      await t.pumpAndSettle();
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('routing.isochrones'), isTrue);
+      expect(t.takeException(), isNull);
+    });
+
     testWidgets('planificador: compara salidas y usa la elegida', (t) async {
       final p = _FlatProvider();
       await pump(t, p, const Size(1280, 800), polar: polar);

@@ -399,7 +399,7 @@ class _RoutingPageState extends State<RoutingPage> {
         for (final v in _vias) (lat: v.latitude, lon: v.longitude),
         (lat: d.latitude, lon: d.longitude),
       ];
-      final result = await computeRouteInIsolate(
+      final result = await computeRouteInBackground(
         RouteRequest(
           waypoints: waypoints,
           departure: _departure.toUtc(),
@@ -660,22 +660,28 @@ class _RoutingPageState extends State<RoutingPage> {
   }
 
   Future<void> _openSettings() async {
-    final result =
-        await showDialog<(RoutingConstraints, RoutingObjective, WeatherModel)>(
-          context: context,
-          builder: (_) => _RoutingSettingsDialog(
-            constraints: _constraints,
-            objective: _objective,
-            model: _model,
-          ),
-        );
+    final result = await showDialog<_SettingsResult>(
+      context: context,
+      builder: (_) => _RoutingSettingsDialog(
+        constraints: _constraints,
+        objective: _objective,
+        model: _model,
+        showIsochrones: _showIsochrones,
+      ),
+    );
     if (result == null) return;
-    final modelChanged = result.$3 != _model;
+    final modelChanged = result.model != _model;
     setState(() {
-      _constraints = result.$1;
-      _objective = result.$2;
-      _model = result.$3;
+      _constraints = result.constraints;
+      _objective = result.objective;
+      _model = result.model;
+      _showIsochrones = result.showIsochrones;
     });
+    // Solo se tocó la vista (isócronas): no hace falta recalcular.
+    if (!result.calcChanged) {
+      unawaited(_persist());
+      return;
+    }
     // No es solo visual: cambia la ruta óptima y la ETA. Si además cambió
     // el modelo, hace falta volver a bajar el tiempo de ese modelo.
     if (modelChanged) {
@@ -711,7 +717,7 @@ class _RoutingPageState extends State<RoutingPage> {
           to: to.toUtc(),
           model: _model,
         ),
-        compute: (dep, grid) => computeRouteInIsolate(
+        compute: (dep, grid) => computeRouteInBackground(
           RouteRequest(
             waypoints: waypoints,
             departure: dep.toUtc(),
@@ -2554,17 +2560,27 @@ class _BoatPainter extends CustomPainter {
   bool shouldRepaint(_BoatPainter old) => old.color != color;
 }
 
+typedef _SettingsResult = ({
+  RoutingConstraints constraints,
+  RoutingObjective objective,
+  WeatherModel model,
+  bool showIsochrones,
+  bool calcChanged,
+});
+
 /// Ajustes que de verdad cambian el cálculo: cambiarlos vuelve a correr
-/// el motor, no es un filtro visual.
+/// el motor, no es un filtro visual. Además, la vista de isócronas.
 class _RoutingSettingsDialog extends StatefulWidget {
   const _RoutingSettingsDialog({
     required this.constraints,
     required this.objective,
     required this.model,
+    required this.showIsochrones,
   });
   final RoutingConstraints constraints;
   final RoutingObjective objective;
   final WeatherModel model;
+  final bool showIsochrones;
 
   @override
   State<_RoutingSettingsDialog> createState() => _RoutingSettingsDialogState();
@@ -2584,6 +2600,10 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
   late double comfortWeight = widget.constraints.comfortWeight;
   late RoutingObjective objective = widget.objective;
   late WeatherModel model = widget.model;
+  late bool showIsochrones = widget.showIsochrones;
+
+  /// Algo que cambia el cálculo (no solo la vista).
+  bool calcChanged = false;
 
   RoutingConstraints get _result => RoutingConstraints(
     minimumSailingSTW: minStw,
@@ -2634,7 +2654,10 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
           values: WeatherModel.values,
           selected: model,
           label: (m) => m.label,
-          onPick: (m) => setState(() => model = m),
+          onPick: (m) => setState(() {
+            model = m;
+            calcChanged = true;
+          }),
         ),
         const SizedBox(height: 12),
         _groupTitle('MODO'),
@@ -2642,12 +2665,28 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
           values: RoutingObjective.values,
           selected: objective,
           label: (o) => o.label,
-          onPick: (o) => setState(() => objective = o),
+          onPick: (o) => setState(() {
+            objective = o;
+            calcChanged = true;
+          }),
         ),
         const SizedBox(height: 6),
         Text(
           _modeHelp[objective] ?? '',
           style: const TextStyle(color: cMuted, fontSize: 11, height: 1.3),
+        ),
+        const SizedBox(height: 12),
+        _groupTitle('VISTA'),
+        _switchRow(
+          'Ver isócronas al calcular',
+          showIsochrones,
+          (v) => showIsochrones = v,
+          view: true,
+        ),
+        const Text(
+          'Una línea por hora; la que se está calculando, en amarillo. '
+          'También en el botón Isócronas de la barra de abajo.',
+          style: TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
         ),
       ],
     );
@@ -2798,8 +2837,13 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
                       foregroundColor: Colors.black,
                       visualDensity: VisualDensity.compact,
                     ),
-                    onPressed: () =>
-                        Navigator.of(context).pop((_result, objective, model)),
+                    onPressed: () => Navigator.of(context).pop((
+                      constraints: _result,
+                      objective: objective,
+                      model: model,
+                      showIsochrones: showIsochrones,
+                      calcChanged: calcChanged,
+                    )),
                     child: const Text(
                       'Aplicar',
                       style: TextStyle(fontWeight: FontWeight.w800),
@@ -2935,7 +2979,12 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
               divisions: ((max - min) / step).round(),
               activeColor: cCyan,
               inactiveColor: Colors.white12,
-              onChanged: enabled ? (v) => setState(() => set(v)) : null,
+              onChanged: enabled
+                  ? (v) => setState(() {
+                      set(v);
+                      calcChanged = true;
+                    })
+                  : null,
             ),
           ),
         ),
@@ -2956,33 +3005,40 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
     ),
   );
 
-  Widget _switchRow(String label, bool value, void Function(bool) set) =>
-      SizedBox(
-        height: 32,
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: cText,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+  Widget _switchRow(
+    String label,
+    bool value,
+    void Function(bool) set, {
+    bool view = false,
+  }) => SizedBox(
+    height: 32,
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: cText,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
-            Transform.scale(
-              scale: 0.8,
-              child: Switch(
-                value: value,
-                activeThumbColor: Colors.black,
-                activeTrackColor: cCyan,
-                onChanged: (v) => setState(() => set(v)),
-              ),
-            ),
-          ],
+          ),
         ),
-      );
+        Transform.scale(
+          scale: 0.8,
+          child: Switch(
+            value: value,
+            activeThumbColor: Colors.black,
+            activeTrackColor: cCyan,
+            onChanged: (v) => setState(() {
+              set(v);
+              if (!view) calcChanged = true;
+            }),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 /// Compara salidas cada [_everyH] horas durante [_spanH] horas desde la

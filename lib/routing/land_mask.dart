@@ -103,7 +103,8 @@ class LandMask {
   }
 
   static List<(double, double)> _readRing(List raw) => [
-    for (final pt in raw) ((pt[0] as num).toDouble(), (pt[1] as num).toDouble()),
+    for (final pt in raw)
+      ((pt[0] as num).toDouble(), (pt[1] as num).toDouble()),
   ];
 
   bool get isEmpty => polygons.isEmpty;

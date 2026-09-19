@@ -96,9 +96,7 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
     }
     final start = _floorHour(from);
     final end = _ceilHour(to);
-    final models = model == WeatherModel.mean
-        ? WeatherModel.singles
-        : [model];
+    final models = model == WeatherModel.mean ? WeatherModel.singles : [model];
 
     final wind = <Map<String, dynamic>>[];
     final marine = <Map<String, dynamic>>[];
@@ -107,22 +105,27 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
       final la = lats.sublist(off, end0);
       final lo = lons.sublist(off, end0);
       final results = await Future.wait([
-        _get(Uri.https('api.open-meteo.com', '/v1/forecast', {
-          ..._positionParams(la, lo),
-          'hourly': 'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
-          'wind_speed_unit': 'kn',
-          'models': models.map((m) => m.apiName).join(','),
-          'timezone': 'GMT',
-          'start_hour': _hourParam(start),
-          'end_hour': _hourParam(end),
-        })),
-        _get(Uri.https('marine-api.open-meteo.com', '/v1/marine', {
-          ..._positionParams(la, lo),
-          'hourly': 'wave_height,wave_direction,wave_period',
-          'timezone': 'GMT',
-          'start_hour': _hourParam(start),
-          'end_hour': _hourParam(end),
-        }), optional: true),
+        _get(
+          Uri.https('api.open-meteo.com', '/v1/forecast', {
+            ..._positionParams(la, lo),
+            'hourly': 'wind_speed_10m,wind_direction_10m,wind_gusts_10m',
+            'wind_speed_unit': 'kn',
+            'models': models.map((m) => m.apiName).join(','),
+            'timezone': 'GMT',
+            'start_hour': _hourParam(start),
+            'end_hour': _hourParam(end),
+          }),
+        ),
+        _get(
+          Uri.https('marine-api.open-meteo.com', '/v1/marine', {
+            ..._positionParams(la, lo),
+            'hourly': 'wave_height,wave_direction,wave_period',
+            'timezone': 'GMT',
+            'start_hour': _hourParam(start),
+            'end_hour': _hourParam(end),
+          }),
+          optional: true,
+        ),
       ]);
       wind.addAll(results[0]!);
       final m = results[1];
@@ -166,7 +169,9 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
         var reason = 'HTTP ${res.statusCode}';
         try {
           final body = jsonDecode(res.body);
-          if (body is Map && body['reason'] != null) reason = '${body['reason']}';
+          if (body is Map && body['reason'] != null) {
+            reason = '${body['reason']}';
+          }
         } catch (_) {}
         throw WeatherFetchException('${uri.host}: $reason');
       }
@@ -234,9 +239,11 @@ WeatherGrid buildOpenMeteoGrid({
     final hourly = windPoints[p]['hourly'] as Map<String, dynamic>?;
     final perModel = [
       for (final m in models)
-        (spd: series(hourly, 'wind_speed_10m', m),
-         dir: series(hourly, 'wind_direction_10m', m),
-         gust: series(hourly, 'wind_gusts_10m', m)),
+        (
+          spd: series(hourly, 'wind_speed_10m', m),
+          dir: series(hourly, 'wind_direction_10m', m),
+          gust: series(hourly, 'wind_gusts_10m', m),
+        ),
     ];
     final mh = marinePoints.length > p
         ? marinePoints[p]['hourly'] as Map<String, dynamic>?
