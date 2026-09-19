@@ -188,6 +188,49 @@ ReportNavigationStats calculateReportNavigationStats(
   );
 }
 
+/// Agrupa una serie de ángulo muestreada fino en intervalos de [interval]
+/// con media circular, descartando las muestras finas en que el ángulo
+/// cruzó el corte (0°/360°, o ±180° si [signed]): ahí la media aritmética
+/// que da el proveedor no significa nada. Una muestra fina vale si su
+/// máx − mín ≤ 180°; sin mín/máx para esa hora, no se usa.
+List<GraphPoint> reportCircularAngleSeries({
+  required List<GraphPoint> mean,
+  required List<GraphPoint> min,
+  required List<GraphPoint> max,
+  required DateTime from,
+  required Duration interval,
+  required bool signed,
+}) {
+  if (mean.isEmpty || interval <= Duration.zero) return const [];
+  final minAt = {for (final p in min) p.time.millisecondsSinceEpoch: p.value};
+  final maxAt = {for (final p in max) p.time.millisecondsSinceEpoch: p.value};
+  final sumSin = <int, double>{}, sumCos = <int, double>{};
+  final fromMs = from.millisecondsSinceEpoch, stepMs = interval.inMilliseconds;
+  for (final p in mean) {
+    if (!p.value.isFinite) continue;
+    final t = p.time.millisecondsSinceEpoch;
+    final lo = minAt[t], hi = maxAt[t];
+    if (lo == null || hi == null || !lo.isFinite || !hi.isFinite) continue;
+    if (hi - lo > 180) continue; // cruzó el corte: media sin sentido
+    final k = ((t - fromMs) / stepMs).floor();
+    final r = p.value * math.pi / 180;
+    sumSin[k] = (sumSin[k] ?? 0) + math.sin(r);
+    sumCos[k] = (sumCos[k] ?? 0) + math.cos(r);
+  }
+  final keys = sumSin.keys.toList()..sort();
+  return [
+    for (final k in keys)
+      if (sumSin[k]!.abs() > 1e-9 || sumCos[k]!.abs() > 1e-9)
+        GraphPoint(
+          time: DateTime.fromMillisecondsSinceEpoch(fromMs + k * stepMs, isUtc: true),
+          value: () {
+            final deg = math.atan2(sumSin[k]!, sumCos[k]!) * 180 / math.pi;
+            return signed ? deg : (deg + 360) % 360;
+          }(),
+        ),
+  ];
+}
+
 /// Integrates the time for which the engine is demonstrably running. RPM is
 /// deliberately required; a stale runTime/hour counter must never paint a
 /// sailing segment as motoring.
@@ -1607,6 +1650,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   Future<List<GraphPoint>> _query(
     MetricDef def, {
     String aggregate = 'mean',
+    Duration? resolution,
   }) async {
     final s = widget.settings;
     final r = _range;
@@ -1616,7 +1660,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       token: s.influxToken,
       def: def,
       fluxRange: r.flux,
-      aggEvery: r.agg,
+      aggEvery: resolution == null ? r.agg : '${resolution.inSeconds}s',
       start: widget.start,
       stop: widget.end,
       bucket: r.longRange ? s.influxArchiveBucket : s.influxBucket,
@@ -1628,7 +1672,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       authBase64: s.authBase64,
       def: def,
       range: parseFluxRange(r.flux),
-      resolution: parseAggEvery(r.agg),
+      resolution: resolution ?? parseAggEvery(r.agg),
       start: widget.start,
       stop: widget.end,
       aggFn: aggregate == 'mean' ? 'average' : aggregate,
@@ -1656,6 +1700,46 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     } catch (_) {
       return const [];
     }
+  }
+
+  /// Serie de un ÁNGULO (dirección del viento, rumbo, COG, AWA, TWA) sin
+  /// medias aritméticas a través del 0°/360° (o de ±180°).
+  ///
+  /// Algunos proveedores de histórico (signalk-to-influxdb2, el de REWIND)
+  /// ignoran el `last` y devuelven SIEMPRE la media aritmética: con viento
+  /// del N oscilando entre 355° y 5°, la media de un minuto salía 179°,
+  /// 215°, 270°… y el informe decía "viento del SW" en un día de N/NE
+  /// (reportado en vivo 2026-09-19). Aquí se pide media, mínimo y máximo a
+  /// resolución fina; se descartan los intervalos en que el ángulo cruzó
+  /// el corte (máx − mín > 180°: su media no significa nada) y el resto se
+  /// agrupa al intervalo del informe con media CIRCULAR.
+  Future<List<GraphPoint>> _angleQuery(MetricDef def, {required bool signed}) async {
+    try {
+      final r = _range;
+      final interval = parseAggEvery(r.agg);
+      final to = widget.end.toUtc();
+      final from = widget.start.toUtc();
+      final span = to.difference(from);
+      // ~15 000 filas como mucho, 2 s como poco.
+      final fineSec = math.max(2, (span.inSeconds / 15000).ceil());
+      final fine = Duration(seconds: math.min(fineSec, interval.inSeconds));
+      final res = await Future.wait([
+        _query(def, aggregate: 'mean', resolution: fine),
+        _query(def, aggregate: 'min', resolution: fine),
+        _query(def, aggregate: 'max', resolution: fine),
+      ]);
+      final out = reportCircularAngleSeries(
+        mean: res[0],
+        min: res[1],
+        max: res[2],
+        from: from,
+        interval: interval,
+        signed: signed,
+      );
+      if (out.isNotEmpty || res[0].isEmpty) return out;
+    } catch (_) {}
+    // Sin min/max (proveedor que no los da): lo de antes.
+    return _optionalQuery(def, aggregate: 'last');
   }
 
   // Estado del ancla ("on"/"off") en el periodo del informe, para marcar
@@ -1782,16 +1866,16 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
             'tws': _optionalQuery(mTws),
             // Direction must not be arithmetically averaged across 359°/0°;
             // the centred circular mean is applied later by sampleWindBarbs.
-            'twd': _optionalQuery(mTwd, aggregate: 'last'),
+            'twd': _angleQuery(mTwd, signed: false),
             'heel': _optionalQuery(mHeel),
-            'twa': _optionalQuery(mTwa, aggregate: 'last'),
+            'twa': _angleQuery(mTwa, signed: true),
             'awsPeak': _optionalQuery(mAws, aggregate: 'max'),
             'twsPeak': _optionalQuery(mTws, aggregate: 'max'),
             // Solo para reconstruir el viento real si falta. Ángulos con
             // 'last', igual que TWA/TWD: la media aritmética rompe en ±180°.
-            'awa': _optionalQuery(mAwa, aggregate: 'last'),
-            'heading': _optionalQuery(mHeading, aggregate: 'last'),
-            'cog': _optionalQuery(mCog, aggregate: 'last'),
+            'awa': _angleQuery(mAwa, signed: true),
+            'heading': _angleQuery(mHeading, signed: false),
+            'cog': _angleQuery(mCog, signed: false),
           },
         };
         final entries = queries.entries.toList();
