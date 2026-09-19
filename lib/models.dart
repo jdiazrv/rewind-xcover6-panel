@@ -1,4 +1,8 @@
 import 'dart:convert';
+
+export 'angles.dart';
+import 'angles.dart';
+
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -109,17 +113,6 @@ void skRecordServerDate(http.BaseResponse response) {
 // that can't be reached from models.dart's own standalone library) so
 // computeYawAnalysis below can use it too — main.dart and its part files
 // already see this via main.dart's own `import 'models.dart';`.
-double normalize360(double value) {
-  var out = value % 360.0;
-  if (out < 0) out += 360.0;
-  return out;
-}
-
-double normalizeRelativeAngle(double value) {
-  var out = normalize360(value);
-  if (out > 180.0) out -= 360.0;
-  return out;
-}
 
 /// Great-circle bearing/distance between two points — shared by the AIS
 /// radar (ais_view.dart, in nautical miles) and the native anchor watch
@@ -1056,6 +1049,11 @@ class SignalKModel {
   // dropout, or as stale even with a perfectly live depth feed if nothing
   // else on navUpdate happened to be moving. Reported live 2026-09-04.
   DateTime? depthMUpdate;
+
+  /// La sonda está mandando valores absurdos (pierde el fondo y da 999,9,
+  /// 6553,5…): [depthM] se queda en el ÚLTIMO válido en vez de enseñar
+  /// ese número. Reportado en vivo 2026-09-19.
+  bool depthHeldLast = false;
   double? waterTempK;
   double? outsideTempK;
   double? outsideHumidity; // 0-100 %
@@ -1271,6 +1269,7 @@ class SignalKModel {
     courseBearingTrueDeg = null;
     depthM = null;
     depthMUpdate = null;
+    depthHeldLast = false;
     waterTempK = null;
     outsideTempK = null;
     outsideHumidity = null;
@@ -4705,4 +4704,25 @@ String humanDuration(Duration d) {
     return m == 0 ? '${d.inHours} h' : '${d.inHours} h $m min';
   }
   return '${d.inMinutes} min';
+}
+
+/// Profundidad más allá de la cual una lectura de la sonda no es real:
+/// las sondas de recreo no leen tanto, y al perder el fondo mandan valores
+/// "centinela" (999,9 · 1000 · 6553,5 m). Negativos pequeños sí se admiten
+/// (offset de quilla).
+const kMaxPlausibleDepthM = 400.0;
+
+bool plausibleDepthM(double d) =>
+    d.isFinite && d >= -2 && d <= kMaxPlausibleDepthM;
+
+/// Demora de un blanco respecto a la proa, de 0 a 180° por cada banda
+/// ("35° Er", "130° Br"); justo a proa o a popa no hay banda ("0°",
+/// "180°"). Sin rumbo propio no hay proa de referencia y se da la demora
+/// verdadera ("212°V").
+String relativeBearingText(double bearingTrueDeg, double? headingDeg) {
+  if (headingDeg == null) return '${bearingTrueDeg.round() % 360}°V';
+  final rel = normalizeRelativeAngle(bearingTrueDeg - headingDeg);
+  final a = rel.abs().round();
+  if (a == 0 || a == 180) return '$a°';
+  return '$a° ${rel < 0 ? 'Br' : 'Er'}';
 }

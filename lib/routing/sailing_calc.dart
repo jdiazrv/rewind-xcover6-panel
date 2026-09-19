@@ -6,7 +6,7 @@
 
 import 'dart:math' as math;
 
-import '../models.dart' show normalizeRelativeAngle;
+import '../angles.dart';
 import '../polars.dart';
 
 /// Viento aparente a partir del verdadero y del rumbo/velocidad del barco.

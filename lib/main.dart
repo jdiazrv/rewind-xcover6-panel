@@ -3413,8 +3413,9 @@ class _DashboardState extends State<Dashboard> {
     // "lysmarine.local:3000" y cualquier guardado antes de resolver el MMSI
     // la daba por buena — motor, transmisión y hélice volvían a vacío.
     if (_currentServerConfigKey == null) {
-      final remembered =
-          prefs.getString('canonicalKey.${settings.host}:${settings.port}');
+      final remembered = prefs.getString(
+        'canonicalKey.${settings.host}:${settings.port}',
+      );
       if (remembered != null && remembered.isNotEmpty) {
         _currentServerConfigKey = remembered;
       }
@@ -3999,6 +4000,17 @@ class _DashboardState extends State<Dashboard> {
     if (c.depthPath != null && c.depthPath!.isNotEmpty) {
       h[c.depthPath!] = (v) {
         final n = _num(v);
+        if (n != null && !plausibleDepthM(n)) {
+          // Valor absurdo: se queda el último válido (marcado ÚLTIMO) en
+          // vez de enseñarlo. La sonda sigue viva, así que el último
+          // válido no caduca mientras siga llegando algo.
+          if (signalK.depthM != null) {
+            signalK.depthHeldLast = true;
+            signalK.depthMUpdate = DateTime.now();
+          }
+          return;
+        }
+        signalK.depthHeldLast = false;
         signalK.depthM = n;
         signalK.depthMUpdate = DateTime.now();
         _depthTrend.add(n);
@@ -4324,8 +4336,8 @@ class _DashboardState extends State<Dashboard> {
           // a conectar por el mismo camino que la guardó — la polar volvía
           // a quedar en "Ninguna" aunque siguiera guardada. Reportado en
           // vivo 2026-09-18 ("por que se borra cada vez la polar").
-          settings.polarConfigJsonByHost[previousKey] =
-              settings.polarConfigToJson();
+          settings.polarConfigJsonByHost[previousKey] = settings
+              .polarConfigToJson();
           final canonicalSensor = settings.sensorConfigJsonByHost[canonicalKey];
           final canonicalAnchor = settings.anchorConfigJsonByHost[canonicalKey];
           final canonicalPolar = settings.polarConfigJsonByHost[canonicalKey];
@@ -4339,7 +4351,9 @@ class _DashboardState extends State<Dashboard> {
           }
           if (canonicalPolar is Map) {
             try {
-              settings.polarConfigFromJson(canonicalPolar.cast<String, dynamic>());
+              settings.polarConfigFromJson(
+                canonicalPolar.cast<String, dynamic>(),
+              );
             } catch (_) {
               /* keep whatever was already loaded if corrupted */
             }
@@ -11601,8 +11615,17 @@ class _DashboardState extends State<Dashboard> {
           title: 'Profundidad',
           value: fmt(depth, 1, ''),
           unit: 'm',
-          color: _isCardAlarming('depth') ? cRed : depthColor(depth),
-          trend: depth == null ? null : _depthTrend.direction,
+          subtitle: depth != null && signalK.depthHeldLast
+              ? 'ÚLTIMO · sonda sin fondo'
+              : null,
+          color: _isCardAlarming('depth')
+              ? cRed
+              : (depth != null && signalK.depthHeldLast
+                    ? cMuted
+                    : depthColor(depth)),
+          trend: depth == null || signalK.depthHeldLast
+              ? null
+              : _depthTrend.direction,
         );
       case 'heel':
         return NavCardData(
@@ -11685,7 +11708,7 @@ class _DashboardState extends State<Dashboard> {
                 if (closest.distNm != null)
                   '${closest.distNm!.toStringAsFixed(1)}NM',
                 if (closest.bearingDeg != null)
-                  '${closest.bearingDeg!.round()}°',
+                  relativeBearingText(closest.bearingDeg!, heading ?? cog),
               ].join(' · ')
             : (_visibleAisTargets.isEmpty ? 'Sin AIS' : 'Sin cruce previsto');
         return NavCardData(
@@ -16119,8 +16142,10 @@ class _DashboardState extends State<Dashboard> {
         final headerHeight = twoLineHeader
             ? _forecastHeaderHeight + 40
             : _forecastHeaderHeight;
-        final summaryHeight = ((c.maxHeight - headerHeight) * 0.42)
-            .clamp(110.0, 168.0);
+        final summaryHeight = ((c.maxHeight - headerHeight) * 0.42).clamp(
+          110.0,
+          168.0,
+        );
         final place = Text(
           weather.place,
           maxLines: 1,
@@ -16194,7 +16219,10 @@ class _DashboardState extends State<Dashboard> {
                         children: [
                           Expanded(
                             child: Row(
-                              children: [Expanded(child: place), badge],
+                              children: [
+                                Expanded(child: place),
+                                badge,
+                              ],
                             ),
                           ),
                           SizedBox(
@@ -16996,8 +17024,8 @@ class _DashboardState extends State<Dashboard> {
             .toJson();
         // Misma polar por servidor que sensores/fondeo — se le olvidaba
         // guardar aquí (ver el mismo fallo en la resolución por MMSI).
-        settings.polarConfigJsonByHost[outgoingKey] =
-            settings.polarConfigToJson();
+        settings.polarConfigJsonByHost[outgoingKey] = settings
+            .polarConfigToJson();
       }
       settings.host = newHost;
       settings.port = newPort;

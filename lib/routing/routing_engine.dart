@@ -8,7 +8,7 @@ import 'dart:async';
 import 'dart:isolate';
 import 'dart:math' as math;
 
-import '../models.dart' show normalizeRelativeAngle;
+import '../angles.dart';
 import '../polars.dart';
 import 'geo.dart';
 import 'land_mask.dart';
@@ -353,7 +353,14 @@ Future<RouteResult> computeRouteInBackground(
   void Function(double) onProgress, {
   void Function(RouteIsochrone)? onIsochrone,
 }) => kRoutingOnWeb
-    ? computeRouteChunked(req, onProgress, onIsochrone: onIsochrone)
+    // Trozos de 40 ms: ceder al navegador cuesta unos ms cada vez; con
+    // trozos más cortos se va más tiempo en ceder que en calcular.
+    ? computeRouteChunked(
+        req,
+        onProgress,
+        onIsochrone: onIsochrone,
+        sliceMs: 40,
+      )
     : computeRouteInIsolate(req, onProgress, onIsochrone: onIsochrone);
 
 /// El mismo cálculo por trozos, en el hilo que llama: cada ~[sliceMs]

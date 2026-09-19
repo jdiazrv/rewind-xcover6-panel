@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rewind_xcover6_panel/polars.dart';
 import 'package:rewind_xcover6_panel/routing/routing_page.dart';
 import 'package:rewind_xcover6_panel/routing/weather.dart';
+import 'package:rewind_xcover6_panel/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Proveedor sin red: viento del N de 12 kn y ola de 0,8 m en toda la zona.
@@ -29,7 +30,9 @@ class _FlatProvider implements WeatherProvider {
     const nLat = 6, nLon = 6;
     final start = DateTime.utc(from.year, from.month, from.day, from.hour);
     final hours = to.difference(from).inHours + 1;
-    final times = [for (var h = 0; h <= hours; h++) start.add(Duration(hours: h))];
+    final times = [
+      for (var h = 0; h <= hours; h++) start.add(Duration(hours: h)),
+    ];
     final n = times.length * nLat * nLon;
     Float32List filled(double v) => Float32List(n)..fillRange(0, n, v);
     return WeatherGrid(
@@ -59,8 +62,32 @@ class _FlatProvider implements WeatherProvider {
       5;
 }
 
+final _polar = PolarTable(
+  id: 'dehler47',
+  name: 'Dehler 47',
+  tws: const [6, 8, 10, 12, 14, 16, 20],
+  twa: const [52, 60, 75, 90, 110, 120, 135, 150],
+  speeds: const [
+    [5.49, 6.54, 7.4, 7.91, 8.17, 8.28, 8.32],
+    [5.82, 6.88, 7.69, 8.12, 8.36, 8.5, 8.61],
+    [6.08, 7.16, 7.9, 8.28, 8.53, 8.73, 9.01],
+    [6.0, 7.25, 8.07, 8.45, 8.61, 8.81, 9.29],
+    [6.06, 7.38, 8.19, 8.61, 8.96, 9.29, 9.7],
+    [5.89, 7.19, 8.08, 8.54, 8.91, 9.3, 10.05],
+    [5.31, 6.55, 7.58, 8.21, 8.6, 8.98, 9.84],
+    [4.44, 5.62, 6.64, 7.57, 8.18, 8.57, 9.3],
+  ],
+  beatAngle: const [43.6, 41.4, 41.2, 40.5, 39.4, 38.7, 37.6],
+  beatVmg: const [3.56, 4.35, 4.97, 5.46, 5.74, 5.87, 6.0],
+  runAngle: const [140.6, 148.4, 151.1, 153.8, 160.4, 173.6, 179],
+  runVmg: const [3.85, 4.87, 5.76, 6.58, 7.28, 7.88, 8.68],
+);
+
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+    resetRoutingSessionForTest();
+  });
 
   Future<void> pump(
     WidgetTester t,
@@ -116,6 +143,39 @@ void main() {
     // El punto se colocó y arranca (con debounce) la descarga del tiempo.
     await t.pump(const Duration(milliseconds: 400));
     expect(find.textContaining('M directas'), findsOneWidget);
+    expect(t.takeException(), isNull);
+  });
+
+  testWidgets('cambiar ajustes no calcula sola: enciende Recalcular', (
+    t,
+  ) async {
+    final p = _FlatProvider();
+    await pump(t, p, const Size(1280, 800), polar: _polar);
+    await t.tap(find.text('Llegada'));
+    await t.pump();
+    await t.tapAt(const Offset(900, 450));
+    await t.pump(const Duration(milliseconds: 800));
+    await t.tap(find.byIcon(Icons.tune));
+    await t.pump(const Duration(milliseconds: 500));
+    await t.pump(const Duration(milliseconds: 500));
+    await t.tap(find.text('Confort'));
+    await t.pump();
+    await t.tap(find.text('Aplicar'));
+    await t.pump(const Duration(milliseconds: 500));
+    await t.pump(const Duration(milliseconds: 500));
+    // Si se lanzara sola, _computeRoute apagaría el botón al instante.
+    expect(find.textContaining('RESUMEN'), findsNothing);
+    expect(find.textContaining('M navegadas'), findsNothing);
+    // El botón está encendido (fondo cian).
+    final box = t.widget<Container>(
+      find
+          .descendant(
+            of: find.byTooltip('Recalcular'),
+            matching: find.byType(Container),
+          )
+          .first,
+    );
+    expect((box.decoration! as BoxDecoration).color, cCyan);
     expect(t.takeException(), isNull);
   });
 
@@ -208,26 +268,7 @@ void main() {
   }
 
   group('con polar', () {
-    final polar = PolarTable(
-      id: 'dehler47',
-      name: 'Dehler 47',
-      tws: const [6, 8, 10, 12, 14, 16, 20],
-      twa: const [52, 60, 75, 90, 110, 120, 135, 150],
-      speeds: const [
-        [5.49, 6.54, 7.4, 7.91, 8.17, 8.28, 8.32],
-        [5.82, 6.88, 7.69, 8.12, 8.36, 8.5, 8.61],
-        [6.08, 7.16, 7.9, 8.28, 8.53, 8.73, 9.01],
-        [6.0, 7.25, 8.07, 8.45, 8.61, 8.81, 9.29],
-        [6.06, 7.38, 8.19, 8.61, 8.96, 9.29, 9.7],
-        [5.89, 7.19, 8.08, 8.54, 8.91, 9.3, 10.05],
-        [5.31, 6.55, 7.58, 8.21, 8.6, 8.98, 9.84],
-        [4.44, 5.62, 6.64, 7.57, 8.18, 8.57, 9.3],
-      ],
-      beatAngle: const [43.6, 41.4, 41.2, 40.5, 39.4, 38.7, 37.6],
-      beatVmg: const [3.56, 4.35, 4.97, 5.46, 5.74, 5.87, 6.0],
-      runAngle: const [140.6, 148.4, 151.1, 153.8, 160.4, 173.6, 179],
-      runVmg: const [3.85, 4.87, 5.76, 6.58, 7.28, 7.88, 8.68],
-    );
+    final polar = _polar;
 
     Future<void> placeDestination(WidgetTester t, [Size? size]) async {
       await t.tap(find.text('Llegada'));
@@ -242,7 +283,9 @@ void main() {
     /// tiempo real, no solo el reloj falso de los tests.
     Future<void> waitRoute(WidgetTester t) async {
       for (var i = 0; i < 40; i++) {
-        await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+        await t.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
         await t.pump();
         if (find.textContaining('RESUMEN').evaluate().isNotEmpty) return;
       }
@@ -275,7 +318,9 @@ void main() {
       });
     }
 
-    testWidgets('isócronas: encendidas por defecto y sin botón abajo', (t) async {
+    testWidgets('isócronas: encendidas por defecto y sin botón abajo', (
+      t,
+    ) async {
       final p = _FlatProvider();
       await pump(t, p, const Size(1280, 800), polar: polar);
       await placeDestination(t);
@@ -291,6 +336,27 @@ void main() {
       expect(t.takeException(), isNull);
     });
 
+    testWidgets('salir de la pantalla y volver conserva la ruta', (t) async {
+      final p = _FlatProvider();
+      await pump(t, p, const Size(1280, 800), polar: polar);
+      await placeDestination(t);
+      await t.tap(find.byTooltip('Recalcular'));
+      await t.pump();
+      await waitRoute(t);
+      expect(find.textContaining('M navegadas'), findsOneWidget);
+
+      // Fuera: otra pantalla (la de ruta se destruye).
+      await t.pumpWidget(const MaterialApp(home: Text('otra')));
+      await t.pump();
+      expect(find.text('otra'), findsOneWidget);
+
+      // Y de vuelta: sin recalcular, la ruta y el resumen siguen ahí.
+      await pump(t, p, const Size(1280, 800), polar: polar);
+      expect(find.textContaining('M navegadas'), findsOneWidget);
+      expect(find.textContaining('RESUMEN'), findsOneWidget);
+      expect(t.takeException(), isNull);
+    });
+
     testWidgets('isócronas también desde Ajustes, sin recalcular', (t) async {
       final p = _FlatProvider();
       await pump(t, p, const Size(1280, 800), polar: polar);
@@ -299,10 +365,12 @@ void main() {
       expect(find.text('Ver isócronas al calcular'), findsOneWidget);
       await t.tap(
         find.descendant(
-          of: find.ancestor(
-            of: find.text('Ver isócronas al calcular'),
-            matching: find.byType(Row),
-          ).first,
+          of: find
+              .ancestor(
+                of: find.text('Ver isócronas al calcular'),
+                matching: find.byType(Row),
+              )
+              .first,
           matching: find.byType(Switch),
         ),
       );
@@ -325,7 +393,9 @@ void main() {
       await t.pump();
       await t.tap(find.text('Calcular'));
       for (var i = 0; i < 60; i++) {
-        await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+        await t.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
         await t.pump();
         if (find.textContaining('→').evaluate().length >= 3) break;
       }
@@ -334,6 +404,10 @@ void main() {
       expect(find.text('MÁS RÁPIDA'), findsOneWidget);
       expect(t.takeException(), isNull);
       await t.tap(find.textContaining('→').last);
+      await t.pump(const Duration(milliseconds: 400));
+      // Elegir salida no calcula sola: enciende Recalcular.
+      expect(find.textContaining('RESUMEN'), findsNothing);
+      await t.tap(find.byTooltip('Recalcular'));
       await t.pump();
       await waitRoute(t);
       expect(find.textContaining('RESUMEN'), findsOneWidget);

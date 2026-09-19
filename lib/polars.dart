@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'models.dart' show normalizeRelativeAngle;
+import 'angles.dart';
 
 /// Polar de un barco: qué velocidad da a cada combinación de viento real
 /// (TWS) y ángulo al viento (TWA).

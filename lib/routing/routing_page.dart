@@ -48,6 +48,57 @@ const _cMotor = cOrange;
 
 enum _Slot { origin, destination, via }
 
+/// Lo que se deja al salir de la pantalla de ruta, para encontrarlo igual
+/// al volver. En memoria, mientras la app siga abierta (los puntos, la
+/// salida y los ajustes además se guardan en disco).
+class _RoutingSession {
+  _RoutingSession({
+    required this.origin,
+    required this.destination,
+    required this.vias,
+    required this.originName,
+    required this.destinationName,
+    required this.departure,
+    required this.model,
+    required this.objective,
+    required this.constraints,
+    required this.showIsochrones,
+    required this.grid,
+    required this.route,
+    required this.isochrones,
+    required this.showSummary,
+    required this.viewTime,
+    required this.routeError,
+    required this.routeStale,
+    required this.polarKey,
+    required this.zoom,
+  });
+
+  static _RoutingSession? last;
+
+  final ll.LatLng? origin, destination;
+  final List<ll.LatLng> vias;
+  final String? originName, destinationName;
+  final DateTime departure;
+  final WeatherModel model;
+  final RoutingObjective objective;
+  final RoutingConstraints constraints;
+  final bool showIsochrones;
+  final WeatherGrid? grid;
+  final RouteResult? route;
+  final List<RouteIsochrone> isochrones;
+  final bool showSummary;
+  final DateTime? viewTime;
+  final String? routeError;
+  final bool routeStale;
+  final String polarKey;
+  final double? zoom;
+}
+
+/// Para los tests: empezar sin la sesión de un test anterior.
+@visibleForTesting
+void resetRoutingSessionForTest() => _RoutingSession.last = null;
+
 class _Target {
   const _Target(this.slot, [this.viaIndex = -1]);
   final _Slot slot;
@@ -133,29 +184,116 @@ class _RoutingPageState extends State<RoutingPage> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadLand());
+    final session = _RoutingSession.last;
+    if (session != null) {
+      _resumeSession(session);
+      return;
+    }
     if (widget.boatLat != null && widget.boatLon != null) {
       _origin = ll.LatLng(widget.boatLat!, widget.boatLon!);
     }
-    unawaited(_loadLand());
     unawaited(_restore());
   }
+
+  /// Volver a la pantalla tal como se dejó: los mismos puntos (la salida
+  /// NO se mueve a la posición actual del barco), la ruta ya calculada,
+  /// sus isócronas, el resumen y el deslizador. Solo si cambió la polar
+  /// del barco la ruta deja de valer y se enciende Recalcular. Reportado
+  /// en vivo 2026-09-19 ("si salgo de ruta y vuelvo debería guardar el
+  /// routing").
+  void _resumeSession(_RoutingSession s) {
+    _origin = s.origin;
+    _destination = s.destination;
+    _vias
+      ..clear()
+      ..addAll(s.vias);
+    _originName = s.originName;
+    _destinationName = s.destinationName;
+    _departure = s.departure;
+    _model = s.model;
+    _objective = s.objective;
+    _constraints = s.constraints;
+    _showIsochrones = s.showIsochrones;
+    _grid = s.grid;
+    final samePolar = s.polarKey == _polarKey;
+    if (samePolar) {
+      _route = s.route;
+      _isochrones.addAll(s.isochrones);
+      _showSummary = s.showSummary;
+      _viewTime = s.viewTime;
+      _routeError = s.routeError;
+      _routeStale = s.routeStale;
+    } else {
+      _routeStale = s.origin != null && s.destination != null;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final vt = _viewTime;
+      final pts = _orderedPoints;
+      try {
+        if (vt != null && _route != null) {
+          final p = _route!.positionAt(vt);
+          if (p != null) {
+            _map.move(ll.LatLng(p.lat, p.lon), s.zoom ?? 9);
+            return;
+          }
+        }
+        if (pts.isNotEmpty) _fitPoints();
+      } catch (_) {}
+    });
+    // La rejilla guardada puede haber caducado: se vuelve a pedir (la
+    // caché la da al instante si sigue valiendo), sin tocar la ruta.
+    if (_grid == null) unawaited(_fetch());
+  }
+
+  String get _polarKey =>
+      '${widget.polar?.id}|${widget.polar?.name}|${widget.polarFactorPercent}';
 
   /// Costa del Mediterráneo y el mar Negro (Natural Earth 1:50 M,
   /// recortada y simplificada, ~50 KB). Sin ella la ruta se calcula
   /// igual, solo sin evitar tierra — por eso los fallos aquí no se
-  /// enseñan, solo se recalcula en cuanto carga.
+  /// enseñan. No lanza el cálculo: la ruta solo se calcula al pulsar
+  /// Recalcular.
   Future<void> _loadLand() async {
     try {
       final raw = await rootBundle.loadString('assets/land/land_med.json');
       if (!mounted) return;
       setState(() => _land = LandMask.fromJson(raw));
-      unawaited(_computeRoute());
     } catch (_) {}
   }
 
   @override
   void dispose() {
+    double? zoom;
+    try {
+      zoom = _map.camera.zoom;
+    } catch (_) {}
+    _RoutingSession.last = _RoutingSession(
+      origin: _origin,
+      destination: _destination,
+      vias: List.of(_vias),
+      originName: _originName,
+      destinationName: _destinationName,
+      departure: _departure,
+      model: _model,
+      objective: _objective,
+      constraints: _constraints,
+      showIsochrones: _showIsochrones,
+      grid: _grid,
+      // Si se sale a medio cálculo, esa ruta no terminó: al volver, a
+      // recalcular.
+      route: _routing ? null : _route,
+      isochrones: _routing ? const [] : List.of(_isochrones),
+      showSummary: _showSummary && !_routing,
+      viewTime: _viewTime,
+      routeError: _routing ? null : _routeError,
+      routeStale: _routeStale || _routing,
+      polarKey: _polarKey,
+      zoom: zoom,
+    );
     _debounce?.cancel();
+    _liveRepaint?.cancel();
     super.dispose();
   }
 
@@ -414,17 +552,20 @@ class _RoutingPageState extends State<RoutingPage> {
           land: _land,
         ),
         (f) {
-          if (mounted && serial == _routeSerial) {
-            setState(() => _routeProgress = f);
-          }
+          if (serial != _routeSerial) return;
+          _routeProgress = f;
+          _scheduleLiveRepaint();
         },
         // Se piden siempre: así, activar "Isócronas" después de calcular
         // las enseña sin volver a calcular.
         onIsochrone: (iso) {
-          if (!mounted || serial != _routeSerial) return;
-          setState(() => _isochrones.add(iso));
+          if (serial != _routeSerial) return;
+          _isochrones.add(iso);
+          _scheduleLiveRepaint();
         },
       );
+      _liveRepaint?.cancel();
+      _liveRepaint = null;
       if (!mounted || serial != _routeSerial) return;
       setState(() {
         _route = result;
@@ -476,6 +617,38 @@ class _RoutingPageState extends State<RoutingPage> {
     if (t == null) return null;
     return 'Sin previsión desde ${_formatLocal(t)}: ese tramo se ha supuesto '
         'a motor en línea recta.';
+  }
+
+  /// Progreso e isócronas llegan una vez por paso de 15 min (cientos por
+  /// ruta). Redibujar el mapa en cada una era lo que hacía lentísimo el
+  /// routing en la webapp (el motor tarda ~50 ms; la pantalla, segundos):
+  /// se agrupan y se pinta como mucho cada 150 ms.
+  Timer? _liveRepaint;
+  void _scheduleLiveRepaint() {
+    if (_liveRepaint != null) return;
+    _liveRepaint = Timer(const Duration(milliseconds: 150), () {
+      _liveRepaint = null;
+      if (mounted) setState(() {});
+    });
+  }
+
+  /// Hasta qué hora ha llegado ya la búsqueda ("salida + 6 h 15").
+  String? _isochroneDetail() {
+    if (_isochrones.isEmpty) return 'preparando';
+    final d = _isochrones.last.time.difference(_departure.toUtc());
+    if (d.isNegative) return null;
+    final leg = _isochrones.last.legIndex;
+    final legs = _vias.length + 1;
+    return 'salida + ${_durationText(d)}'
+        '${legs > 1 ? ' · tramo ${leg + 1}/$legs' : ''}';
+  }
+
+  /// Hay algo que calcular: enciende el botón Recalcular (en color), sin
+  /// lanzar nada.
+  void _markStale() {
+    if (_origin != null && _destination != null && widget.polar != null) {
+      setState(() => _routeStale = true);
+    }
   }
 
   Future<void> _recalculate() async {
@@ -685,12 +858,14 @@ class _RoutingPageState extends State<RoutingPage> {
       unawaited(_persist());
       return;
     }
-    // No es solo visual: cambia la ruta óptima y la ETA. Si además cambió
-    // el modelo, hace falta volver a bajar el tiempo de ese modelo.
+    // No es solo visual: cambia la ruta óptima y la ETA. Pero NO se lanza
+    // sola: el botón Recalcular se enciende y el cálculo espera a que se
+    // pulse. Si cambió el modelo, se baja ya su tiempo (eso sí hace falta
+    // para las capas).
     if (modelChanged) {
       unawaited(_recompute());
     } else {
-      unawaited(_computeRoute());
+      _markStale();
     }
     unawaited(_persist());
   }
@@ -713,6 +888,7 @@ class _RoutingPageState extends State<RoutingPage> {
       context: context,
       builder: (_) => _DeparturePlannerDialog(
         base: _departure,
+        shipIconAsset: widget.shipIconAsset,
         constraints: _constraints,
         fetch: (from, to) => widget.weather.fetchGrid(
           box: box,
@@ -720,7 +896,7 @@ class _RoutingPageState extends State<RoutingPage> {
           to: to.toUtc(),
           model: _model,
         ),
-        compute: (dep, grid) => computeRouteInBackground(
+        compute: (dep, grid, onProgress) => computeRouteInBackground(
           RouteRequest(
             waypoints: waypoints,
             departure: dep.toUtc(),
@@ -731,7 +907,7 @@ class _RoutingPageState extends State<RoutingPage> {
             objective: _objective,
             land: _land,
           ),
-          (_) {},
+          onProgress,
         ),
       ),
     );
@@ -742,8 +918,8 @@ class _RoutingPageState extends State<RoutingPage> {
       _route = null;
       _isochrones.clear();
     });
+    // Baja el tiempo de esa salida y enciende Recalcular; no calcula solo.
     await _recompute();
-    if (mounted) await _recalculate();
   }
 
   // ── Cronología activa: la de la ruta si hay una calculada, si no la de
@@ -795,9 +971,9 @@ class _RoutingPageState extends State<RoutingPage> {
                     userAgentPackageName: 'com.rewindpanel.myapp',
                   ),
                   if (_grid != null && vt != null && _showWaves)
-                    _waveLayer(_grid!, vt),
+                    _memoWaveLayer(_grid!, vt),
                   if (_grid != null && vt != null && _showWind)
-                    _windLayer(_grid!, vt),
+                    _memoWindLayer(_grid!, vt),
                   if (_showIsochrones && _isochrones.isNotEmpty)
                     fm.PolylineLayer(polylines: _isochronePolylines()),
                   if (_route != null)
@@ -1411,7 +1587,9 @@ class _RoutingPageState extends State<RoutingPage> {
                     ),
                   ),
                 ),
-                if (_loadingWeather || _routing)
+                // Al calcular manda la barra de travesía de abajo; el
+                // circulito queda para la descarga del tiempo.
+                if (_loadingWeather && !_routing)
                   Padding(
                     padding: const EdgeInsets.only(left: 4, right: 4),
                     child: SizedBox(
@@ -1423,9 +1601,7 @@ class _RoutingPageState extends State<RoutingPage> {
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
                         color: cCyan,
-                        value: _routing
-                            ? _routeProgress.clamp(0.02, 1.0)
-                            : null,
+                        value: null,
                       ),
                     ),
                   ),
@@ -1496,6 +1672,16 @@ class _RoutingPageState extends State<RoutingPage> {
               ),
             ),
           ),
+          if (_routing)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 2, 2, 2),
+              child: RouteProgressBar(
+                progress: _routeProgress,
+                label: 'Calculando ruta',
+                detail: _isochroneDetail(),
+                shipIconAsset: widget.shipIconAsset,
+              ),
+            ),
           ..._topNotices(),
         ],
       ),
@@ -2172,6 +2358,28 @@ class _RoutingPageState extends State<RoutingPage> {
   // translúcido se ve verde.
   static const _kWaveWarn = Color(0x38ff8c1a);
   static const _kWaveBad = Color(0x48e0206e);
+
+  // Las capas de fondo solo dependen de la rejilla y la hora: se guardan
+  // y se devuelve el MISMO widget mientras no cambien, así Flutter no
+  // vuelve a muestrear ~600 celdas en cada redibujado (arrastrar un punto,
+  // progreso del cálculo…).
+  (WeatherGrid, DateTime, Widget)? _waveMemo, _windMemo;
+
+  Widget _memoWaveLayer(WeatherGrid g, DateTime t) {
+    final m = _waveMemo;
+    if (m != null && identical(m.$1, g) && m.$2 == t) return m.$3;
+    final w = _waveLayer(g, t);
+    _waveMemo = (g, t, w);
+    return w;
+  }
+
+  Widget _memoWindLayer(WeatherGrid g, DateTime t) {
+    final m = _windMemo;
+    if (m != null && identical(m.$1, g) && m.$2 == t) return m.$3;
+    final w = _windLayer(g, t);
+    _windMemo = (g, t, w);
+    return w;
+  }
 
   Widget _waveLayer(WeatherGrid g, DateTime t) {
     final polys = <fm.Polygon>[];
@@ -3043,14 +3251,20 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
 class _DeparturePlannerDialog extends StatefulWidget {
   const _DeparturePlannerDialog({
     required this.base,
+    this.shipIconAsset,
     required this.constraints,
     required this.fetch,
     required this.compute,
   });
   final DateTime base;
+  final String? shipIconAsset;
   final RoutingConstraints constraints;
   final Future<WeatherGrid> Function(DateTime from, DateTime to) fetch;
-  final Future<RouteResult> Function(DateTime departure, WeatherGrid grid)
+  final Future<RouteResult> Function(
+    DateTime departure,
+    WeatherGrid grid,
+    void Function(double) onProgress,
+  )
   compute;
 
   @override
@@ -3066,6 +3280,38 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
   int _total = 0;
   final List<(DateTime, RouteSummary)> _rows = [];
 
+  /// Progreso de la salida que se está calculando (0–1) y cuál es: la
+  /// barra avanza de forma continua, no a saltos de una salida entera.
+  double _current = 0;
+  DateTime? _currentDep;
+  bool _fetching = false;
+  Timer? _repaint;
+
+  @override
+  void dispose() {
+    _repaint?.cancel();
+    super.dispose();
+  }
+
+  void _scheduleRepaint() {
+    if (_repaint != null) return;
+    _repaint = Timer(const Duration(milliseconds: 150), () {
+      _repaint = null;
+      if (mounted) setState(() {});
+    });
+  }
+
+  double get _overall =>
+      _total == 0 ? 0 : ((_rows.length + _current) / _total).clamp(0.0, 1.0);
+
+  String get _progressDetail {
+    if (_fetching) return 'bajando el tiempo';
+    final d = _currentDep;
+    if (d == null) return '${_rows.length} de $_total';
+    return 'salida ${_RoutingPageState._formatLocal(d)} · '
+        '${_rows.length + 1} de $_total';
+  }
+
   /// Horas de previsión por encima de la última salida, para que la ruta
   /// quepa: las mismas que usa la pantalla.
   static const _routeHours = _kForecastHours;
@@ -3080,24 +3326,43 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
       _error = null;
       _rows.clear();
       _total = deps.length;
+      _current = 0;
+      _currentDep = null;
+      _fetching = true;
     });
     try {
       final grid = await widget.fetch(
         widget.base,
         deps.last.add(const Duration(hours: _routeHours)),
       );
+      if (mounted) setState(() => _fetching = false);
       for (final dep in deps) {
         if (!mounted) return;
-        final r = await widget.compute(dep, grid);
+        setState(() {
+          _currentDep = dep;
+          _current = 0;
+        });
+        final r = await widget.compute(dep, grid, (f) {
+          _current = f;
+          _scheduleRepaint();
+        });
         if (!mounted) return;
-        setState(
-          () => _rows.add((dep, RouteSummary.of(r, widget.constraints))),
-        );
+        setState(() {
+          _rows.add((dep, RouteSummary.of(r, widget.constraints)));
+          _current = 0;
+          _currentDep = null;
+        });
       }
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
-      if (mounted) setState(() => _running = false);
+      if (mounted) {
+        setState(() {
+          _running = false;
+          _fetching = false;
+          _currentDep = null;
+        });
+      }
     }
   }
 
@@ -3226,11 +3491,14 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
               ),
             ),
             if (_running)
-              LinearProgressIndicator(
-                value: _total == 0 ? null : _rows.length / _total,
-                minHeight: 2,
-                color: cCyan,
-                backgroundColor: Colors.white12,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+                child: RouteProgressBar(
+                  progress: _overall,
+                  label: 'Probando salidas',
+                  detail: _progressDetail,
+                  shipIconAsset: widget.shipIconAsset,
+                ),
               ),
             if (_error != null)
               Padding(
@@ -3359,4 +3627,239 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
       ),
     );
   }
+}
+
+/// Barra de progreso del cálculo como una travesía: de S a L, con el barco
+/// (el icono elegido en CFG) avanzando y cabeceando suavemente, una estela
+/// en degradado cian→azul por detrás y mar en calma animado por delante.
+/// El avance se interpola, así que va suave aunque el progreso llegue a
+/// saltos.
+class RouteProgressBar extends StatefulWidget {
+  const RouteProgressBar({
+    super.key,
+    required this.progress,
+    required this.label,
+    this.detail,
+    this.shipIconAsset,
+  });
+
+  /// 0–1.
+  final double progress;
+  final String label;
+  final String? detail;
+  final String? shipIconAsset;
+
+  @override
+  State<RouteProgressBar> createState() => _RouteProgressBarState();
+}
+
+class _RouteProgressBarState extends State<RouteProgressBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _sea = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _sea.dispose();
+    super.dispose();
+  }
+
+  static const _boat = 26.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final target = widget.progress.clamp(0.0, 1.0);
+    return TweenAnimationBuilder<double>(
+      tween: Tween(end: target),
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      builder: (context, p, _) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Text(
+                widget.label,
+                style: const TextStyle(
+                  color: cText,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              if (widget.detail != null) ...[
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    widget.detail!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: cMuted, fontSize: 10.5),
+                  ),
+                ),
+              ] else
+                const Spacer(),
+              if (widget.detail != null) const Spacer(),
+              Text(
+                '${(p * 100).round()} %',
+                style: const TextStyle(
+                  color: cCyan,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w900,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(
+            height: 28,
+            child: LayoutBuilder(
+              builder: (context, box) {
+                final w = box.maxWidth;
+                const inset = 10.0; // sitio para las marcas S y L
+                final x = inset + (w - 2 * inset) * p;
+                return AnimatedBuilder(
+                  animation: _sea,
+                  builder: (context, _) {
+                    final phase = _sea.value;
+                    final bob = math.sin(phase * 2 * math.pi);
+                    return Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Positioned.fill(
+                          child: CustomPaint(
+                            painter: _VoyagePainter(
+                              progressX: x,
+                              inset: inset,
+                              phase: phase,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: x - _boat / 2,
+                          top: (28 - _boat) / 2 + bob * 1.2,
+                          width: _boat,
+                          height: _boat,
+                          child: Transform.rotate(
+                            // Rumbo "Este" (hacia L), con un leve cabeceo.
+                            angle: math.pi / 2 + bob * 0.05,
+                            child: widget.shipIconAsset == null
+                                ? CustomPaint(painter: _BoatPainter(cCyan))
+                                : Image.asset(
+                                    widget.shipIconAsset!,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (_, _, _) => CustomPaint(
+                                      painter: _BoatPainter(cCyan),
+                                    ),
+                                  ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoyagePainter extends CustomPainter {
+  _VoyagePainter({
+    required this.progressX,
+    required this.inset,
+    required this.phase,
+  });
+  final double progressX, inset, phase;
+
+  static const _deep = Color(0xff3d7bff);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cy = size.height / 2;
+    final start = inset, end = size.width - inset;
+
+    // Mar por delante: una ola fina que corre hacia el barco.
+    final sea = Path();
+    const amp = 2.2, waveLen = 18.0;
+    final shift = phase * waveLen;
+    for (var x = progressX; x <= end; x += 2) {
+      final y = cy + amp * math.sin((x + shift) / waveLen * 2 * math.pi);
+      if (x == progressX) {
+        sea.moveTo(x, y);
+      } else {
+        sea.lineTo(x, y);
+      }
+    }
+    canvas.drawPath(
+      sea,
+      Paint()
+        ..color = Colors.white24
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4
+        ..strokeCap = StrokeCap.round,
+    );
+
+    // Lo navegado: estela en degradado con brillo.
+    if (progressX > start + 1) {
+      final rect = Rect.fromLTRB(start, cy - 2.5, progressX, cy + 2.5);
+      final rr = RRect.fromRectAndRadius(rect, const Radius.circular(3));
+      final grad = const LinearGradient(colors: [cCyan, _deep])
+          .createShader(rect);
+      canvas.drawRRect(
+        rr.inflate(2.5),
+        Paint()
+          ..shader = grad
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5)
+          ..color = Colors.white.withValues(alpha: 0.45),
+      );
+      canvas.drawRRect(rr, Paint()..shader = grad);
+
+      // Estela en V que se abre y se desvanece detrás del barco.
+      const wakeLen = 34.0;
+      final wx0 = math.max(start, progressX - wakeLen);
+      for (final side in [-1.0, 1.0]) {
+        final path = Path()..moveTo(progressX - 8, cy);
+        path.quadraticBezierTo(
+          progressX - 16,
+          cy + side * 4,
+          wx0,
+          cy + side * (6 + 1.5 * math.sin(phase * 2 * math.pi)),
+        );
+        canvas.drawPath(
+          path,
+          Paint()
+            ..shader = LinearGradient(
+              colors: [
+                Colors.white.withValues(alpha: 0.55),
+                Colors.white.withValues(alpha: 0),
+              ],
+            ).createShader(Rect.fromLTRB(wx0, 0, progressX, size.height))
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.2,
+        );
+      }
+    }
+
+    // Marcas de salida y llegada.
+    canvas.drawCircle(Offset(start, cy), 3.5, Paint()..color = cGreen);
+    canvas.drawCircle(
+      Offset(end, cy),
+      4.5,
+      Paint()
+        ..color = cOrange
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+    canvas.drawCircle(Offset(end, cy), 1.8, Paint()..color = cOrange);
+  }
+
+  @override
+  bool shouldRepaint(_VoyagePainter old) =>
+      old.progressX != progressX || old.phase != phase;
 }
