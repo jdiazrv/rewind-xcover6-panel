@@ -48,6 +48,7 @@ import 'performance_report.dart';
 import 'theme.dart';
 import 'widgets/anchor_native_view.dart';
 import 'polars.dart';
+import 'routing/boat_waves.dart';
 import 'routing/open_meteo_weather.dart';
 import 'routing/routing_page.dart';
 import 'routing/weather.dart' show CachedWeatherProvider, WeatherProvider;
@@ -5503,11 +5504,32 @@ class _DashboardState extends State<Dashboard> {
     return q;
   }();
   late final WeatherProvider _routingWeather = CachedWeatherProvider(
-    OpenMeteoWeatherProvider(quota: _openMeteoQuota),
+    ModelRouterProvider(
+      openMeteo: OpenMeteoWeatherProvider(quota: _openMeteoQuota),
+      // Modelo "GFS barco": viento, racha y ola de NOAA desde el plugin
+      // del barco conectado, sin cuota de Open-Meteo.
+      boat: BoatWeatherProvider(
+        endpoint: () => (
+          host: settings.host,
+          port: settings.port,
+          authBase64: settings.authBase64,
+        ),
+      ),
+    ),
     maxAge: const Duration(hours: 3),
     loadPersisted: _weatherDiskCache.load,
     savePersisted: (g) => unawaited(_weatherDiskCache.save(g)),
-  );
+  )
+    // Ola de respaldo (o principal, si se elige): NOAA GFS-Wave desde el
+    // plugin del barco conectado. Lee host/puerto en el momento de pedir.
+    ..boatWaves = (box, from, to) => fetchBoatWaves(
+      host: settings.host,
+      port: settings.port,
+      authBase64: settings.authBase64,
+      box: box,
+      from: from,
+      to: to,
+    );
 
   void _openRouting(BuildContext context) {
     Navigator.of(context).push(

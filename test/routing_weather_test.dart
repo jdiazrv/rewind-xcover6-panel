@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:rewind_xcover6_panel/routing/boat_waves.dart';
 import 'package:rewind_xcover6_panel/routing/open_meteo_weather.dart';
 import 'package:rewind_xcover6_panel/routing/weather.dart';
 
@@ -572,6 +573,218 @@ void main() {
         );
       },
     );
+  });
+
+  group('ola del barco (NOAA)', () {
+    Map<String, dynamic> boatJson() => {
+      'lat0': 36.5,
+      'lon0': 23.5,
+      'step': 0.25,
+      'nLat': 9,
+      'nLon': 12,
+      'times': [
+        DateTime.utc(2026, 9, 19, 3).millisecondsSinceEpoch,
+        DateTime.utc(2026, 9, 19, 6).millisecondsSinceEpoch,
+      ],
+      'height': List.filled(2 * 9 * 12, 0.6),
+      'period': List.filled(2 * 9 * 12, 4.0),
+      'direction': List.filled(2 * 9 * 12, 20.0),
+      'source': 'NOAA GFS-Wave 0,25° · ciclo 20260919 00z',
+      'cycle': DateTime.utc(2026, 9, 19).millisecondsSinceEpoch,
+      'fetchedAt': DateTime.utc(2026, 9, 19, 4).millisecondsSinceEpoch,
+    };
+
+    test('la respuesta del plugin se lee como rejilla de ola', () {
+      final g = boatWavesGridFromJson(boatJson());
+      expect(g.waveOrigin, WaveOrigin.noaa);
+      final s = g.sample(37.0, 24.0, DateTime.utc(2026, 9, 19, 4))!;
+      expect(s.waveHeightM, closeTo(0.6, 1e-6));
+      expect(s.waveDirDeg, closeTo(20, 1e-3));
+      expect(s.wavePeriodS, closeTo(4, 1e-6));
+    });
+
+    test(
+      'sin ola de Open-Meteo, la toma del barco antes que la guardada',
+      () async {
+        final inner = OpenMeteoWeatherProvider(
+          quota: OpenMeteoQuota(sleep: (_) async {}),
+          client: MockClient((request) async {
+            final count = request.url.queryParameters['latitude']!
+                .split(',')
+                .length;
+            if (request.url.host == 'marine-api.open-meteo.com') {
+              return http.Response(
+                '{"error":true,"reason":"Daily API request limit exceeded"}',
+                429,
+              );
+            }
+            return http.Response(
+              jsonEncode(
+                List.generate(
+                  count,
+                  (_) => windPoint(t2, {
+                    'ecmwf_ifs025': ([12, 12], [0, 0]),
+                  }),
+                ),
+              ),
+              200,
+            );
+          }),
+        );
+        final cache = CachedWeatherProvider(inner)
+          ..boatWaves = (box, from, to) async =>
+              boatWavesGridFromJson(boatJson());
+        final g = await cache.fetchGrid(
+          box: const GeoBox(south: 37, west: 24, north: 38, east: 25),
+          from: DateTime.utc(2026, 9, 19, 4),
+          to: DateTime.utc(2026, 9, 19, 5),
+          model: WeatherModel.ecmwf,
+        );
+        expect(g.waveOrigin, WaveOrigin.noaa);
+        expect(g.source, contains('GFS-Wave'));
+        expect(
+          g.sample(37.5, 24.5, DateTime.utc(2026, 9, 19, 4))!.waveHeightM,
+          closeTo(0.6, 1e-3),
+        );
+      },
+    );
+
+    test('con la ola del barco elegida, Open-Meteo solo pide viento', () async {
+      final hosts = <String>[];
+      final inner = OpenMeteoWeatherProvider(
+        quota: OpenMeteoQuota(sleep: (_) async {}),
+        client: MockClient((request) async {
+          hosts.add(request.url.host);
+          final count = request.url.queryParameters['latitude']!
+              .split(',')
+              .length;
+          return http.Response(
+            jsonEncode(
+              List.generate(
+                count,
+                (_) => windPoint(t2, {
+                  'ecmwf_ifs025': ([12, 12], [0, 0]),
+                }),
+              ),
+            ),
+            200,
+          );
+        }),
+      )..fetchWaves = false;
+      final cache = CachedWeatherProvider(inner)
+        ..waveSource = WaveSource.boat
+        ..boatWaves = (box, from, to) async =>
+            boatWavesGridFromJson(boatJson());
+      final g = await cache.fetchGrid(
+        box: const GeoBox(south: 37, west: 24, north: 38, east: 25),
+        from: DateTime.utc(2026, 9, 19, 4),
+        to: DateTime.utc(2026, 9, 19, 5),
+        model: WeatherModel.ecmwf,
+      );
+      expect(hosts, ['api.open-meteo.com']);
+      expect(g.hasWaveData, isTrue);
+      expect(inner.quota.usedToday, 25); // solo el viento
+    });
+  });
+
+  group('modelo GFS barco (NOAA desde el plugin)', () {
+    Map<String, dynamic> windJson() => {
+      'lat0': 36.5,
+      'lon0': 23.5,
+      'step': 0.25,
+      'nLat': 9,
+      'nLon': 12,
+      'times': [
+        for (var h = 3; h <= 6; h++)
+          DateTime.utc(2026, 9, 19, h).millisecondsSinceEpoch,
+      ],
+      // Viento del N de 10 m/s: sopla hacia el sur (v negativa).
+      'u': List.filled(4 * 9 * 12, 0.0),
+      'v': List.filled(4 * 9 * 12, -10.0),
+      'gust': List.filled(4 * 9 * 12, 14.0),
+      'source': 'NOAA GFS 0,25° · ciclo 20260919 00z',
+      'cycle': DateTime.utc(2026, 9, 19).millisecondsSinceEpoch,
+      'fetchedAt': DateTime.utc(2026, 9, 19, 4).millisecondsSinceEpoch,
+    };
+    Map<String, dynamic> wavesJson() => {
+      'lat0': 36.5,
+      'lon0': 23.5,
+      'step': 0.25,
+      'nLat': 9,
+      'nLon': 12,
+      'times': [
+        DateTime.utc(2026, 9, 19, 3).millisecondsSinceEpoch,
+        DateTime.utc(2026, 9, 19, 6).millisecondsSinceEpoch,
+      ],
+      'height': List.filled(2 * 9 * 12, 0.8),
+      'period': List.filled(2 * 9 * 12, 4.5),
+      'direction': List.filled(2 * 9 * 12, 5.0),
+      'source': 'NOAA GFS-Wave 0,25° · ciclo 20260919 00z',
+      'cycle': DateTime.utc(2026, 9, 19).millisecondsSinceEpoch,
+    };
+
+    test('m/s a nudos y dirección de donde viene', () {
+      final g = boatWindGridFromJson(windJson());
+      final s = g.sample(37.0, 24.0, DateTime.utc(2026, 9, 19, 4))!;
+      expect(s.twsKn, closeTo(19.44, 0.01));
+      expect(s.twdDeg % 360, closeTo(0, 0.01)); // del N
+      expect(s.gustKn, closeTo(27.21, 0.01));
+    });
+
+    test('viento y ola del barco, sin tocar Open-Meteo', () async {
+      final hosts = <String>[];
+      final client = MockClient((request) async {
+        hosts.add('${request.url.host}${request.url.path}');
+        if (request.url.path.endsWith('/wind')) {
+          return http.Response(jsonEncode(windJson()), 200);
+        }
+        if (request.url.path.endsWith('/waves')) {
+          return http.Response(jsonEncode(wavesJson()), 200);
+        }
+        return http.Response('no', 500);
+      });
+      final om = OpenMeteoWeatherProvider(client: client);
+      final router = ModelRouterProvider(
+        openMeteo: om,
+        boat: BoatWeatherProvider(
+          endpoint: () => (host: 'barco.local', port: 3000, authBase64: ''),
+          client: client,
+        ),
+      );
+      final cache = CachedWeatherProvider(router);
+      final g = await cache.fetchGrid(
+        box: const GeoBox(south: 37, west: 24, north: 38, east: 25),
+        from: DateTime.utc(2026, 9, 19, 4),
+        to: DateTime.utc(2026, 9, 19, 5),
+        model: WeatherModel.noaa,
+      );
+      expect(hosts, [
+        'barco.local/plugins/rewind-xcover6-panel/wind',
+        'barco.local/plugins/rewind-xcover6-panel/waves',
+      ]);
+      expect(om.quota.usedToday, 0);
+      expect(g.model, WeatherModel.noaa);
+      expect(g.source, contains('GFS'));
+      final s = g.sample(37.5, 24.5, DateTime.utc(2026, 9, 19, 4, 30))!;
+      expect(s.twsKn, closeTo(19.44, 0.01));
+      expect(s.waveHeightM, closeTo(0.8, 1e-3));
+    });
+
+    test('plugin viejo sin NOAA: error claro', () async {
+      final boat = BoatWeatherProvider(
+        endpoint: () => (host: 'barco.local', port: 3000, authBase64: ''),
+        client: MockClient((_) async => http.Response('Cannot GET', 404)),
+      );
+      await expectLater(
+        boat.fetchGrid(
+          box: const GeoBox(south: 37, west: 24, north: 38, east: 25),
+          from: DateTime.utc(2026, 9, 19, 4),
+          to: DateTime.utc(2026, 9, 19, 5),
+          model: WeatherModel.noaa,
+        ),
+        throwsA(predicate((e) => '$e'.contains('actualízalo'))),
+      );
+    });
   });
 }
 

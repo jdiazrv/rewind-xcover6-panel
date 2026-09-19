@@ -27,6 +27,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { createRecorder, DEFAULTS: HISTORY_DEFAULTS } = require('./history_recorder');
+const { createNoaaService } = require('./wave_grib');
 const { createConfigStore } = require('./config_store');
 const { collectDiagnostics } = require('./diagnostics');
 
@@ -310,6 +311,49 @@ module.exports = function (app) {
     open.get('/panel-config', (req, res) => {
       res.json(ensureConfigStore().read());
     });
+    // Ola para el routing de la app (NOAA GFS-Wave recortado a la zona):
+    // respaldo de Open-Meteo, o fuente principal si se elige en la app. Ver
+    // wave_grib.js. ?south&west&north&east (grados) &from&to (ISO o ms).
+    // Tiempo de NOAA para el routing de la app, recortado a la zona (ver
+    // wave_grib.js): /waves (GFS-Wave) y /wind (GFS 0,25°, viento a 10 m y
+    // racha). Sin cuota por punto como Open-Meteo, y una descarga sirve a
+    // todos los aparatos del barco. ?south&west&north&east (grados)
+    // &from&to (ISO o ms).
+    const noaaRoute = (kind) => async (req, res) => {
+      const q = req.query || {};
+      const num = (v) => Number(v);
+      const time = (v) => (/^\d+$/.test(String(v)) ? Number(v) : Date.parse(v));
+      const box = {
+        south: num(q.south),
+        west: num(q.west),
+        north: num(q.north),
+        east: num(q.east),
+      };
+      const from = time(q.from);
+      const to = time(q.to);
+      const bad =
+        Object.values(box).some((v) => !Number.isFinite(v)) ||
+        !Number.isFinite(from) ||
+        !Number.isFinite(to) ||
+        box.north <= box.south ||
+        box.east <= box.west ||
+        box.north - box.south > 10 ||
+        box.east - box.west > 10 ||
+        to < from ||
+        to - from > 16 * 24 * 3600000;
+      if (bad) {
+        res.status(400).json({ error: 'zona u horas no válidas (máx. 10° × 10° y 16 días)' });
+        return;
+      }
+      try {
+        const svc = ensureWaveService();
+        res.json(await (kind === 'wind' ? svc.getWind : svc.getWaves)(box, from, to));
+      } catch (e) {
+        res.status(502).json({ error: String((e && e.message) || e) });
+      }
+    };
+    open.get('/waves', noaaRoute('waves'));
+    open.get('/wind', noaaRoute('wind'));
     open.get('/panel-config/history', (req, res) => {
       res.json(ensureConfigStore().history());
     });
@@ -340,6 +384,18 @@ module.exports = function (app) {
   let recorderProviderRegistered = false;
   let recorderExitFlush = null;
   let recorderSignalFlush = null;
+
+  let waveService = null;
+  function ensureWaveService() {
+    if (!waveService) {
+      const dataDir =
+        typeof app.getDataDirPath === 'function'
+          ? app.getDataDirPath()
+          : path.join(process.cwd(), 'rewind-history');
+      waveService = createNoaaService({ dataDir, log: (m) => app.debug(m) });
+    }
+    return waveService;
+  }
 
   function startHistoryRecorder(historyOptions) {
     const dataDir =

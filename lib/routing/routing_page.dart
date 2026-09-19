@@ -21,6 +21,7 @@ import '../polars.dart';
 import '../theme.dart';
 import 'geo.dart';
 import 'land_mask.dart';
+import 'boat_waves.dart';
 import 'open_meteo_weather.dart';
 import 'routing_engine.dart';
 import 'sailing_calc.dart';
@@ -151,6 +152,18 @@ class _RoutingPageState extends State<RoutingPage> {
   _Target? _placing;
 
   WeatherModel _model = WeatherModel.ecmwf;
+  WaveSource _waveSource = WaveSource.openMeteo;
+
+  /// La fuente de ola elegida, aplicada al proveedor de la app: con la del
+  /// barco, Open-Meteo solo baja el viento (la mitad de cuota).
+  void _applyWaveSource() {
+    final w = widget.weather;
+    if (w is CachedWeatherProvider) {
+      w.waveSource = _waveSource;
+      final om = _openMeteoOf(w);
+      if (om != null) om.fetchWaves = _waveSource == WaveSource.openMeteo;
+    }
+  }
   late DateTime _departure = _nextQuarter(DateTime.now());
 
   RoutingConstraints _constraints = const RoutingConstraints();
@@ -347,6 +360,7 @@ class _RoutingPageState extends State<RoutingPage> {
   // instalaciones (se guardaba al abrir la pantalla); por defecto, ahora
   // encendido.
   static const _kPrefIsochrones = 'routing.isochronesOn';
+  static const _kPrefWaveSource = 'routing.waveSource';
 
   Future<void> _restore() async {
     try {
@@ -400,6 +414,8 @@ class _RoutingPageState extends State<RoutingPage> {
           maxGustKn: p.getDouble(_kPrefMaxGust) ?? 30,
         );
         _showIsochrones = p.getBool(_kPrefIsochrones) ?? true;
+        _waveSource = WaveSource.byName(p.getString(_kPrefWaveSource));
+        _applyWaveSource();
         _objective = RoutingObjective.values.firstWhere(
           (o) => o.name == p.getString(_kPrefObjective),
           orElse: () => RoutingObjective.fast,
@@ -444,6 +460,7 @@ class _RoutingPageState extends State<RoutingPage> {
       await p.setDouble(_kPrefComfortWeight, _constraints.comfortWeight);
       await p.setDouble(_kPrefMaxGust, _constraints.maxGustKn);
       await p.setBool(_kPrefIsochrones, _showIsochrones);
+      await p.setString(_kPrefWaveSource, _waveSource.name);
       await p.setString(_kPrefObjective, _objective.name);
     } catch (_) {}
   }
@@ -541,7 +558,12 @@ class _RoutingPageState extends State<RoutingPage> {
       });
     } catch (e) {
       if (!mounted || serial != _fetchSerial) return;
-      setState(() => _weatherError = 'No se pudo descargar el tiempo: $e');
+      final quota = '$e'.contains('cuota');
+      setState(
+        () => _weatherError =
+            'No se pudo descargar el tiempo: $e'
+            '${quota && _model != WeatherModel.noaa ? ' Prueba el modelo «GFS barco» en Ajustes: no gasta cuota.' : ''}',
+      );
     } finally {
       if (mounted && serial == _fetchSerial) {
         setState(() => _loadingWeather = false);
@@ -691,10 +713,16 @@ class _RoutingPageState extends State<RoutingPage> {
 
   /// Lo gastado hoy de la cuota gratuita de Open-Meteo (cada punto de la
   /// rejilla cuenta como una llamada).
+  static OpenMeteoWeatherProvider? _openMeteoOf(WeatherProvider w) {
+    var p = w;
+    if (p is CachedWeatherProvider) p = p.inner;
+    if (p is ModelRouterProvider) return p.openMeteo;
+    return p is OpenMeteoWeatherProvider ? p : null;
+  }
+
   String? get _quotaText {
-    var w = widget.weather;
-    if (w is CachedWeatherProvider) w = w.inner;
-    if (w is! OpenMeteoWeatherProvider) return null;
+    final w = _openMeteoOf(widget.weather);
+    if (w == null) return null;
     final used = w.quota.usedToday.round();
     return 'cuota Open-Meteo 24 h: $used / $kOpenMeteoPerDay';
   }
@@ -905,17 +933,22 @@ class _RoutingPageState extends State<RoutingPage> {
         constraints: _constraints,
         objective: _objective,
         model: _model,
+        waveSource: _waveSource,
         showIsochrones: _showIsochrones,
       ),
     );
     if (result == null) return;
-    final modelChanged = result.model != _model;
+    // Otro modelo u otra fuente de ola: hay que volver a bajar el tiempo.
+    final modelChanged =
+        result.model != _model || result.waveSource != _waveSource;
     setState(() {
       _constraints = result.constraints;
       _objective = result.objective;
       _model = result.model;
+      _waveSource = result.waveSource;
       _showIsochrones = result.showIsochrones;
     });
+    _applyWaveSource();
     // Solo se tocó la vista (isócronas): no hace falta recalcular.
     if (!result.calcChanged) {
       unawaited(_persist());
@@ -2886,6 +2919,7 @@ typedef _SettingsResult = ({
   RoutingConstraints constraints,
   RoutingObjective objective,
   WeatherModel model,
+  WaveSource waveSource,
   bool showIsochrones,
   bool calcChanged,
 });
@@ -2897,11 +2931,13 @@ class _RoutingSettingsDialog extends StatefulWidget {
     required this.constraints,
     required this.objective,
     required this.model,
+    required this.waveSource,
     required this.showIsochrones,
   });
   final RoutingConstraints constraints;
   final RoutingObjective objective;
   final WeatherModel model;
+  final WaveSource waveSource;
   final bool showIsochrones;
 
   @override
@@ -2924,6 +2960,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
   late double maxGust = widget.constraints.maxGustKn;
   late RoutingObjective objective = widget.objective;
   late WeatherModel model = widget.model;
+  late WaveSource waveSource = widget.waveSource;
   late bool showIsochrones = widget.showIsochrones;
 
   /// Algo que cambia el cálculo (no solo la vista).
@@ -2984,6 +3021,26 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
             model = m;
             calcChanged = true;
           }),
+        ),
+        const SizedBox(height: 12),
+        _groupTitle('OLA'),
+        _choice<WaveSource>(
+          values: WaveSource.values,
+          selected: waveSource,
+          label: (w) => w.label,
+          onPick: (w) => setState(() {
+            waveSource = w;
+            calcChanged = true;
+          }),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          waveSource == WaveSource.boat
+              ? 'NOAA GFS-Wave 0,25° que baja el servidor del barco: sin '
+                    'cuota por punto; Open-Meteo solo pide el viento.'
+              : 'Si Open-Meteo no da ola, se pide al barco (NOAA) y, si '
+                    'no, se usa la última guardada (≤ 12 h).',
+          style: const TextStyle(color: cMuted, fontSize: 10.5, height: 1.25),
         ),
         const SizedBox(height: 12),
         _groupTitle('MODO'),
@@ -3188,6 +3245,7 @@ class _RoutingSettingsDialogState extends State<_RoutingSettingsDialog> {
                       constraints: _result,
                       objective: objective,
                       model: model,
+                      waveSource: waveSource,
                       showIsochrones: showIsochrones,
                       calcChanged: calcChanged,
                     )),

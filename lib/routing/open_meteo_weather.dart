@@ -187,6 +187,10 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
   final DateTime Function() _now;
   final OpenMeteoQuota quota;
 
+  /// false con la ola del barco elegida: se pide solo el viento (la mitad
+  /// de cuota) y la ola la pone [CachedWeatherProvider] desde el barco.
+  bool fetchWaves = true;
+
   @override
   String get name => 'Open-Meteo';
 
@@ -253,41 +257,45 @@ class OpenMeteoWeatherProvider implements WeatherProvider {
 
     final marine = <Map<String, dynamic>>[];
     WeatherFetchException? waveError;
-    try {
-      for (var off = 0; off < lats.length; off += _kPointsPerRequest) {
-        final end0 = math.min(off + _kPointsPerRequest, lats.length);
-        final la = lats.sublist(off, end0), lo = lons.sublist(off, end0);
-        final uri = Uri.https('marine-api.open-meteo.com', '/v1/marine', {
-          ..._positionParams(la, lo),
-          'hourly': 'wave_height,wave_direction,wave_period',
-          'timezone': 'GMT',
-          'start_hour': _hourParam(start),
-          'end_hour': _hourParam(end),
-        });
-        final weight = requestWeight(
-          locations: la.length,
-          variables: 3,
-          span: span,
-        );
-        await quota.reserve(weight);
-        List<Map<String, dynamic>> m;
-        try {
-          m = await _get(uri);
-        } on WeatherFetchException catch (e) {
-          // Límite por MINUTO: basta esperar uno y reintentar una vez.
-          if (!e.message.toLowerCase().contains('minut')) rethrow;
-          await quota.reserve(weight);
-          m = await _get(uri);
-        }
-        if (m.length != la.length) {
-          throw WeatherFetchException(
-            'Open-Meteo Marine devolvió ${m.length} posiciones de ${la.length}',
+    if (!fetchWaves) {
+      waveError = WeatherFetchException('ola elegida del barco');
+    } else {
+      try {
+        for (var off = 0; off < lats.length; off += _kPointsPerRequest) {
+          final end0 = math.min(off + _kPointsPerRequest, lats.length);
+          final la = lats.sublist(off, end0), lo = lons.sublist(off, end0);
+          final uri = Uri.https('marine-api.open-meteo.com', '/v1/marine', {
+            ..._positionParams(la, lo),
+            'hourly': 'wave_height,wave_direction,wave_period',
+            'timezone': 'GMT',
+            'start_hour': _hourParam(start),
+            'end_hour': _hourParam(end),
+          });
+          final weight = requestWeight(
+            locations: la.length,
+            variables: 3,
+            span: span,
           );
+          await quota.reserve(weight);
+          List<Map<String, dynamic>> m;
+          try {
+            m = await _get(uri);
+          } on WeatherFetchException catch (e) {
+            // Límite por MINUTO: basta esperar uno y reintentar una vez.
+            if (!e.message.toLowerCase().contains('minut')) rethrow;
+            await quota.reserve(weight);
+            m = await _get(uri);
+          }
+          if (m.length != la.length) {
+            throw WeatherFetchException(
+              'Open-Meteo Marine devolvió ${m.length} posiciones de ${la.length}',
+            );
+          }
+          marine.addAll(m);
         }
-        marine.addAll(m);
+      } on WeatherFetchException catch (e) {
+        waveError = e;
       }
-    } on WeatherFetchException catch (e) {
-      waveError = e;
     }
 
     final grid = buildOpenMeteoGrid(
