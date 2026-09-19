@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -2274,6 +2275,30 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     );
   }
 
+  Future<String> _reportVesselName() async {
+    if (widget.settings.demoMode) return 'Barco';
+    try {
+      final settings = widget.settings;
+      final uri = Uri.http(
+        '${_resolvedSkHost ?? settings.host}:${settings.port}',
+        '/signalk/v1/api/vessels/self/name',
+      );
+      final response = await http.get(
+        uri,
+        headers: settings.authBase64.isEmpty
+            ? {}
+            : {'Authorization': 'Basic ${settings.authBase64}'},
+      ).timeout(const Duration(seconds: 8));
+      if (response.statusCode == 200) {
+        final name = jsonDecode(response.body);
+        if (name is String && name.trim().isNotEmpty) return name.trim();
+      }
+    } catch (_) {
+      // The report can still be exported if the server is unavailable.
+    }
+    return 'Barco';
+  }
+
   Future<Uint8List> _buildReportPdf() async {
     final showNavigation = widget.kind != PerformanceReportKind.windAndSailing;
     final showWind = widget.kind != PerformanceReportKind.navigation;
@@ -2290,6 +2315,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twsPeak = _series['twsPeak'] ?? [];
     final interval = parseAggEvery(r.agg);
     final generatedAt = DateTime.now();
+    final vesselName = await _reportVesselName();
 
     final rangeDur = widget.end.difference(widget.start);
     final navigationStats = calculateReportNavigationStats(sog, interval);
@@ -2344,7 +2370,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
         pw.Text(
-          '${widget.kind.label} - REWIND',
+          '${widget.kind.label} - $vesselName',
           style: const pw.TextStyle(
             color: pdfText,
             fontSize: 16,
