@@ -1620,6 +1620,33 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
   // resolution can otherwise flip between individual HTTP requests.
   String? _resolvedSkHost;
 
+  /// Nombre del barco según su servidor Signal K (Ajustes del servidor ›
+  /// Vessel › Name), para el título y el nombre del archivo del PDF.
+  String? _vesselName;
+
+  String get _fileBase {
+    final n = (_vesselName ?? 'barco')
+        .toLowerCase()
+        .replaceAll(RegExp(r'[áàä]'), 'a')
+        .replaceAll(RegExp(r'[éèë]'), 'e')
+        .replaceAll(RegExp(r'[íìï]'), 'i')
+        .replaceAll(RegExp(r'[óòö]'), 'o')
+        .replaceAll(RegExp(r'[úùü]'), 'u')
+        .replaceAll('ñ', 'n')
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final d = widget.start.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${n.isEmpty ? 'barco' : n}_${d.year}-${two(d.month)}-${two(d.day)}';
+  }
+
+  String get _pdfFileName => switch (widget.kind) {
+    PerformanceReportKind.navigation => '${_fileBase}_navegacion.pdf',
+    PerformanceReportKind.windAndSailing =>
+      '${_fileBase}_viento_rendimiento_vela.pdf',
+    PerformanceReportKind.complete => '${_fileBase}_informe_completo.pdf',
+  };
+
   MetricDef get _engineRpmMetric {
     final configured = widget.settings.sensorConfig.enginePath;
     final path = configured != null && configured.endsWith('.runTime')
@@ -1783,6 +1810,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       if (!widget.settings.demoMode) {
         _resolvedSkHost = await resolveHostOnce(widget.settings.host);
       }
+      _vesselName = await _reportVesselName();
       final includeNavigation =
           widget.kind != PerformanceReportKind.windAndSailing;
       final includeSailing = widget.kind != PerformanceReportKind.navigation;
@@ -2121,12 +2149,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
               canDebug: false,
               allowPrinting: true,
               allowSharing: true,
-              pdfFileName: switch (widget.kind) {
-                PerformanceReportKind.navigation => 'rewind_navegacion.pdf',
-                PerformanceReportKind.windAndSailing =>
-                  'rewind_viento_rendimiento_vela.pdf',
-                PerformanceReportKind.complete => 'rewind_informe_completo.pdf',
-              },
+              pdfFileName: _pdfFileName,
               build: (_) => _buildReportPdf(),
             ),
     );
@@ -2138,12 +2161,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
       if (!context.mounted) return;
       await exportPdfReport(
         bytes: bytes,
-        filename: switch (widget.kind) {
-          PerformanceReportKind.navigation => 'rewind_navegacion.pdf',
-          PerformanceReportKind.windAndSailing =>
-            'rewind_viento_rendimiento_vela.pdf',
-          PerformanceReportKind.complete => 'rewind_informe_completo.pdf',
-        },
+        filename: _pdfFileName,
         subject: widget.kind.label,
       );
     } catch (e) {
@@ -2315,7 +2333,7 @@ class _PerformanceReportPageState extends State<PerformanceReportPage> {
     final twsPeak = _series['twsPeak'] ?? [];
     final interval = parseAggEvery(r.agg);
     final generatedAt = DateTime.now();
-    final vesselName = await _reportVesselName();
+    final vesselName = _vesselName ?? await _reportVesselName();
 
     final rangeDur = widget.end.difference(widget.start);
     final navigationStats = calculateReportNavigationStats(sog, interval);
