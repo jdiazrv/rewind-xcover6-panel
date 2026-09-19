@@ -28,6 +28,13 @@ const kHeadingStepDeg = 5.0;
 const kSanityAfterHours = 2.0;
 const kMinUsefulVmgKn = 1.0;
 
+/// Zona de puerto: a menos de esto de una salida o llegada pegada a tierra
+/// (un puerto, una cala), no se aplica la máscara de costa. Es de escala
+/// media (1:50M): un puerto cae a menudo "en tierra" o dentro del margen,
+/// y sin esto la ruta no podía salir o se quedaba rondando la llegada sin
+/// poder terminar (atascada horas al final). Reportado en vivo 2026-09-19.
+const kPortApproachNm = 1.5;
+
 /// Poda clásica de isócronas: sectores de este ancho vistos DESDE LA
 /// SALIDA de la pierna, quedándose en cada uno con el punto más lejano.
 const kPruneSectorDeg = 2.0;
@@ -723,7 +730,7 @@ Iterable<_LegResult?> _routeLegSteps({
           legBox.east,
           0.05,
         );
-  final ctx = _LegContext(
+  final ctx0 = _LegContext(
     req: req,
     legIndex: legIndex,
     legLand: legLand,
@@ -737,6 +744,16 @@ Iterable<_LegResult?> _routeLegSteps({
         ? req.constraints.maxTimeAbovePreferred.inMinutes
         : null,
   );
+  final ctx = ctx0;
+  if (land != null && !land.isEmpty) {
+    final m = req.constraints.minimumCoastDistanceNm;
+    ctx.startNearLand =
+        land.isLand(start.lat, start.lon) ||
+        land.nearLand(start.lat, start.lon, m);
+    ctx.targetNearLand =
+        land.isLand(target.lat, target.lon) ||
+        land.nearLand(target.lat, target.lon, m);
+  }
 
   // El nodo de salida "lleva" el último tramo de la pierna anterior (para
   // contar como maniobra el virar justo en la vía) y un bordo neutro.
@@ -754,6 +771,15 @@ Iterable<_LegResult?> _routeLegSteps({
         ..score = directNm;
   var frontier = <_Node>[root];
   _Node best = root;
+  // Para detectar una búsqueda atascada: cuándo mejoró por última vez la
+  // distancia al destino.
+  var bestSeenNm = directNm;
+  var lastImproveStep = 0;
+  // Y cuándo creció por última vez el abanico (lo más lejos llegado desde
+  // la salida): en un rodeo largo la ruta se aleja antes de acercarse,
+  // pero el abanico sigue creciendo; atascada, no.
+  var bestReachNm = 0.0;
+  var lastReachStep = 0;
 
   for (var step = 0; step < maxSteps; step++) {
     // Progreso = cuánto se ha acercado ya la mejor isócrona al destino.
@@ -791,14 +817,16 @@ Iterable<_LegResult?> _routeLegSteps({
           final h = toTarget <= reach
               ? toTarget / req.constraints.motorSpeedKn
               : stepH;
-          if (!_blockedByLand(
-            legLand,
-            node.lat,
-            node.lon,
-            bearing,
-            req.constraints.motorSpeedKn * h,
-            req.constraints.minimumCoastDistanceNm,
-          )) {
+          final runNm = req.constraints.motorSpeedKn * h;
+          if (!_checkLand(ctx, node.lat, node.lon, bearing, runNm) ||
+              !_blockedByLand(
+                legLand,
+                node.lat,
+                node.lon,
+                bearing,
+                runNm,
+                req.constraints.minimumCoastDistanceNm,
+              )) {
             final child = _stepNode(
               ctx,
               node,
@@ -904,13 +932,45 @@ Iterable<_LegResult?> _routeLegSteps({
     // de pasos. Se mide lo avanzado y no lo acercado al destino: un rodeo
     // (un istmo, una zona de rachas) pasa horas sin acercarse y es
     // correcto. Reportado en vivo 2026-09-19.
+    if (best.remainingNm < bestSeenNm - 0.2) {
+      bestSeenNm = best.remainingNm;
+      lastImproveStep = step;
+    }
+    var reachNm = directNm - best.remainingNm;
+    for (final n in frontier) {
+      final d = distanceNm(start.lat, start.lon, n.lat, n.lon);
+      if (d > reachNm) reachNm = d;
+    }
+    if (reachNm > bestReachNm + 0.5) {
+      bestReachNm = reachNm;
+      lastReachStep = step;
+    }
+    final stalled = step - lastImproveStep;
+    final fanStalled = step - lastReachStep;
+    // Atascado cerca del final (1 h sin acercarse estando a menos de 3 M)
+    // o, lejos, 12 h sin acercarse y sin que crezca el abanico (un rodeo
+    // largo pasa horas sin acercarse; lo absurdo lejos ya lo para el freno
+    // de media < 1 kn):
+    // se para y se dice, en vez de seguir hasta el techo de pasos (llegó a
+    // verse "salida + 12 h" rondando la llegada sin poder terminar).
+    if ((best.remainingNm < 3 && stalled >= 4) ||
+        (stalled >= 48 && fanStalled >= 8)) {
+      final near = best.remainingNm < 3;
+      yield _LegResult(
+        _backtrack(best),
+        false,
+        near
+            ? 'atascado a ${best.remainingNm.toStringAsFixed(1)} M de la llegada: '
+                  'no encuentra cómo terminar. Si está dentro de un puerto o '
+                  'pegada a la costa, ponla en agua libre, fuera de la bocana '
+                  '(la costa del cálculo es aproximada)'
+            : 'sin acercarse al destino en ${_minutesText(stalled * kIsochroneStepMinutes)}: '
+                  'no encuentra paso (costa, límites o calma)',
+      );
+      return;
+    }
     final elapsedH = (step + 1) * stepH;
     if (elapsedH >= kSanityAfterHours) {
-      var reachNm = directNm - best.remainingNm;
-      for (final n in frontier) {
-        final d = distanceNm(start.lat, start.lon, n.lat, n.lon);
-        if (d > reachNm) reachNm = d;
-      }
       final avg = reachNm / elapsedH;
       if (avg < kMinUsefulVmgKn) {
         yield _LegResult(
@@ -1001,6 +1061,7 @@ class _LegContext {
   final double stepH;
   final ({double lat, double lon}) start;
   final GeoBox legBox;
+  bool startNearLand = false, targetNearLand = false;
   final ({double lat, double lon}) target;
   final double targetBearing;
   final double comfortWeight;
@@ -1020,6 +1081,28 @@ class _LegContext {
 /// [distNm] millas al rumbo [headingDeg] pisa tierra o se queda a menos
 /// del margen de seguridad? Sin máscara (null o vacía) nunca bloquea:
 /// la ruta se calcula igual, solo sin evitar la costa.
+bool _inPortZone(_LegContext ctx, double lat, double lon) =>
+    (ctx.startNearLand &&
+        distanceNm(lat, lon, ctx.start.lat, ctx.start.lon) <=
+            kPortApproachNm) ||
+    (ctx.targetNearLand &&
+        distanceNm(lat, lon, ctx.target.lat, ctx.target.lon) <=
+            kPortApproachNm);
+
+/// ¿Hay que mirar la costa en este tramo? No si va entero dentro de la
+/// zona de puerto de una salida o llegada pegada a tierra.
+bool _checkLand(
+  _LegContext ctx,
+  double lat,
+  double lon,
+  double headingDeg,
+  double distNm,
+) {
+  if (!_inPortZone(ctx, lat, lon)) return true;
+  final end = destinationNm(lat, lon, headingDeg, distNm);
+  return !_inPortZone(ctx, end.lat, end.lon);
+}
+
 bool _blockedByLand(
   LandMask? land,
   double startLat,
@@ -1121,14 +1204,16 @@ _Node? _headingCandidate(
     thisStepH = need;
   }
 
-  if (_blockedByLand(
-    ctx.legLand,
-    node.lat,
-    node.lon,
-    headingDeg,
-    stw * math.max(0, thisStepH - lossH),
-    c.minimumCoastDistanceNm,
-  )) {
+  final runNm = stw * math.max(0, thisStepH - lossH);
+  if (_checkLand(ctx, node.lat, node.lon, headingDeg, runNm) &&
+      _blockedByLand(
+        ctx.legLand,
+        node.lat,
+        node.lon,
+        headingDeg,
+        runNm,
+        c.minimumCoastDistanceNm,
+      )) {
     return null;
   }
 

@@ -781,6 +781,69 @@ void main() {
     });
   });
 
+  group('llegada o salida en puerto', () {
+    test(
+      'llegada "en tierra" en la costa aproximada: termina en la bocana',
+      () {
+        // Cabo de tierra cuyo borde toca justo la llegada (como un puerto que
+        // en la costa 1:50M cae dentro de tierra).
+        final land = LandMask([
+          const LandPolygon(
+            [(24.30, 37.30), (24.50, 37.30), (24.50, 37.50), (24.30, 37.50)],
+            [],
+            (24.30, 37.30, 24.50, 37.50),
+          ),
+        ]);
+        final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 20);
+        final r = computeRoute(
+          RouteRequest(
+            waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.305)],
+            departure: departure,
+            grid: grid,
+            polar: dehler47,
+            polarFactorPercent: 100,
+            constraints: const RoutingConstraints(),
+            objective: RoutingObjective.fast,
+            land: land,
+          ),
+        );
+        expect(r.complete, isTrue, reason: r.warning);
+        expect(r.totalDuration.inHours, lessThan(4));
+      },
+    );
+
+    test('si de verdad no se puede llegar, para pronto y lo dice', () {
+      // Llegada en una laguna cerrada: tierra alrededor a más de la zona
+      // de puerto (1,5 M), sin paso.
+      final land = LandMask([
+        const LandPolygon(
+          [(24.20, 37.30), (24.40, 37.30), (24.40, 37.50), (24.20, 37.50)],
+          [
+            [(24.28, 37.38), (24.32, 37.38), (24.32, 37.42), (24.28, 37.42)],
+          ],
+          (24.20, 37.30, 24.40, 37.50),
+        ),
+      ]);
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 40);
+      final r = computeRoute(
+        RouteRequest(
+          waypoints: [(lat: 37.4, lon: 24.0), (lat: 37.4, lon: 24.30)],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+          land: land,
+        ),
+      );
+      expect(r.complete, isFalse);
+      expect(r.warning, anyOf(contains('atascado'), contains('costa')));
+      // No sigue horas y horas rondando.
+      expect(r.totalDuration.inHours, lessThan(4));
+    });
+  });
+
   group('freno de cordura', () {
     test('si la media hacia el destino es ridícula, para y lo explica', () {
       // Barco "cansadísimo" (10 % de la polar), sin motor, 30 M: a menos
