@@ -407,6 +407,31 @@ Iterable<Object?> _routeSteps(
   final totalLegs = req.waypoints.length - 1;
   RouteSegment? carry; // último tramo de la pierna anterior (maniobras)
 
+  // El progreso se reparte entre piernas por su distancia directa (una vía
+  // a 5 M y otra a 60 M no pesan lo mismo), y nunca retrocede.
+  final legNm = [
+    for (var i = 0; i < totalLegs; i++)
+      distanceNm(
+        req.waypoints[i].lat,
+        req.waypoints[i].lon,
+        req.waypoints[i + 1].lat,
+        req.waypoints[i + 1].lon,
+      ),
+  ];
+  final totalNm = legNm.fold(0.0, (a, b) => a + b);
+  var doneNm = 0.0;
+  var shown = 0.0;
+  void report(int leg, double legFrac) {
+    if (onProgress == null) return;
+    final f = totalNm <= 0
+        ? (leg + legFrac) / totalLegs
+        : (doneNm + legFrac * legNm[leg]) / totalNm;
+    if (f > shown) {
+      shown = f.clamp(0.0, 1.0);
+      onProgress(shown);
+    }
+  }
+
   for (var leg = 0; leg < totalLegs; leg++) {
     final target = req.waypoints[leg + 1];
     _LegResult? legResult;
@@ -417,9 +442,7 @@ Iterable<Object?> _routeSteps(
       target: target,
       req: req,
       previous: carry,
-      onProgress: onProgress == null
-          ? null
-          : (legFrac) => onProgress((leg + legFrac) / totalLegs),
+      onProgress: onProgress == null ? null : (f) => report(leg, f),
       onIsochrone: onIsochrone,
     )) {
       if (e == null) {
@@ -429,6 +452,7 @@ Iterable<Object?> _routeSteps(
       }
     }
     final result = legResult!;
+    doneNm += legNm[leg];
     segments.addAll(result.segments);
     if (result.segments.isNotEmpty) {
       pos = (
@@ -447,6 +471,7 @@ Iterable<Object?> _routeSteps(
     reachedIndex = leg + 1;
   }
 
+  if (onProgress != null && shown < 1) onProgress(1.0);
   yield RouteResult(
     segments: segments,
     waypoints: req.waypoints,
@@ -699,7 +724,10 @@ Iterable<_LegResult?> _routeLegSteps({
   _Node best = root;
 
   for (var step = 0; step < maxSteps; step++) {
-    onProgress?.call(step / maxSteps);
+    // Progreso = cuánto se ha acercado ya la mejor isócrona al destino.
+    // Antes era paso / techo de pasos, y ese techo es 2,2 veces el peor
+    // caso: la barra se arrastraba y luego saltaba al 100 %.
+    onProgress?.call((1 - best.remainingNm / directNm).clamp(0.0, 0.99));
     if (step > 0) yield null;
     final next = <int, _Node>{}; // clave = sector de poda
     // Llegada exacta: si desde algún nodo el destino se alcanza DENTRO de

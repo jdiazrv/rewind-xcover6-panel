@@ -391,16 +391,21 @@ void main() {
       await t.tap(find.text('6 h'));
       await t.tap(find.text('12 h'));
       await t.pump();
-      await t.tap(find.text('Calcular'));
+      expect(find.textContaining('3 salidas'), findsOneWidget);
+      await t.tap(find.text('Comparar salidas'));
+      await t.pump();
+      // Mientras calcula, la travesía sustituye a las opciones.
+      expect(find.byType(RouteProgressBar), findsOneWidget);
+      expect(find.text('Detener'), findsOneWidget);
       for (var i = 0; i < 60; i++) {
         await t.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 100)),
         );
         await t.pump();
-        if (find.textContaining('→').evaluate().length >= 3) break;
+        if (find.text('Volver a comparar').evaluate().isNotEmpty) break;
       }
-      // 0, +6 y +12 h.
-      expect(find.textContaining('→'), findsNWidgets(3));
+      // 0, +6 y +12 h (más el resumen de opciones, que también lleva →).
+      expect(find.textContaining('→'), findsNWidgets(4));
       expect(find.text('MÁS RÁPIDA'), findsOneWidget);
       expect(t.takeException(), isNull);
       await t.tap(find.textContaining('→').last);

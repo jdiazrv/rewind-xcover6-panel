@@ -239,7 +239,12 @@ Map<String, Duration> reportEngineRpmBands(
   List<GraphPoint> rpm,
   Duration expectedStep,
 ) {
-  const names = ['1600 a 1800', '1800 a 2000', '2000 a 2200', '2200 a 2400', 'mas de 2400'];
+  // La primera franja recoge el motor en marcha a pocas vueltas (ralentí,
+  // maniobras de puerto): sin ella, ese tiempo contaba en "Tiempo a motor"
+  // pero en ninguna franja, y la suma no cuadraba con el total (31 min de
+  // motor frente a 8 min por régimen en REWIND, 2026-09-19). Mismo umbral
+  // de "en marcha" (200 rpm) que [reportEngineRunningDuration].
+  const names = ['menos de 1600', '1600 a 1800', '1800 a 2000', '2000 a 2200', '2200 a 2400', 'mas de 2400'];
   final out = {for (final name in names) name: Duration.zero};
   if (rpm.length < 2) return out;
   final points = rpm.where((p) => p.value.isFinite && p.value >= 0).toList()
@@ -252,7 +257,7 @@ Map<String, Duration> reportEngineRpmBands(
     final dt = points[i].time.difference(points[i - 1].time);
     if (dt <= Duration.zero || dt > maxGap) continue;
     final value = (points[i - 1].value + points[i].value) / 2;
-    final name = value >= 2400 ? 'mas de 2400' : value >= 2200 ? '2200 a 2400' : value >= 2000 ? '2000 a 2200' : value >= 1800 ? '1800 a 2000' : value >= 1600 ? '1600 a 1800' : null;
+    final name = value >= 2400 ? 'mas de 2400' : value >= 2200 ? '2200 a 2400' : value >= 2000 ? '2000 a 2200' : value >= 1800 ? '1800 a 2000' : value >= 1600 ? '1600 a 1800' : value >= 200 ? 'menos de 1600' : null;
     if (name != null) seconds[name] = seconds[name]! + dt.inMilliseconds / 1000;
   }
   return {for (final name in names) name: Duration(seconds: seconds[name]!.round())};

@@ -1609,6 +1609,14 @@ class _RoutingPageState extends State<RoutingPage> {
                     _destination != null &&
                     widget.polar != null)
                   _recalculateButton(),
+                // En un teléfono, al final de la fila de abajo quedaba fuera
+                // de pantalla: aquí arriba siempre se ve.
+                if (_canPlan && _narrow)
+                  _smallAction(
+                    Icons.event_note,
+                    'Planificar salida',
+                    _openPlanner,
+                  ),
                 if (_route != null && !_showSummary)
                   _smallAction(Icons.summarize_outlined, 'Resumen', () {
                     setState(() {
@@ -1643,10 +1651,7 @@ class _RoutingPageState extends State<RoutingPage> {
                     _smallAction(Icons.swap_horiz, 'Invertir', _swapEnds),
                   _departureChip(),
                   const SizedBox(width: 8),
-                  if (_origin != null &&
-                      _destination != null &&
-                      widget.polar != null &&
-                      !_tooFar)
+                  if (_canPlan && !_narrow)
                     _labeledAction(
                       Icons.event_note,
                       'Planificar salida',
@@ -1692,6 +1697,12 @@ class _RoutingPageState extends State<RoutingPage> {
   /// pulsar aquí. Resaltado en cian mientras la ruta está desactualizada
   /// (algo cambió desde el último cálculo); en gris si ya está al día,
   /// pero sigue sirviendo para forzar un recálculo.
+  bool get _canPlan =>
+      _origin != null &&
+      _destination != null &&
+      widget.polar != null &&
+      !_tooFar;
+
   bool get _narrow => MediaQuery.sizeOf(context).width < 560;
 
   Widget _recalculateButton() => Padding(
@@ -3284,6 +3295,9 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
   /// barra avanza de forma continua, no a saltos de una salida entera.
   double _current = 0;
   DateTime? _currentDep;
+
+  /// "Detener": acaba la salida en curso y no empieza más.
+  bool _stopRequested = false;
   bool _fetching = false;
   Timer? _repaint;
 
@@ -3317,11 +3331,9 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
   static const _routeHours = _kForecastHours;
 
   Future<void> _run() async {
-    final deps = [
-      for (var h = 0; h <= _spanH; h += _everyH)
-        widget.base.add(Duration(hours: h)),
-    ];
+    final deps = _departures;
     setState(() {
+      _stopRequested = false;
       _running = true;
       _error = null;
       _rows.clear();
@@ -3337,7 +3349,7 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
       );
       if (mounted) setState(() => _fetching = false);
       for (final dep in deps) {
-        if (!mounted) return;
+        if (!mounted || _stopRequested) break;
         setState(() {
           _currentDep = dep;
           _current = 0;
@@ -3438,68 +3450,16 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
             ),
             const Divider(height: 1, color: Colors.white12),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const Text(
-                    'Cada',
-                    style: TextStyle(color: cMuted, fontSize: 12),
-                  ),
-                  for (final h in const [1, 2, 3, 6])
-                    _pill(
-                      '$h h',
-                      _everyH == h,
-                      () => setState(() => _everyH = h),
-                    ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'durante',
-                    style: TextStyle(color: cMuted, fontSize: 12),
-                  ),
-                  for (final h in const [12, 24, 48])
-                    _pill(
-                      '$h h',
-                      _spanH == h,
-                      () => setState(() => _spanH = h),
-                    ),
-                  const SizedBox(width: 8),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: cCyan,
-                      foregroundColor: Colors.black,
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onPressed: _running ? null : _run,
-                    icon: const Icon(Icons.play_arrow, size: 16),
-                    label: Text(
-                      _running ? '${_rows.length}/$_total' : 'Calcular',
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ],
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+              // Mientras calcula, las opciones dejan sitio a la travesía:
+              // lo que importa en ese momento es cuánto falta.
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                child: _running ? _progressPanel() : _optionsPanel(),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-              child: Text(
-                'Desde ${_RoutingPageState._formatLocal(widget.base)}, con el modelo y los '
-                'ajustes actuales. Toca una salida para usarla.',
-                style: const TextStyle(color: cMuted, fontSize: 10.5),
-              ),
-            ),
-            if (_running)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
-                child: RouteProgressBar(
-                  progress: _overall,
-                  label: 'Probando salidas',
-                  detail: _progressDetail,
-                  shipIconAsset: widget.shipIconAsset,
-                ),
-              ),
+            if (_rows.isNotEmpty)
+              const Divider(height: 1, color: Colors.white12),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
@@ -3524,26 +3484,173 @@ class _DeparturePlannerDialogState extends State<_DeparturePlannerDialog> {
     );
   }
 
-  Widget _pill(String t, bool on, VoidCallback onTap) => InkWell(
-    borderRadius: BorderRadius.circular(7),
-    onTap: _running ? null : onTap,
-    child: Container(
-      height: 28,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: on ? cCyan : cPanel2,
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: on ? cCyan : Colors.white24),
+  /// Salidas que se van a probar con las opciones elegidas.
+  List<DateTime> get _departures => [
+    for (var h = 0; h <= _spanH; h += _everyH)
+      widget.base.add(Duration(hours: h)),
+  ];
+
+  Widget _optionsPanel() {
+    final deps = _departures;
+    final narrow = MediaQuery.sizeOf(context).width < 560;
+    final summary = Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '${deps.length} salidas',
+            style: const TextStyle(color: cText, fontWeight: FontWeight.w800),
+          ),
+          TextSpan(
+            text:
+                '  ·  ${_RoutingPageState._formatLocal(deps.first)} → '
+                '${_RoutingPageState._formatLocal(deps.last)}',
+          ),
+        ],
       ),
-      alignment: Alignment.center,
-      child: Text(
-        t,
-        style: TextStyle(
-          color: on ? Colors.black : cText,
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
+      style: const TextStyle(color: cMuted, fontSize: 11.5),
+      maxLines: 2,
+    );
+    final button = FilledButton.icon(
+      style: FilledButton.styleFrom(
+        backgroundColor: cCyan,
+        foregroundColor: Colors.black,
+        minimumSize: const Size(0, 38),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+      ),
+      onPressed: _run,
+      icon: const Icon(Icons.play_arrow_rounded, size: 20),
+      label: Text(
+        _rows.isEmpty ? 'Comparar salidas' : 'Volver a comparar',
+        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+      ),
+    );
+    return Column(
+      key: const ValueKey('options'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _optionRow(
+          'Probar cada',
+          _segmented<int>(
+            const [1, 2, 3, 6],
+            _everyH,
+            (h) => '$h h',
+            (h) => setState(() => _everyH = h),
+          ),
+        ),
+        const SizedBox(height: 8),
+        _optionRow(
+          'Durante',
+          _segmented<int>(
+            const [12, 24, 48],
+            _spanH,
+            (h) => '$h h',
+            (h) => setState(() => _spanH = h),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (narrow) ...[
+          summary,
+          const SizedBox(height: 8),
+          button,
+        ] else
+          Row(
+            children: [
+              Expanded(child: summary),
+              const SizedBox(width: 12),
+              button,
+            ],
+          ),
+      ],
+    );
+  }
+
+  Widget _progressPanel() => Container(
+    key: const ValueKey('progress'),
+    padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+    decoration: BoxDecoration(
+      color: cPanel2,
+      borderRadius: BorderRadius.circular(11),
+      border: Border.all(color: cCyan.withValues(alpha: 0.35)),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: RouteProgressBar(
+            progress: _overall,
+            label: 'Probando salidas',
+            detail: _progressDetail,
+            shipIconAsset: widget.shipIconAsset,
+          ),
+        ),
+        const SizedBox(width: 6),
+        TextButton(
+          onPressed: _stopRequested
+              ? null
+              : () => setState(() => _stopRequested = true),
+          child: Text(_stopRequested ? 'Parando…' : 'Detener'),
+        ),
+      ],
+    ),
+  );
+
+  Widget _optionRow(String label, Widget control) => Row(
+    children: [
+      SizedBox(
+        width: 92,
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: cText,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+          ),
         ),
       ),
+      Expanded(child: control),
+    ],
+  );
+
+  /// El mismo control segmentado que Ajustes: pastillas del mismo ancho.
+  Widget _segmented<T>(
+    List<T> values,
+    T selected,
+    String Function(T) label,
+    void Function(T) onPick,
+  ) => Container(
+    height: 34,
+    decoration: BoxDecoration(
+      color: cPanel2,
+      borderRadius: BorderRadius.circular(9),
+      border: Border.all(color: Colors.white12),
+    ),
+    child: Row(
+      children: [
+        for (final v in values)
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => onPick(v),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                margin: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: v == selected ? cCyan : Colors.transparent,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  label(v),
+                  style: TextStyle(
+                    color: v == selected ? Colors.black : cText,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     ),
   );
 
@@ -3681,27 +3788,31 @@ class _RouteProgressBarState extends State<RouteProgressBar>
         children: [
           Row(
             children: [
-              Text(
-                widget.label,
-                style: const TextStyle(
-                  color: cText,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    text: widget.label,
+                    style: const TextStyle(
+                      color: cText,
+                      fontWeight: FontWeight.w800,
+                    ),
+                    children: [
+                      if (widget.detail != null)
+                        TextSpan(
+                          text: '  ${widget.detail}',
+                          style: const TextStyle(
+                            color: cMuted,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
                 ),
               ),
-              if (widget.detail != null) ...[
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    widget.detail!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: cMuted, fontSize: 10.5),
-                  ),
-                ),
-              ] else
-                const Spacer(),
-              if (widget.detail != null) const Spacer(),
+              const SizedBox(width: 6),
               Text(
                 '${(p * 100).round()} %',
                 style: const TextStyle(

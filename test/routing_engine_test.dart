@@ -681,6 +681,58 @@ void main() {
     });
   });
 
+  group('progreso', () {
+    test('avanza de forma pareja hasta el 100 %, sin saltos al final', () {
+      final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
+      for (final (brg, nm) in [(90.0, 30.0), (0.0, 18.0)]) {
+        final dest = destinationNm(37.4, 24.0, brg, nm);
+        final progress = <double>[];
+        computeRoute(
+          request(
+            grid,
+            (lat: dest.lat, lon: dest.lon),
+            constraints: const RoutingConstraints(allowMotor: false),
+          ),
+          onProgress: progress.add,
+        );
+        expect(progress.last, 1.0);
+        var maxJump = 0.0;
+        for (var i = 1; i < progress.length; i++) {
+          expect(progress[i], greaterThanOrEqualTo(progress[i - 1]));
+          maxJump = math.max(maxJump, progress[i] - progress[i - 1]);
+        }
+        // Antes (paso / techo de pasos) el último salto era de más del 50 %.
+        expect(maxJump, lessThan(0.2), reason: 'rumbo $brg');
+      }
+    });
+
+    test('con vías, cada tramo pesa según su distancia', () {
+      final grid = flatGrid(twsKn: 14, twdDeg: 0, hours: 30);
+      final a = destinationNm(37.4, 24.0, 90, 2); // tramo corto
+      final b = destinationNm(a.lat, a.lon, 90, 18); // tramo largo
+      final progress = <double>[];
+      computeRoute(
+        RouteRequest(
+          waypoints: [
+            (lat: 37.4, lon: 24.0),
+            (lat: a.lat, lon: a.lon),
+            (lat: b.lat, lon: b.lon),
+          ],
+          departure: departure,
+          grid: grid,
+          polar: dehler47,
+          polarFactorPercent: 100,
+          constraints: const RoutingConstraints(),
+          objective: RoutingObjective.fast,
+        ),
+        onProgress: progress.add,
+      );
+      // Al acabar el tramo corto se lleva ~10 %, no el 50 %.
+      expect(progress.where((p) => p > 0.15 && p < 0.45), isNotEmpty);
+      expect(progress.last, 1.0);
+    });
+  });
+
   group('webapp (sin isolates)', () {
     test('por trozos da lo mismo que el síncrono, con progreso e isócronas', () async {
       final grid = flatGrid(twsKn: 10, twdDeg: 0, hours: 30);
